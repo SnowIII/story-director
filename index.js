@@ -48,7 +48,7 @@ const ID = 'story-director';
 const PLUGIN_WORLD = '故事导演';
 const SCHEMA_VERSION = 1;
 
-/** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'、ntr淫化用自己的两个，互不占用。 */
+/** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
     main: 'story-director-main',
     threads: 'story-director-threads',
@@ -856,7 +856,7 @@ async function rememberChapter(main, { live = null } = {}) {
 
 // 阶段五：世界书
 
-const bundledWorldbookUrl = () => new URL('worldbook/故事导演.json', import.meta.url).href;
+const bundledWorldbookUrl = () => new URL('worldbook/story-director.json', import.meta.url).href;
 const bundledIconUrl = () => new URL('icon.svg', import.meta.url).href;
 
 function isGlobalBookEnabled(name) {
@@ -902,7 +902,7 @@ async function ensureWorldListLoaded() {
     return Array.isArray(world_names) && world_names.length > 0;
 }
 
-/** 把插件自带的 worldbook/故事导演.json 装进酒馆（缺失时自动装）。 */
+/** 把插件自带的 worldbook/story-director.json 装进酒馆（缺失时自动装）。 */
 async function installBundledWorldbook({ notify = true, mount = null } = {}) {
     if (!(await ensureWorldListLoaded())) {
         if (notify) toast('酒馆的世界书列表还没加载出来——稍等一下再试，或点「刷新列表」。', 'warning');
@@ -919,7 +919,7 @@ async function installBundledWorldbook({ notify = true, mount = null } = {}) {
         data = await response.json();
     } catch (error) {
         console.debug('[故事导演] 读取自带世界书失败', error);
-        if (notify) toast('读不到插件自带的世界书文件（worldbook/故事导演.json）——手动拷扩展目录时别漏掉 worldbook 子目录。', 'error');
+        if (notify) toast('读不到插件自带的世界书文件（worldbook/story-director.json）——手动拷扩展目录时别漏掉 worldbook 子目录。', 'error');
         return 'failed';
     }
     if (!isPlainObject(data?.entries) || !Object.keys(data.entries).length) {
@@ -2445,7 +2445,7 @@ async function evaluateDirector({ live = null } = {}) {
  *
  * 为什么不改神谕：那是别人的文件，改了会被它的扩展更新覆盖，也不该让我们的安装去动别人。
  * 为什么需要：神谕自己的按钮里 `#so-*` 的 id 会变（它自己也一直在加模式），依赖某个 id 的定位不稳；
- * 而已有的 `before:advisor` 这类锚点，多个插件（例如 ntr淫化）一起用时，顺序取决于谁先注册 ——
+ * 而已有的 `before:advisor` 这类锚点，多个插件一起用时，顺序取决于谁先注册 ——
  * 同一版本在不同机器上按钮顺序会不一样。这里改成「插进第一个子节点之前」，位置确定且不看 id。
  */
 function pinModeButtonFirst() {
