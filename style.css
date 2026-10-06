@@ -307,3 +307,15 @@ dialog.sd-dialog .sd-dialog-note {
     line-height: 1.55;
 }
 dialog.sd-dialog .sd-dialog-hint { margin: 10px 0 0; font-size: 11.5px; opacity: 0.7; }
+/* 📌「已钉住的要求」提示条：让用户一眼看到自己写的要求还在（不会被重生成覆盖） */
+dialog.sd-dialog .sd-dialog-pin {
+    margin: 0 0 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border-left: 3px solid rgba(230, 190, 120, 0.75);
+    background: rgba(230, 190, 120, 0.12);
+    font-size: 12px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+}

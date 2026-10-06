@@ -291,6 +291,20 @@ const DEFAULT = {
         focusBeatSince: 0,
         /** ★ 上面那种「同一拍卡住」时给注入用的一句话；换拍 / 正常时为空串。 */
         focusStale: '',
+        /**
+         * ★ 用户钉住的要求（「记住它，每轮都带上」）。
+         *
+         * 为什么要钉：用户手动生成时填的要求，**原来在插件自己触发的任何重生成里都会消失** ——
+         * 审查重排（keep=played 那条）、②/③级废章重建、自动换章，全都没带 userText。
+         * 于是「审查把它打回重写」= 用户白写一遍。钉住之后，这些路径自动带上同一份要求。
+         *
+         * 生命周期：
+         *   · epicPin  —— 跟**这一部总纲**走；换一部（重新定纲）或手动清掉才失效；
+         *   · chapterPin —— 跟**这一章**走；章名一变就自动清（下一章不该继承上一章的要求）。
+         */
+        epicPin: '',
+        chapterPin: '',
+        chapterPinFor: '',
         /** 上一次换拍时的 AI 回复数。 */
         beatAt: 0,
         /** 本章开始时的 AI 回复数（只在真的开出一章时写）。 */
@@ -1360,6 +1374,59 @@ async function collectContextBlocks(task = 'chapter') {
 }
 
 /**
+ * 用户钉住的要求里，该带进**这次任务**的那一份。
+ *   · epic  → 钉住的总纲要求
+ *   · 其它  → 钉住的章节要求（章节要求只对「设计这一章」有意义）
+ *
+ * ⚠ 章节要求会在**章名变化时自动清掉**（见 syncChapterPin）：用户写的是「这一章别摊牌」，
+ *   下一章不该继续背这个包袱。
+ */
+function pinnedAskText(task) {
+    const s = settings();
+    if (task === 'epic') return String(s.run.epicPin || '').trim();
+    syncChapterPin();
+    return String(s.run.chapterPin || '').trim();
+}
+
+/** 章名变了 → 自动清掉上一章钉住的要求（并保存）。 */
+function syncChapterPin() {
+    const s = settings();
+    if (!s.run.chapterPin) return false;
+    const title = String(unwrap(mainState()[MAIN_TITLE]) ?? '').trim();
+    if (s.run.chapterPinFor === title) return false;
+    s.run.chapterPin = '';
+    s.run.chapterPinFor = '';
+    save();
+    console.info('[故事导演] 章名变了，已清掉上一章钉住的要求。');
+    return true;
+}
+
+/** 这一份要求该钉到哪：'epic' 还是 'chapter'。 */
+function pinAsk({ task = 'chapter', ask = '' } = {}) {
+    const s = settings();
+    const text = String(ask || '').trim();
+    if (!text) return false;
+    if (task === 'epic') {
+        s.run.epicPin = text;
+    } else {
+        s.run.chapterPin = text;
+        s.run.chapterPinFor = String(unwrap(mainState()[MAIN_TITLE]) ?? '').trim();
+    }
+    save();
+    return true;
+}
+
+/** 清掉钉住的要求。task 不传就两个都清。 */
+function clearPin(task = '') {
+    const s = settings();
+    let changed = false;
+    if (!task || task === 'epic') { if (s.run.epicPin) { s.run.epicPin = ''; changed = true; } }
+    if (!task || task !== 'epic') { if (s.run.chapterPin) { s.run.chapterPin = ''; s.run.chapterPinFor = ''; changed = true; } }
+    if (changed) save();
+    return changed;
+}
+
+/**
  * 每一章实际达成的目标，形如「章名（目标）」。
  * 给总纲校准用：**这才是长线真正走过的路**（比只看章名强得多）。
  */
@@ -1872,6 +1939,9 @@ function buildInterludeSystemPrompt() {
 async function buildUserPrompt(task, userText = '') {
     const blocks = await collectContextBlocks(task);
     const ask = String(userText || '').trim();
+    // ★ 钉住的用户要求（若已钉）—— 每轮都带上，这样插件自己触发的重生成也不会把它丢掉。
+    const pinned = pinnedAskText(task);
+    if (pinned) blocks.push(`=== 用户钉住的要求（**每一轮都要满足**，与其它规则冲突时以它为准）===\n${pinned}`);
     if (ask) blocks.push(`=== 用户的额外要求（优先满足）===\n${ask}`);
     const anti = antiRepeatBlock();
     if (anti) blocks.push(anti);
@@ -2225,14 +2295,16 @@ async function openEpicDialog({ mode = 'establish', entry = 0, diverged = '' } =
 
     const body = document.createElement('div');
     body.className = 'sd-epic-form';
+    const pinnedEpic = String(s.run.epicPin || '').trim();
     body.innerHTML = `
         <p class="sd-dialog-note">
             <b>总纲是「大势」不是章纲</b> —— 它只讲整部戏分几个大阶段、在争什么。
             一章内部怎么起承转合由主线自己设计，所以<b>不用在这里安排章节</b>。
         </p>
+        ${pinnedEpic ? `<p class="sd-dialog-pin">📌 <b>已钉住的要求</b>（每轮都会带上，不会被重生成覆盖）：<br>${esc(pinnedEpic)}</p>` : ''}
         <label class="sd-dialog-field">
             <span>你对这条总纲的要求 / 倾向<b>（留空 = 让它自己按角色卡与当前剧情判断）</b></span>
-            <textarea data-field="ask" rows="6" placeholder="例如：&#10;· 我想要一条关于「旧账被人翻出来」的线，别搞世界危机&#10;· 主角身边的人至少有一个会背叛，但不要太早&#10;· 结局别是简单的胜利，留一点没解决的东西&#10;· 少写打斗，多写人情与试探"></textarea>
+            <textarea data-field="ask" rows="6" placeholder="例如：&#10;· 我想要一条关于「旧账被人翻出来」的线，别搞世界危机&#10;· 主角身边的人至少有一个会背叛，但不要太早&#10;· 结局别是简单的胜利，留一点没解决的东西&#10;· 少写打斗，多写人情与试探">${esc(pinnedEpic)}</textarea>
         </label>
         <div class="sd-dialog-row">
             <label class="sd-dialog-field"><span>基调（这条线是什么型的故事）</span>
@@ -2241,7 +2313,8 @@ async function openEpicDialog({ mode = 'establish', entry = 0, diverged = '' } =
                 </select>
             </label>
         </div>
-        <p class="sd-dialog-hint">当前基调：${esc(currentTone)}　·　${rebuilding ? '本次是<b>重新定纲</b>（换一部）' : '本次是<b>按现在的情况重新校准</b>（长线不丢，路线可改）'}</p>
+        <p class="sd-dialog-hint">当前基调：${esc(currentTone)}　·　${rebuilding ? '本次是<b>重新定纲</b>（换一部）' : '本次是<b>按现在的情况重新校准</b>（长线不丢，路线可改）'}<br>
+        💡 <b>「记住它」</b>= 以后每次重生成（包括审查打回、自动换章）都会带上这些要求，不会被覆盖。</p>
     `;
 
     const picked = await storyDialog({
@@ -2250,19 +2323,29 @@ async function openEpicDialog({ mode = 'establish', entry = 0, diverged = '' } =
         actions: [
             { label: '取消', result: null, kind: 'cancel' },
             { label: '留空，让它自己判断', result: { go: true, ask: '' } },
-            { label: '按这些要求生成', result: { go: true, submit: true }, kind: 'ok', emit: true },
+            ...(pinnedEpic ? [{ label: '清掉钉住的要求', result: { go: false, clear: true } }] : []),
+            { label: '按这些要求生成（只这一次）', result: { go: true, submit: true }, emit: true },
+            { label: '记住它，每轮都带上', result: { go: true, submit: true, pin: true }, kind: 'ok', emit: true },
         ],
     });
 
-    if (!picked || !picked.go) return false;        // 取消 / Esc / 点遮罩
+    if (!picked) return false;                      // 取消 / Esc / 点遮罩
+    if (picked.clear) { clearPin('epic'); toast('已清掉钉住的总纲要求。', 'info'); render(); return false; }
+    if (!picked.go) return false;
 
     const ask = String(picked.ask || '').trim() || String(picked.fields?.ask || '').trim();
     // 弹窗里改过基调就顺手存下来（提示词会按新基调重写）。
-    // ⚠ 只有「按这些要求生成」那条路才会带 fields；「留空」那条没有 —— 所以这里必须用 fields 判断，
+    // ⚠ 只有「按这些要求生成 / 记住它」那条路才会带 fields；「留空」那条没有 —— 所以这里必须用 fields 判断，
     //   不能直接拿 fields?.tone 去算：toneOf(undefined) 会兜底成 'auto'，那会把用户原有的基调悄悄改掉。
     if (picked.fields) {
         const pickedTone = toneOf(picked.fields.tone);
         if (pickedTone !== toneOf(s.tone)) { s.tone = pickedTone; save(); }
+    }
+
+    // 钉住（「记住它」）或清掉（填了空又选了记住）
+    if (picked.pin) {
+        if (ask) { pinAsk({ task: 'epic', ask }); toast('已记住这条要求 —— 以后每次重生成都会带上它。', 'success'); }
+        else { clearPin('epic'); }
     }
 
     const userText = userAskText(ask, 'epic');
@@ -2275,6 +2358,9 @@ async function openEpicDialog({ mode = 'establish', entry = 0, diverged = '' } =
  * 返回 true = 已经发起生成；false = 用户取消了。
  */
 async function openChapterDialog({ regenerate = false } = {}) {
+    const s = settings();
+    syncChapterPin();                               // 章名变了就先把上一章的钉清掉
+    const pinnedChapter = String(s.run.chapterPin || '').trim();
     const body = document.createElement('div');
     body.className = 'sd-chapter-form';
     body.innerHTML = `
@@ -2282,14 +2368,16 @@ async function openChapterDialog({ regenerate = false } = {}) {
             <b>这是给「这一章」的方向，不是给整部戏的。</b>
             整部戏的大势由总纲管；这里写的只影响<b>接下来这一章</b>的拍列表。
         </p>
+        ${pinnedChapter ? `<p class="sd-dialog-pin">📌 <b>已钉住的要求</b>（每次重生成都会带上，审查打回也不会丢）：<br>${esc(pinnedChapter)}</p>` : ''}
         <label class="sd-dialog-field">
             <span>你对这一章的要求 / 倾向<b>（留空 = 让它自己按当前处境判断）</b></span>
-            <textarea data-field="ask" rows="6" placeholder="例如：&#10;· 这一章我想让她先发现自己被跟踪，别直接摊牌&#10;· 少写打斗，多写试探和眼神&#10;· 结尾留个钩子，但别把主线谜底揭开&#10;· 让那个配角这次站在她这边"></textarea>
+            <textarea data-field="ask" rows="6" placeholder="例如：&#10;· 这一章我想让她先发现自己被跟踪，别直接摊牌&#10;· 少写打斗，多写试探和眼神&#10;· 结尾留个钩子，但别把主线谜底揭开&#10;· 让那个配角这次站在她这边">${esc(pinnedChapter)}</textarea>
         </label>
         <label class="sd-dialog-field"><span>这一章几拍（共 3~6 拍）</span>
             <input data-field="beats" type="number" min="3" max="6" step="1" value="${esc(String(settings().beatTarget))}">
         </label>
-        <p class="sd-dialog-hint">${regenerate ? '本次是<b>重新生成本章</b>（整章推倒重写）' : '本次是<b>设计下一章</b>'}　·　只想改后面几拍就用「主线」页的「只重排剩下的拍」。</p>
+        <p class="sd-dialog-hint">${regenerate ? '本次是<b>重新生成本章</b>（整章推倒重写）' : '本次是<b>设计下一章</b>'}　·　只想改后面几拍就用「主线」页的「只重排剩下的拍」。<br>
+        💡 <b>「记住它」</b>= 以后每次重生成（包括正文模型把这一章打回、重排剩下的拍）都会带上这些要求，不会被覆盖。换章后自动失效。</p>
     `;
 
     const picked = await storyDialog({
@@ -2298,17 +2386,26 @@ async function openChapterDialog({ regenerate = false } = {}) {
         actions: [
             { label: '取消', result: null, kind: 'cancel' },
             { label: '留空，让它自己判断', result: { go: true, ask: '' } },
-            { label: '按这些要求生成', result: { go: true, submit: true }, kind: 'ok', emit: true },
+            ...(pinnedChapter ? [{ label: '清掉钉住的要求', result: { go: false, clear: true } }] : []),
+            { label: '按这些要求生成（只这一次）', result: { go: true, submit: true }, emit: true },
+            { label: '记住它，每轮都带上', result: { go: true, submit: true, pin: true }, kind: 'ok', emit: true },
         ],
     });
 
-    if (!picked || !picked.go) return false;        // 取消 / Esc / 点遮罩
+    if (!picked) return false;                      // 取消 / Esc / 点遮罩
+    if (picked.clear) { clearPin('chapter'); toast('已清掉钉住的章节要求。', 'info'); render(); return false; }
+    if (!picked.go) return false;
 
     const ask = String(picked.ask || '').trim() || String(picked.fields?.ask || '').trim();
-    // 拍数顺手存下来（只有「按这些要求生成」带 fields）
+    // 拍数顺手存下来（只有带 fields 的那两条路）
     if (picked.fields && picked.fields.beats !== undefined) {
         const beats = Math.max(BEAT_MIN, Math.min(BEAT_MAX, Math.round(toNumber(picked.fields.beats, settings().beatTarget))));
         if (beats !== settings().beatTarget) { settings().beatTarget = beats; save(); }
+    }
+    // 钉住（「记住它」）或清掉（填了空又选了记住）
+    if (picked.pin) {
+        if (ask) { pinAsk({ task: 'chapter', ask }); toast('已记住这一章的要求 —— 审查打回重排时也会带上它。', 'success'); }
+        else { clearPin('chapter'); }
     }
 
     void generateChapter({ quiet: false, regenerate, force: true, userText: userAskText(ask, 'chapter') });
