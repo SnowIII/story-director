@@ -2191,6 +2191,10 @@ async function evaluateDirector({ live = null } = {}) {
             save();
         }
 
+        // ★ 回退聊天（重新生成 / 删楼 / 换 swipe）会让回复数变少，把「按回复数记账」的游标修回来。
+        //   必须放在**任何冷却判断之前** —— 否则冷却会因为差值为负而永久卡死。
+        if (repairRunCursors(s.run, aiMessageCount())) save();
+
         if (await handleBeatReview({ live })) return;
 
         // 支线收尾扫描：落的标完成、超期没动的标「已收尾」（放在前面，这样任何分支都不会漏掉它）
@@ -2526,6 +2530,42 @@ async function rememberInterlude(chapter, { live = null } = {}) {
 }
 
 /**
+ * ★ 回退聊天后的记账修复。
+ *
+ * 所有节奏都按「AI 回复数」记账（见 blockedByCooldown / spaced），这套算法**默认 count 只增不减**。
+ * 但用户可以随时回退：
+ *   · 酒馆的「重新生成」/ 换 swipe —— 楼数变少
+ *   · 删掉几楼、从前面重新续 —— 楼数变少
+ *   · 删掉一条 AI 回复 —— 楼数变少
+ * 一旦 count 掉到某个游标之下，`count - 游标` 就是负数：
+ *   · blockedByCooldown → 永远 < cooldown，**冷却被永久卡死**（这正是「刚生成完就回退，结果一直不生成」）
+ *   · spaced           → 永远不满足，支线 / 插曲再也不补
+ *
+ * 修法：把游标夹到当前 count，并清掉 lastGenerateAt。
+ *   · 夹到 count 而不是清零 —— 收紧档位（只增不减）那一类判断的语义得以保留
+ *     （夹完 chapterOpenedAt 仍 ≤ count，不会凭空造出「章开了很久」）
+ *   · lastGenerateAt 清 0 而不是夹 —— 回退意味着「那一次生成我不要了（或要重来）」，
+ *     此时立刻放行是合理的；仍要夹的话用户还得白等一轮，那正是这次要修的毛病
+ *
+ * 只动「按回复数记账」的游标；focusBeat / 章史这些**表示剧情进度**的字段一概不碰 ——
+ * 回退的是聊天记录，不是已经演过的剧情。
+ */
+const COUNT_CURSORS = ['beatAt', 'chapterOpenedAt', 'aftermathAt', 'threadAt', 'interludeAt', 'epicAt'];
+
+function repairRunCursors(rt, count) {
+    if (!Number.isFinite(count)) return false;
+    let changed = false;
+    for (const field of COUNT_CURSORS) {
+        const at = Math.round(toNumber(rt[field], 0));
+        if (at > count) { rt[field] = count; changed = true; }
+    }
+    // 上一次自动生成落在「已经不存在的那几楼」里 → 这次节流不该再算数
+    const generated = Math.round(toNumber(rt.lastGenerateAt, 0));
+    if (generated > count) { rt.lastGenerateAt = 0; changed = true; }
+    return changed;
+}
+
+/**
  * 跨线节流：上一次自动生成之后至少隔 autoCooldown 轮。
  * 这是「不要一直生成」的总闸门 —— 支线、插曲、换章都走它。
  */
@@ -2533,7 +2573,11 @@ function blockedByCooldown(s, count, rt) {
     const cooldown = Math.max(0, Math.round(toNumber(s.autoCooldown, 3)));
     if (!cooldown) return false;
     const at = Math.round(toNumber(rt.lastGenerateAt, 0));
-    return !!at && count - at < cooldown;
+    if (!at) return false;
+    // 回退后 count 可能小于基准：把差值夹到 0，等效「刚生成完」，绝不让它算成负数而永久卡死。
+    // （正常路径下 repairRunCursors 已把这种情形修掉了，这里是第二道保险。）
+    const since = Math.max(0, count - at);
+    return since < cooldown;
 }
 
 /** 记下「刚刚生成过一次」（跨线节流用）。 */
@@ -2549,7 +2593,8 @@ function markGenerated(rt, count) {
 function spaced(at, count, every) {
     const last = Math.round(toNumber(at, 0));
     if (!last) return false;                       // 没有基准（还没播过种）：先不补
-    return count - last >= every;
+    // 同上：回退后夹到 0，避免「永远差一个负数」导致这支线 / 插曲再也不补
+    return Math.max(0, count - last) >= every;
 }
 
 /** 支线收尾扫描：落的标完成，长期没动又没落的标「已收尾」。 */
