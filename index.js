@@ -113,6 +113,15 @@ const AFTER_MESSAGE_DELAY = 4000;
 /** 一章/一条支线的拍数上限（防止模型把整本书塞进一章）。 */
 const BEAT_MAX = 6;
 const BEAT_MIN = 3;
+/**
+ * ★ 同一拍连着注入几轮之后，就往注入里加一句「别再重复同一场景 / 同一句台词」。
+ *
+ * 为什么需要：推进到下一拍的唯一依据是**正文模型回报 `本拍已落 = true`**。
+ * 它忘了写（很常见：注意力在正文上），`当前拍` 就停在原地，于是下一轮的注入块
+ * 和上一轮几乎**一字不差** —— 提示词如此相似，模型写出高度相似的话是可预期的。
+ * 这条是给那种情形兜底的；真正治本的是正文模型按契约回报。
+ */
+const FOCUS_STALE_REPLIES = 2;
 
 /** 注入的状态块标签：被模型抄进正文时按它做确定性剥离。 */
 const STATUS_TAG = 'story_director_status';
@@ -195,8 +204,7 @@ const DEFAULT = {
     chapterGap: 4,
     threadWarmup: 3,
     /** 一拍至少演多少轮才允许换拍（防连跳）。 */
-    minReplies: 1,
-    /** 连续被驳回几次就停手。 */
+    minReplies: 1,    /** 连续被驳回几次就停手。 */
     redesignMax: REVIEW_MAX_RETRY,
 
     /** 注入开关。 */
@@ -253,6 +261,14 @@ const DEFAULT = {
         focusBeat: 0,
         /** 间章里插件上一次聚焦的拍号（与主线各自独立）。 */
         focusInterlude: 0,
+        /**
+         * ★ 当前这一拍是**从第几轮开始**连续注入的（AI 回复数）。
+         * 换拍时重置。用来判断「同一拍是不是已经连着演了好几轮而没落地」——
+         * 那种情况下注入块会和上一轮几乎一样，模型很容易复读（见 buildInjection 里的叮嘱）。
+         */
+        focusBeatSince: 0,
+        /** ★ 上面那种「同一拍卡住」时给注入用的一句话；换拍 / 正常时为空串。 */
+        focusStale: '',
         /** 上一次换拍时的 AI 回复数。 */
         beatAt: 0,
         /** 本章开始时的 AI 回复数（只在真的开出一章时写）。 */
@@ -1020,7 +1036,7 @@ function buildInjection(live = null) {
             const chapter = interludeChapterOf(root);
             mainLines = renderInterludeChapterSection(chapter, { maxBeats: BEAT_MAX, banUserAction: ban }).lines;
         } else if (hasMain) {
-            mainLines = renderMainSection(main, { maxBeats: BEAT_MAX, root, banUserAction: ban }).lines;
+            mainLines = renderMainSection(main, { maxBeats: BEAT_MAX, root, banUserAction: ban, focusStale: s.run.focusStale }).lines;
         } else {
             // ⚠ 还没开篇 → **一个字节都不注入**。
             //   导演还没有这一章，就不该对正文说任何话：不要「等你准备好」的占位、
@@ -2549,6 +2565,24 @@ async function evaluateDirector({ live = null } = {}) {
         const beat = currentBeat(main);
         const total = beats.length;
 
+        // ★ 同一拍已经连着注入好几轮了吗？（正文模型没回报「本拍已落」时，注入块会和上一轮几乎一模一样 ——
+        //   提示词如此相似，模型写出高度相似甚至复读的话是**可预期的**。见 buildInjection 里那段叮嘱。）
+        //   「几轮」按回复数算，和别的节奏同源。
+        {
+            const since = Math.round(toNumber(rt.focusBeatSince, 0));
+            if (!since || Math.round(toNumber(rt.focusBeat, 0)) !== beat) {
+                rt.focusBeatSince = count;              // 换拍（或首次）→ 重新开始计时
+                save();
+            } else if (count - since >= FOCUS_STALE_REPLIES) {
+                rt.focusStale =
+                    `第 ${beat} 拍已经连着演了 ${count - since} 轮还没落地`;
+                if (count - since === FOCUS_STALE_REPLIES) {
+                    console.info(`[故事导演] ${rt.focusStale} —— 已在注入里叮嘱不要重复同一场景 / 同一句台词；`
+                        + '若正文模型一直没写 `本拍已落`，可以用面板的「手动推进一拍」纠偏。');
+                }
+            }
+        }
+
         // ② 自动换拍（手动模式下也照做：写盘不需要调模型）
         if (s.autoBeat && truthy(main[KEY_BEAT_DONE])) {
             const at = Math.round(toNumber(rt.beatAt, 0));
@@ -2557,6 +2591,8 @@ async function evaluateDirector({ live = null } = {}) {
                 const next = Math.max(beat, focus + 1);
                 rt.focusBeat = next;
                 rt.beatAt = count;
+                rt.focusBeatSince = count;          // 换拍了：同一拍的「连着演了几轮」重新计时
+                rt.focusStale = '';
                 save();
                 await patchMain({ [KEY_BEAT]: next, [KEY_BEAT_DONE]: false }, { live });
                 toast(`第 ${Math.min(focus, next - 1)} 拍已落地，进入第 ${next} 拍。`, 'success');

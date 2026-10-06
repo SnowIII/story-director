@@ -690,7 +690,7 @@ export function renderInjectionHeader({ banUserAction = true, mode = 'main' } = 
 /**
  * 主线区块：整条线的拍列表 + 本轮聚焦哪一拍 + 落拍回报怎么写。
  */
-export function renderMainSection(main, { maxBeats = 8, root = null, banUserAction = true } = {}) {
+export function renderMainSection(main, { maxBeats = 8, root = null, banUserAction = true, focusStale = '' } = {}) {
   const lines = [];
   const title = String(unwrap(main[MAIN_TITLE]) ?? '').trim();
   const arc = String(unwrap(main[MAIN_ARC]) ?? '').trim();
@@ -723,6 +723,15 @@ export function renderMainSection(main, { maxBeats = 8, root = null, banUserActi
       lines.push(`${mark} ${i + 1}. ${beats[i]}`);
     }
     lines.push(`本轮聚焦第 ${current} 拍（✔ 的已经发生过、不要重演；· 的不要抢跑）。`);
+    // ★ 同一拍连着注入好几轮时点名提醒 —— 否则注入块和上一轮几乎一样，模型极易复读。
+    if (focusStale) {
+      lines.push(
+        `　⚠ **${focusStale}** —— 说明你还没回报「这一拍已经落地」，或者它确实还没发生。`,
+        '　　这一轮**必须换个写法**：不要重复上一轮用过的同一句话、同一个动作、同一个场景开头；',
+        '　　要么把这一拍**真正推进下去**（然后照下面写回报），要么写**别处正在发生的事**（别人的动向、外面的变化、被瞒着的那件事的进展）。',
+        '　　**绝对不要**把上一轮那段对话换个词再说一遍 —— 那是复读，读者一眼就看得出来。',
+      );
+    }
     // 这一拍的落地方式：由世界里的事推动，而不是替玩家安排行为
     lines.push('　落地方式：把这一拍写成**场里真的发生了什么** —— 谁做了什么、传了什么话、局面变成了什么样。');
     if (banUserAction) {
@@ -731,6 +740,8 @@ export function renderMainSection(main, { maxBeats = 8, root = null, banUserActi
       );
     }
     lines.push('　推不动就用**伏笔与事件**推：一个被收起来的物件、一句没说完的话、一个别人做的决定、一次意外、一条传到他耳朵里的消息。');
+    // ★ 长期的措辞纪律：状态不动时最容易复读，所以这条一直挂着
+    lines.push('　**不要复读**：已经写过的对话、比喻、动作不要换几个词再写一遍。连着两轮用同一个句式开头、说同一类话，就算失败。');
   }
 
   lines.push(
