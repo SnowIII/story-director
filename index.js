@@ -123,6 +123,19 @@ const BEAT_MIN = 3;
  */
 const FOCUS_STALE_REPLIES = 2;
 
+/**
+ * ★ 合理性审查的升级梯（见 handleBeatReview）。
+ *
+ *  ①「重排剩下的拍」：拍级、便宜，已演过的拍一字不动。最多试 REDESIGN_MAX_L1 次。
+ *  ② 仍然报错 → **废掉这一章重建**（章级）：不再保留已演的拍 —— 因为病在「这一章的设计」上。
+ *     （会保留段落级的历史，确保不重复已讲过的内容）
+ *  ③ 再报错 → 请神谕**重设总纲这一段**（说明是长线方向立不住），然后重建这一章。
+ *
+ * 这道梯子取代了原来的「试满 N 次就永远停手」—— 那个做法会把故事卡在一个立不住的章上。
+ */
+const REDESIGN_MAX_L1 = 2;   // ①级最多试几次
+const REDESIGN_MAX_L2 = 2;   // ②级最多试几次，之后升到③
+
 /** 注入的状态块标签：被模型抄进正文时按它做确定性剥离。 */
 const STATUS_TAG = 'story_director_status';
 
@@ -204,8 +217,17 @@ const DEFAULT = {
     chapterGap: 4,
     threadWarmup: 3,
     /** 一拍至少演多少轮才允许换拍（防连跳）。 */
-    minReplies: 1,    /** 连续被驳回几次就停手。 */
-    redesignMax: REVIEW_MAX_RETRY,
+    minReplies: 1,    /**
+     * 合理性审查的升级梯（见 handleBeatReview）：
+     *   · 第①级「重排剩下的拍」最多试这么多次；
+     *   · 仍然报错 → 第②级**废掉这一章**重建（可能连续两次）；
+     *   · 再报错 → 第③级请神谕**重设总纲这一段**（说明这个方向真的立不住），然后重建这一章。
+     * ⚠ 刻意**不是**「试满就永远停手」：那样反而会卡在一个立不住的章上不动。
+     *   节流靠两道：级内次数上限 + 两次重设计之间至少隔 `redesignGap` 轮。
+     */
+    redesignMax: REDESIGN_MAX_L1,
+    /** 两次「重设计」之间至少隔几轮（防连着重生成，烧 token 也把剧情搅乱）。 */
+    redesignGap: 3,
 
     /** 注入开关。 */
     injectMain: true,
@@ -291,6 +313,15 @@ const DEFAULT = {
         epicTries: 0,
         /** 连续被驳回的次数。 */
         redesigns: 0,
+        /**
+         * ★ 合理性审查升级梯的记账（见 handleBeatReview）：
+         *   redesignFor —— 上面那个计数是**哪一章**的（换章清零，所以每章额度独立）；
+         *   redesignsL2  —— 已经走到②级（废章重建）几次；
+         *   redesignAt   —— 上一次重设计的轮数（节流用；回退聊天后由 repairRunCursors 兜住）。
+         */
+        redesignFor: '',
+        redesignsL2: 0,
+        redesignAt: 0,
         /** 上一段间章的标题（防重复用；间章本身不留在注入里）。 */
         lastInterlude: '',
         /**
@@ -1179,7 +1210,87 @@ function cleanupStatusEchoInChat({ notify = true } = {}) {
 // 阶段八：给神谕的上下文与提示词
 
 /** 给神谕的设定：我们自己的世界书（规则）+ 可选的角色卡世界书 + 最近对话 + 当前变量 + 神谕自己的引导。 */
-async function collectContextBlocks() {
+/**
+ * 给神谕的「当前剧情状态」。
+ *
+ * ⚠ 这里以前是 `JSON.stringify(整个 故事导演 命名空间)` —— 设计**一章**却把全部家当发过去：
+ *   总纲的全部走向与伏笔、整章的拍列表、章节史、全部支线、全部插曲，全是嵌套 JSON。
+ *   浪费上下文，还把模型的注意力摊薄。
+ *
+ * 现在按任务裁剪：
+ *   · `chapter`：只给**当前这一章**（含聚焦到哪一拍、这一章要埋的伏笔）+ 章节史压缩成「章名（目标）」一行；
+ *   · 其它（总纲 / 支线 / 插曲 / 间章）：保持原来的口袋，但同样把章节史压成一行。
+ */
+function focusedStateBlock(task) {
+    const s = settings();
+    const root = rootOf();
+    const lines = [];
+    const isChapter = task === 'chapter';
+
+    // ── 总纲：给大势 + 还没兑现的伏笔（写章节时这是「该埋什么」的来源）──
+    const epic = epicOf(root);
+    if (epicStarted(epic)) {
+        const title = String(unwrap(epic[EP.title]) ?? '').trim();
+        const stage = String(unwrap(epic[EP.stage]) ?? '').trim();
+        const line = String(unwrap(epic[EP.line]) ?? '').trim();
+        const ledger = String(unwrap(epic[EP.ledger]) ?? '').trim();
+        const hooks = epicHooks(epic);
+        lines.push(`【长线】${title ? `《${title}》` : ''}${stage ? `　进程：${stage}` : ''}`);
+        if (line) lines.push(`在争什么：${line}`);
+        if (!isChapter) {
+            const movements = epicMovements(epic);
+            if (movements.length) lines.push(`几个大阶段：${movements.map((m, i) => `${i + 1}. ${m}`).join('　')}`);
+        }
+        if (hooks.length) lines.push(`**还没兑现的伏笔**（要埋就得与它们同源，不要另起炉灶）：${hooks.join('；')}`);
+        if (ledger) lines.push(`既成事实：${ledger}`);
+        lines.push('');
+    }
+
+    // ── 主线：写章节时**只给当前这一章** ──
+    const main = mainOf(root);
+    const beats = beatsOf(main);
+    const title = String(unwrap(main[MAIN_TITLE]) ?? '').trim();
+    if (title || beats.length) {
+        lines.push('【当前这一章】（只为它设计，不要动别的章）');
+        if (title) lines.push(`章名：${title}`);
+        const arc = String(unwrap(main[MAIN_ARC]) ?? '').trim();
+        const scope = String(unwrap(main[MAIN_SCOPE]) ?? '').trim();
+        const goal = String(unwrap(main[MAIN_GOAL]) ?? '').trim();
+        if (arc) lines.push(`篇章：${arc}`);
+        if (scope) lines.push(`范围：${scope}`);
+        if (goal) lines.push(`章目标：${goal}`);
+        if (beats.length) {
+            const current = currentBeat(main);
+            lines.push(`拍（▶ = 正在演）：${beats.map((b, i) => `${i + 1 === current ? '▶' : '·'}${b}`).join('　')}`);
+            lines.push(`已经演到第 ${current} 拍（**前面的不要再重演**）。`);
+        }
+        lines.push('');
+    }
+
+    // ── 章节史：压缩成「章名（目标）」一行（原来是把每章的嵌套对象全发过去）──
+    const history = completedMainTitles(root);
+    if (history.length) lines.push(`【走过的章】${history.join(' → ')}`);
+    const goals = completedChapterGoals(root);
+    if (goals.length) lines.push(`各章目标：${goals.join('；')}`);
+
+    // ── 在演的支线 / 插曲：只列名字与目标，别抢戏即可 ──
+    const threads = liveThreads().slice(0, Math.max(0, Math.round(toNumber(s.maxThreads, 2))));
+    if (threads.length) {
+        lines.push(`【在演的支线】${threads.map((item) => {
+            const t = String(unwrap(item[THREAD_FIELDS.title]) ?? item.id).trim();
+            const g = String(unwrap(item[THREAD_FIELDS.goal]) ?? '').trim();
+            return g ? `${t}（${g}）` : t;
+        }).join('；')}`);
+    }
+    const sides = interludesState().filter(interludePending).slice(0, Math.max(0, Math.round(toNumber(s.maxInterludes, 1))));
+    if (sides.length) {
+        lines.push(`【待演的插曲】${sides.map((item) => String(unwrap(item[INTERLUDE_FIELDS.title]) ?? item.id)).join('；')}`);
+    }
+
+    return `=== 当前 ${NS} 状态（已按本次任务裁剪：只给相关的那些）===\n${lines.join('\n')}`;
+}
+
+async function collectContextBlocks(task = 'chapter') {
     const s = settings();
     const blocks = [];
 
@@ -1228,9 +1339,15 @@ async function collectContextBlocks() {
         }
     }
 
-    // ④ 当前剧情变量（主线/支线/插曲/章节史）
-    const ns = namespaceOf();
-    if (ns) blocks.push(`=== 当前 ${NS} 变量 ===\n${JSON.stringify(unwrapDeep(ns), null, 2)}`);
+    // ④ 当前剧情状态（**按任务裁剪**：写章节时只给当前这一章，不再整包发命名空间）
+    try {
+        const focused = focusedStateBlock(task);
+        if (focused) blocks.push(focused);
+    } catch (error) {
+        console.debug('[故事导演] 组装剧情状态失败，退回整包变量', error);
+        const ns = namespaceOf();
+        if (ns) blocks.push(`=== 当前 ${NS} 变量 ===\n${JSON.stringify(unwrapDeep(ns), null, 2)}`);
+    }
 
     // ⑤ 故事神谕自己的引导（如果有）：新设计要与它兼容，不要互相顶牛
     try {
@@ -1242,9 +1359,28 @@ async function collectContextBlocks() {
     return blocks;
 }
 
+/**
+ * 每一章实际达成的目标，形如「章名（目标）」。
+ * 给总纲校准用：**这才是长线真正走过的路**（比只看章名强得多）。
+ */
+function completedChapterGoals(root) {
+    const box = isPlainObject(root?.[NS]?.['章节史']) ? root[NS]['章节史'] : null;
+    if (!box) return [];
+    return Object.keys(box)
+        .filter((key) => /^\d+$/.test(key))
+        .sort((a, b) => Number(a) - Number(b))
+        .map((key) => {
+            const item = box[key];
+            const title = String(unwrap(isPlainObject(item) ? item[MAIN_TITLE] : item) ?? '').trim();
+            const goal = isPlainObject(item) ? String(unwrap(item[MAIN_GOAL]) ?? '').trim() : '';
+            if (!title) return '';
+            return goal ? `${title}（${goal}）` : title;
+        })
+        .filter(Boolean);
+}
+
 /** 已走过的章 + 已用过的标题：喂给神谕做「不要重复」的硬约束。 */
-function antiRepeatBlock() {
-    const root = rootOf();
+function antiRepeatBlock() {    const root = rootOf();
     const history = completedMainTitles(root);
     const titles = takenTitles(root);
     const lines = [];
@@ -1339,6 +1475,15 @@ function buildChapterSystemPrompt({ regenerate = false, rejected = null, remaini
             '　· 上面那些大阶段是**一大块**：这一章只在这块里推进一点，不必走完一个阶段，也**可能一章就把它走完**。',
             '　· 拍要按上面那个形状**排开**，最后几拍必须落到「合」上 —— 这一章结束时局面要有个明确的落点，不能停在半空。',
             '',
+            '⚠ **为后文埋的伏笔（这一章要负责埋的）** —— 这是长线能接下去的关键，但**埋法必须自然**：',
+            '　· 每一章至少要留下**一个**能在后文回收的细节（物件、一句话、一个被谁注意到的小动作、一个没解释的巧合）。',
+            '　· **必须「顺手」埋，不能专门为它加戏**：它要长在**当前这个场景本来就会发生的事**里 ——',
+            '　　某人来传话时顺带提到的一个名字、送礼时多出来的一件东西、临走前没关上的那扇门。',
+            '　· **不许为了埋伏笔硬造条件**：不要凭空加一个新角色 / 新地点 / 新势力 / 新前史；',
+            '　　如果这个场景里确实没有可埋的东西，那就**埋在这一章后面几拍的正常事件里**，或者这一章干脆不埋（下一章补）。',
+            '　· 埋下去的细节要**能被复述**（「她袖口沾了不属于这里的灰」），不要写成「气氛有些微妙」。',
+            '　· **不要当场解释它**：埋完就走，让它在后文自己响。也不要在一章里堆七八个 —— 一到两个就够。',
+            '',
             '⚠ 新的一章必须让这条长线**真的往前一段**：局势变了、代价付了、或者某个伏笔兑现了。',
             '  如果只是想写「他们又赶了一程路 / 又过了一天」，那是**间章**的料，不要拿来当主线的一章。',
             '',
@@ -1377,17 +1522,49 @@ function buildChapterSystemPrompt({ regenerate = false, rejected = null, remaini
         '',
     );
 
+    // ── ★ 合理性自检：落笔**之前**就把走不通的拍换掉 ──
+    //   路线 A：审查不该只靠正文模型写完之后的自觉回报（它经常硬演、不报），设计阶段就该自查一遍。
+    //   放在**同一次调用**里，所以不多花一次钱。
+    lines.push(
+        '⚠ **交稿前的合理性自检（必须做，不是可选）**：',
+        '把你想好的每一拍，拿**最近对话里的实际处境**过一遍 —— 时间（此刻是白天还是深夜、事情进行到哪一步）、',
+        '地点（他们现在在哪、能不能在这里发生）、在场的人（谁在场、谁不在、谁现在不可能出现）、',
+        '关系与情绪状态（刚翻过脸的人不会并肩坐着喝茶）。然后：',
+        '- 有**走不通**的拍 → **现在就换掉或挪个场合**（保持那一拍要达成的结果不变），不要原样交出去指望正文模型自己扛；',
+        '- 换了之后要**重新排一遍顺序**，保证因果仍然接得上（这一拍之所以能发生，是因为上一拍留下了什么）；',
+        '- **不许**为了让某一拍成立而硬加新角色 / 新地点 / 新势力 / 新前史；',
+        '- 自检之后如果不足 3 拍，就补一拍**能从当前处境自然长出来**的，而不是把被换掉的那拍再写一遍。',
+        '',
+    );
+
     if (evolution) {
         lines.push('=== 本次的演化说明（优先满足）===', evolution, '');
     }
 
     if (regenerate && (rejected || beats.length)) {
-        lines.push(
-            '⚠ 本次是**重新设计**：正文模型在真正落笔时判定当前的拍在这个场景里站不住。',
-            '请按**现在的处境**（最近对话里的时间、地点、在场的人、关系状态）重新设计，而不是把原来那几拍换个说法。',
-        );
-        if (rejected?.note) lines.push(`它的原话：${rejected.note}`);
-        lines.push('');
+        if (rejected?.scrap) {
+            // ②/③ 级：整章废弃 —— 必须换一个真正立得住的设计，不能只是把原拍换个说法
+            lines.push(
+                '⚠⚠ 本次是**废弃这一章、重新设计**（不是局部微调）：',
+                `原因：${rejected.reason || rejected.note || rejected.state}`,
+                '这一章原来的设计**整体不成立** —— 所以：',
+                '　· **不要**沿用原来的地点、人物组合、事件顺序；换一个在当前处境下真正立得住的开场与推进方式；',
+                '　· **不要**把原来的那几拍换个说法重新端上来（那是同一份失败的设计）；',
+                '　· 但**这一章要服务的长线目标不能丢**：它仍然要是这条长线上往前走的一段。',
+                '　· 先读最近对话，看清此刻的时间、地点、在场的人与关系状态，从**能自然发生的事**起手。',
+            );
+            if (Array.isArray(rejected.badBeats) && rejected.badBeats.length) {
+                lines.push(`　· 已被废弃的那一版拍（**仅供避免重复**，不要照着改）：${rejected.badBeats.join('；')}`);
+            }
+            lines.push('');
+        } else {
+            lines.push(
+                '⚠ 本次是**重新设计**：正文模型在真正落笔时判定当前的拍在这个场景里站不住。',
+                '请按**现在的处境**（最近对话里的时间、地点、在场的人、关系状态）重新设计，而不是把原来那几拍换个说法。',
+            );
+            if (rejected?.note) lines.push(`它的原话：${rejected.note}`);
+            lines.push('');
+        }
     }
 
     const curTitle = String(unwrap(main[MAIN_TITLE]) ?? '').trim();
@@ -1574,8 +1751,16 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
         lines.push('本次是**重新校准**，请按下面这些事实改写总纲：');
         if (last) lines.push(`最近一章：「${last}」`);
         if (history.length) lines.push(`走过的章：${history.join(' → ')}`);
+        const chapterGoals = completedChapterGoals(rootOf());
+        if (chapterGoals.length) lines.push(`每一章实际达成的目标（**这是长线真正走过的路，以它为准**）：${chapterGoals.join('；')}`);
         if (diverged) lines.push(`⚠ 偏离说明（正文模型的回报）：${diverged}`);
         lines.push(
+            '',
+            '⚠ **先做一次自检，再改**（这一步不能跳过）：',
+            '- 拿上面「每一章实际达成的目标」回头看：**当前这一段大阶段是不是还走得通？**',
+            '  如果实际剧情已经把这一段架空了（该发生的事发生不了了、该出现的人不在了、代价已经被付掉了），',
+            '  就**重设这一段**，而不是硬把它圆回去。',
+            '- 自检的判据只有一条：**下一章还能从当前处境里自然长出来吗？** 长不出来，就是方向要改。',
             '',
             '校准的原则（**长线不要丢，路线可以改**）：',
             '- 已经发生的事**不可撤销**：把它们全部并入「既成事实」，后面的一切建立在上面；',
@@ -1685,7 +1870,7 @@ function buildInterludeSystemPrompt() {
 }
 
 async function buildUserPrompt(task, userText = '') {
-    const blocks = await collectContextBlocks();
+    const blocks = await collectContextBlocks(task);
     const ask = String(userText || '').trim();
     if (ask) blocks.push(`=== 用户的额外要求（优先满足）===\n${ask}`);
     const anti = antiRepeatBlock();
@@ -2315,27 +2500,114 @@ function mainStarted(live = null) {
     return beatsOf(main).length > 0 || !!String(unwrap(main[MAIN_TITLE]) ?? '').trim();
 }
 
-/** 处理「正文模型说这一拍站不住」的回报。返回 true 表示本轮已经重新设计，自动推进让位。 */
+/**
+ * 处理「正文模型说这一拍站不住」的回报。返回 true 表示本轮已经重新设计，自动推进让位。
+ *
+ * ★ 升级梯（见 REDESIGN_MAX_L1 的注释）：
+ *   ① 重排剩下的拍（保留已演过的）→ ② 仍然报错就**废掉这一章重建** → ③ 再报错就**重设总纲这一段**。
+ * 节流两道：级内次数上限 + 两次重设计之间至少隔 `redesignGap` 轮。
+ * 换章时（章名变了）整套计数清零，所以每一章的额度是独立的。
+ */
 async function handleBeatReview({ live = null } = {}) {
     const s = settings();
     if (!s.autoRedesign) return false;
     const main = mainState(live);
     const state = reviewStateOf(main);
-    if (state === REVIEW_PASS) { if (s.run.redesigns) { s.run.redesigns = 0; save(); } return false; }
+    if (state === REVIEW_PASS) {
+        if (s.run.redesigns || s.run.redesignsL2 || s.run.redesignAt) {
+            s.run.redesigns = 0; s.run.redesignsL2 = 0; s.run.redesignAt = 0; save();
+        }
+        return false;
+    }
+
+    // 换了章 → 每一章的审查额度独立（用章名当 key，和 closedChapter 一个路子）
+    const title = String(unwrap(main[MAIN_TITLE]) ?? '').trim();
+    if (s.run.redesignFor !== title) {
+        s.run.redesignFor = title;
+        s.run.redesigns = 0;
+        s.run.redesignsL2 = 0;
+        s.run.redesignAt = 0;
+    }
+
+    // 节流：两次重设计之间至少隔 redesignGap 轮（否则模型连着报两次就把调用全烧在这上面）
+    const gap = Math.max(0, Math.round(toNumber(s.redesignGap, 3)));
+    const count = aiMessageCount();
+    const lastAt = Math.round(toNumber(s.run.redesignAt, 0));
+    if (lastAt && count - lastAt < gap) {
+        // 还不够间隔：结论留着不清，下一轮再看（这样不会把信号吃掉）
+        return false;
+    }
+
     const note = reviewNoteOf(main);
     // 复位结论，免得下一轮又照它重设计一次
     await patchMain({ [KEY_REVIEW]: REVIEW_PASS, [KEY_REVIEW_NOTE]: '' }, { live });
-    s.run.redesigns = Math.round(toNumber(s.run.redesigns, 0)) + 1;
-    save();
-    const max = Math.max(1, Math.round(toNumber(s.redesignMax, REVIEW_MAX_RETRY)));
-    if (s.run.redesigns > max) {
-        toast(`这一章连续 ${max} 次被判定站不住，已停止自动重设计（去面板手动改一拍或点「重新生成本章」）。`, 'warning');
+
+    const maxL1 = Math.max(1, Math.round(toNumber(s.redesignMax, REDESIGN_MAX_L1)));
+    const l1 = Math.round(toNumber(s.run.redesigns, 0));
+    const l2 = Math.round(toNumber(s.run.redesignsL2, 0));
+    const played = Math.max(0, currentBeat(main) - 1);
+    const why = `${state}」${note ? `：${note}` : ''}`;
+
+    s.run.redesignAt = count;
+
+    if (l1 < maxL1) {
+        // ① 级：只重排剩下的拍，已演过的一字不动
+        s.run.redesigns = l1 + 1;
+        save();
+        toast(`正文模型报「${why}——正按当前情况重排剩下的拍（第 ${Math.min(maxL1, l1 + 1)}/${maxL1} 次）。`, 'info');
+        void generateChapter({ quiet: true, regenerate: true, rejected: { state, note }, force: true, keep: played });
         return true;
     }
-    toast(`正文模型报「${state}」${note ? `：${note}` : ''}——正按当前情况重排剩下的拍。`, 'info');
-    // 已经演过的拍原样保留：只重排第 current 拍往后的内容
-    const played = Math.max(0, currentBeat(main) - 1);
-    void generateChapter({ quiet: true, regenerate: true, rejected: { state, note }, force: true, keep: played });
+
+    if (l2 < REDESIGN_MAX_L2) {
+        // ② 级：这一章的设计本身立不住 → **废掉整章重建**（不再保留已演过的拍）
+        s.run.redesignsL2 = l2 + 1;
+        save();
+        toast(`这一章重排 ${maxL1} 次仍然报「${why}——判断为**这一章的设计立不住**，已废掉整章、正在按新的处境重建（第 ${l2 + 1}/${REDESIGN_MAX_L2} 次）。`, 'warning');
+        console.info(`[故事导演] 升级到②级：废弃《${title || '当前章'}》并重建（原因：${state}${note ? ' —— ' + note : ''}）。`);
+        void generateChapter({
+            quiet: true, regenerate: true, force: true, keep: 0,
+            rejected: {
+                state,
+                note,
+                scrap: true,
+                badBeats: beatsOf(main),
+                reason: `这一章的设计整体不成立（重排 ${maxL1} 次仍未解决）：${note || state}。`
+                    + '**不要**沿用原来的地点、人物组合与事件顺序 —— 换一个真正立得住的开场与推进方式，'
+                    + '但这一章要服务的长线目标不能丢。',
+            },
+        });
+        return true;
+    }
+
+    // ③ 级：连重建都不行 → 病在长线方向上。请神谕重设总纲这一段，然后重建这一章。
+    s.run.redesigns = 0;
+    s.run.redesignsL2 = 0;
+    save();
+    const past = completedMainTitles(rootOf(live)).length;
+    toast(`这一章重建 ${REDESIGN_MAX_L2} 次仍然报「${why}——判断为**长线这一段的方向立不住**，正在请神谕重设总纲这一段，然后重建这一章。`, 'warning');
+    console.info(`[故事导演] 升级到③级：重设总纲这一段并重建《${title || '当前章'}》。`);
+    void (async () => {
+        const ok = await generateEpic({
+            quiet: true, force: true, mode: 'evolve', entry: past,
+            diverged: `当前这一段走向在实际演出里反复立不住（正文模型连续报「${state}」${note ? `：${note}` : ''}）。`
+                + '请**重设这一段大阶段**：换一条通往同一终局、但当前处境下真正走得通的路；'
+                + '如果这个阶段的设定本身就不可行，就换一个阶段。',
+        });
+        if (!ok) {
+            // 总纲没改成也不该把故事卡死：照样重建这一章（带着失败原因）
+            toast('总纲没能重设成功 —— 仍然会重建这一章（它只是配料）。', 'warning');
+        }
+        void generateChapter({
+            quiet: true, regenerate: true, force: true, keep: 0,
+            rejected: {
+                state, note, scrap: true,
+                badBeats: beatsOf(main),
+                reason: '长线这一段的方向已经被判定立不住，总纲刚刚重设过。'
+                    + '这一章要按**新的长线方向**重新设计，不要沿用原来的设计。',
+            },
+        });
+    })();
     return true;
 }
 
@@ -2788,7 +3060,7 @@ async function rememberInterlude(chapter, { live = null } = {}) {
  * 只动「按回复数记账」的游标；focusBeat / 章史这些**表示剧情进度**的字段一概不碰 ——
  * 回退的是聊天记录，不是已经演过的剧情。
  */
-const COUNT_CURSORS = ['beatAt', 'chapterOpenedAt', 'aftermathAt', 'threadAt', 'interludeAt', 'epicAt'];
+const COUNT_CURSORS = ['beatAt', 'chapterOpenedAt', 'aftermathAt', 'threadAt', 'interludeAt', 'epicAt', 'redesignAt'];
 
 function repairRunCursors(rt, count) {
     if (!Number.isFinite(count)) return false;
@@ -3360,6 +3632,11 @@ function renderSetTab() {
             <label class="sd-switch"><input name="auto-interlude" type="checkbox"> 自动加插曲（不占幕的随机小段）</label>
             <label class="sd-switch"><input name="auto-interlude-chapter" type="checkbox"> <b>主线收尾后自动开「间章」</b>（间隙演日常，不让场子空着）</label>
             <label class="sd-switch"><input name="auto-redesign" type="checkbox"> 拍站不住时重新设计（正文模型报「调整 / 驳回」）</label>
+            <p class="sd-sub">审查的升级梯：**重排剩下的拍** → 仍然报错就**废掉整章重建** → 再报错就**重设总纲这一段**。</p>
+            <div class="sd-row">
+                <label class="sd-field"><span>「重排剩下的拍」最多试几次（之后废章重建）</span><input name="redesign-max" type="number" min="1" max="5" step="1"></label>
+                <label class="sd-field"><span>两次自动重设计之间至少隔几轮（节流）</span><input name="redesign-gap" type="number" min="0" max="30" step="1"></label>
+            </div>
             <div class="sd-row">
                 <label class="sd-field"><span>每多少轮加一条支线</span><input name="thread-every" type="number" min="1" max="200" step="1"></label>
                 <label class="sd-field"><span>每多少轮加一条插曲</span><input name="interlude-every" type="number" min="1" max="200" step="1"></label>
@@ -3453,6 +3730,8 @@ function renderSetTab() {
     bind('interlude-gap', 'interludeGap', 'value');
     bind('interlude-beats', 'interludeBeats', 'value');
     bind('auto-redesign', 'autoRedesign');
+    bind('redesign-max', 'redesignMax', 'value');
+    bind('redesign-gap', 'redesignGap', 'value');
     bind('thread-every', 'threadEvery', 'value');
     bind('interlude-every', 'interludeEvery', 'value');
     bind('min-replies', 'minReplies', 'value');
