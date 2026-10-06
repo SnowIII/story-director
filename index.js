@@ -58,7 +58,7 @@ const SLOT = {
 /**
  * 与原版「故事神谕」的**能力探测**结果（只探测它真的提供了什么，不看版本号）。
  * 为什么需要：SO_API_VERSION 只在**破坏性**改动时才 +1，所以「版本号够」不代表「这些方法都在」——
- * 神谕各版本是逐个长出来的（context / guidance / registerMode / appendReply）。缺哪个就说缺哪个，
+ * 神谕各版本是逐个长出来的（context / guidance / registerMode）。缺哪个就说缺哪个，
  * 否则用户只会看到「剧情不生成 / 设定没读到」这种无头案。
  */
 const oracleCaps = {
@@ -70,7 +70,8 @@ const oracleCaps = {
     guidance: false,     // 读神谕自己的引导（可选，只有它才需要）
     registerMode: false, // 在神谕窗口里注册「故事导演」模式（可选）
     addMessageAction: false, // 给神谕回复挂按钮（可选）
-    appendReply: false,  // 往神谕窗口追加留痕（可选）
+    // ⚠ 这里**刻意不探测 appendReply**：本插件绝不往神谕窗口（对话）里写任何东西 —— 见 askOracle 里的事故注释。
+    //   把它列成「能力」会被误读成「缺了什么」，而它其实是主动不用的东西。
 };
 
 function probeOracleCaps() {
@@ -82,7 +83,7 @@ function probeOracleCaps() {
     oracleCaps.guidance = typeof api?.guidance?.getActive === 'function';
     oracleCaps.registerMode = typeof api?.registerMode === 'function';
     oracleCaps.addMessageAction = typeof api?.addMessageAction === 'function';
-    oracleCaps.appendReply = typeof api?.appendReply === 'function';
+    // 不探测 appendReply：我们不用它（绝不往神谕窗口写东西）。
     if (typeof api?.context?.buildWorldInfo !== 'function') oracleCaps.worldInfo = false;
     return oracleCaps;
 }
@@ -1834,7 +1835,7 @@ function modeSystemPrompt(userText) {
 }
 
 /** 借神谕的模型连接裸调用一次（不带任何上下文 → 我们自己把上下文拼进去）。 */
-async function askOracle({ task = 'chapter', userText = '', regenerate = false, rejected = null, keep = 0, remaining = 0, quiet = true, pushToView = true, ephemeralSystem = '' } = {}) {
+async function askOracle({ task = 'chapter', userText = '', regenerate = false, rejected = null, keep = 0, remaining = 0, quiet = true, ephemeralSystem = '' } = {}) {
     const api = oracleApi();
     if (typeof api?.run !== 'function') {
         if (!quiet) toast('没有可用的模型连接——需要启用「故事神谕」扩展。也可以在主线上直接手写。', 'warning');
@@ -1845,20 +1846,18 @@ async function askOracle({ task = 'chapter', userText = '', regenerate = false, 
             : task === 'interlude' ? buildInterludeChapterSystemPrompt({ rejected })
                 : buildChapterSystemPrompt({ regenerate, rejected, keep, remaining: Math.max(0, Math.round(toNumber(remaining, 0))) }));
     const user = await buildUserPrompt(task, userText);
-    // 后台自动生成不往神谕窗口里塞记录（否则挂机一下午，窗口里全是导演请求）；手动点按钮时才留痕。
-    const record = pushToView && !quiet;
-    if (record) {
-        try {
-            api.appendReply?.(`【导演请求 · ${task}】\n\n${user}`, { render: 'plain' });
-        } catch { /* 只是留个痕，失败不影响生成 */ }
-    }
+    // ⚠ **绝不往神谕窗口里写东西**（这一条是补事故）。
+    //   这里以前用 api.appendReply() 把「导演请求全文」和「模型原始回复」追加进神谕的对话里 ——
+    //   后果有两个，都很难绷：
+    //     ① 神谕窗口里会冒出一大段**正文**（模型偶尔不按 <StoryChapters> 输出而写成散文，也会被原样贴进去）；
+    //     ② 那两条是 assistant 消息、还会 persistConvo() 存进聊天，等于把导演的提示词污染进神谕自己的历史。
+    //   神谕的 api.run() 是**裸调用**（只带我们给的这两条消息、不带它的对话），所以想不留痕根本不用它提供机制 ——
+    //   不发 appendReply 就够了。真要排查，看控制台与面板「诊断」页（生成闸门 / 世界书 / 实际注入的引导全文）。
+    if (!quiet) console.debug(`[故事导演] 本次生成（${task}）的提示词与原始回复不写入神谕窗口；需要排查见面板「诊断」页。`);
     const result = await api.run([
         { role: 'system', content: system },
         { role: 'user', content: user },
     ]);
-    if (record) {
-        try { api.appendReply?.(String(result ?? ''), { render: 'markdown' }); } catch { /* ignore */ }
-    }
     return String(result ?? '');
 }
 
