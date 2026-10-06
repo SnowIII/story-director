@@ -1,0 +1,12 @@
+﻿{
+  "display_name": "故事导演（自动推进剧情）",
+  "loading_order": 120,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "SnowIII",
+  "version": "0.9.0",
+  "homePage": "https://github.com/SnowIII/story-director",
+  "auto_update": true
+}
