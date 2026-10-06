@@ -28,7 +28,7 @@ import {
 import {
     NS, PATH, THREAD_FIELDS, INTERLUDE_FIELDS, MAIN_TITLE, MAIN_ARC, MAIN_SCOPE, MAIN_GOAL, MAIN_BEATS, MAIN_STARTED, MAIN_ENDED, MAIN_CLOSED,
     INTERLUDE, IL, emptyInterlude, interludeChapterOf, interludeActive, interludeBeatsOf, interludeBeat,
-    EPIC, EP, EPIC_STAGES, emptyEpic, epicOf, epicStarted, epicMovements, epicHooks, epicChapter, renderEpicSection, epicFromBlock,
+    EPIC, EP, EPIC_STAGES, emptyEpic, epicOf, epicStarted, epicMovements, epicHooks, epicChapter, renderEpicSection, epicFromBlock, epicAskText,
     TONES, toneOf, toneOptions, toneDirective,
     KEY_BEAT, KEY_BEAT_DONE, KEY_CHAPTER_DONE, KEY_READY, KEY_REVIEW, KEY_REVIEW_NOTE,
     REVIEW_PASS, REVIEW_STATES, REVIEW_MAX_RETRY,
@@ -1308,14 +1308,19 @@ function buildChapterSystemPrompt({ regenerate = false, rejected = null, remaini
         const movements = epicMovements(epic);
         const hooks = epicHooks(epic);
         lines.push(
-            '这是一部**已经在跑的长线**，下一章是它的一拍：',
-            `${title ? `《${title}》` : ''}${stage ? `　进程：${stage}` : ''}`,
+            '这是一部**已经在跑的长线**，你要为它设计下一章：',
+            `${title ? `《${title}》` : ''}${stage ? `　当前进程：${stage}` : ''}`,
             line ? `总纲：${line}` : '',
         );
-        if (movements.length) lines.push(`走向（**一章只推进一小段，不要一口气用完**）：${movements.map((m, i) => `${i + 1}. ${m}`).join('　')}`);
+        if (movements.length) lines.push(`这条长线的几个大阶段（**整部戏的骨架，不是章节表**）：${movements.map((m, i) => `${i + 1}. ${m}`).join('　')}`);
         if (hooks.length) lines.push(`还没兑现的伏笔（这一章最多兑现一个，也可以只是继续吊着）：${hooks.join('；')}`);
         if (ledger) lines.push(`既成事实（**不可撤销**）：${ledger}`);
         lines.push(
+            '',
+            '⚠ 上面给的是**大势**，不是这一章的剧本 —— **这一章怎么演，由你决定**：',
+            '　· 一章要有**它自己的完整形状**：起（怎么进这一章）→ 承（事情往下走、压力加码）→ 转（撞上代价、反转、最坏的一下）→ 合（这一章的收场与余波）。',
+            '　· 上面那些大阶段是**一大块**：这一章只在这块里推进一点，不必走完一个阶段，也**可能一章就把它走完**。',
+            '　· 拍要按上面那个形状**排开**，最后几拍必须落到「合」上 —— 这一章结束时局面要有个明确的落点，不能停在半空。',
             '',
             '⚠ 新的一章必须让这条长线**真的往前一段**：局势变了、代价付了、或者某个伏笔兑现了。',
             '  如果只是想写「他们又赶了一程路 / 又过了一天」，那是**间章**的料，不要拿来当主线的一章。',
@@ -1511,18 +1516,24 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
         '  多个这样的线交织成一部史诗是受欢迎的，但每一条都要有自己的代价与后果，不能只是「下一步去哪」。',
         '- **日常与轻松的部分不要写进总纲**：那些交给间章去演。总纲只留能推动大势的东西。',
         '',
+        '⚠ **总纲是「大势」，不是章纲 —— 这是这一层最容易写坏的地方。**',
+        '- **不许把总纲写成「接下来几章分别干什么」**：那是主线的事。你写的是**整部戏的骨架**，',
+        '  粒度比一章大得多：一章可能整章都在同一个阶段里，也可能一章就把一个阶段走完。',
+        '- **你不负责排章节、也不排「起承转合」**：一章内部的起承转合由主线自己设计（你要相信它做得好）。',
+        '  一写「第一段是起、第二段是承」，你就把总纲压成了章纲，这一层就白设了。',
+        '- **要写的是「势」怎么变**：谁和谁的关系到了哪一步、什么东西从背景走到台前、局面在哪一点上不可逆。',
+        '- **大事件不等于长线**：大事件是「发生了什么」，长线是「这一路他要付什么代价、变成什么样」。',
+        '  只堆大事件就会变成大纲流水账 —— 每个阶段都要带着「对他意味着什么」。',
+        '',
         '⚠ **但更要紧的是：这是一条「有归宿」的完整弧线，不是一串越来越大的事件。**',
         '- **先定下那个贯通的矛盾**：这条线从头到尾在争什么？（谁要什么、谁挡着、为什么现在非解决不可）',
-        '  「每章都发生了点事」不等于有矛盾 —— 没有那个贯通的矛盾，走向就只是一串事件，读者感觉不到「在往哪儿去」。',
-        '  这个矛盾是「总纲」那一句的核心；走向的每一段都在它上面加上一层新的压力或代价。',
+        '  「每章都发生了点事」不等于有矛盾 —— 没有那个贯通的矛盾，阶段就只是一串事件，读者感觉不到「在往哪儿去」。',
+        '  这个矛盾是「总纲」那一句的核心；每个阶段都在它上面加上一层新的压力或代价。',
         '一条只有「不断升级」的总纲会越写越夸张，最后收不了场（也写不出回报与余味）。所以：',
-        '- **必须写得出归宿**：这几段走向要能收束到**一个具体的结果**——事情解决了 / 没能解决但付出去了代价 / 他变成了不一样的人。',
-        '  最后一段走向就该是那个结果，而不是「更大的事又要来了」。',
-        '- **要有一段完整弧线的形状**：起（这件事怎么开始）→ 承（事情露出真面目、从「一件事」变成「躲不掉的事」）→ 转（撞上代价与反转）→ 合（收场与余波）。',
-        '  **回报与代价都要落地**：写了「险境」就要写「怎么出来」，写了「阴谋」就要写「揭破之后如何」。',
-        '- **大事件不等于长线**：大事件是「发生了什么」，长线是「这一路他要付什么代价、变成什么样」。',
-        '  只写大事件就会变成大纲流水账 —— 每一段都要带着「对他意味着什么」。',
-        '- **走向 4~5 段为宜**：少于 4 段撑不起弧线，多于 6 段会拖（一章走一段，太长会散）。',
+        '- **必须写得出归宿**：这几个阶段要能收束到**一个具体的结果**——事情解决了 / 没能解决但付出去了代价 / 他变成了不一样的人。',
+        '  最后一个阶段就该是那个结果，而不是「更大的事又要来了」。',
+        '- **回报与代价都要落地**：写了「险境」就要写「怎么出来」，写了「阴谋」就要写「揭破之后如何」。',
+        '- **阶段 3~4 个为宜**：少于 3 个撑不起弧线，多于 5 个就是在排章节表了。',
         '- **允许总纲走完**：这条线讲完之后就该收，到时候你会被请来**定下一条新的长线**。',
         '  所以**不要为了「永远写下去」而故意不收束** —— 有始有终才是完整的故事。',
         '',
@@ -1554,7 +1565,8 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
             '- 他做过的事、他表过的态，就是这条长线现在的走向 —— 不要假装没发生，也不要拉他回去；',
             '- 如果他的做法让原来的走向不成立了，就**换一条通往同一个终局的路**（保留他在乎的东西与要付的代价，改中间的路径）；',
             '- 如果他走出了一个完全没想到的方向，就**顺着他的方向重新想这个故事的去处与终局** —— 那可能比原来的更好；',
-            '- 走向只保留从现在往后还成立的 3~5 条；已经用掉的不要再写进去。',
+            '- 走向只保留**从现在往后还成立的 3~4 个大阶段**；已经走完的不要留，也不要在阶段里排章节；',
+            '- **粒度要守住**：如果你写出来的走向已经细到「下一章该演什么」，那就是写错了层级 —— 那是主线的事。',
         );
     }
 
@@ -1565,20 +1577,20 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
         '<StoryEpic>',
         '标题: 这条长线的名字（6~14 字，例如「商路上的三封密信」）',
         '总纲: 两三句话说清这条线是什么、**在争什么**、他在其中的位置、以及为什么这事躲不掉',
-        '走向:',
-        '1. 起：这件事是怎么开始的（世界这边的压力与事件，不写他怎么做）',
-        '2. 承：事情露出真面目，从「一件事」变成「躲不掉的事」',
-        '3. 转：撞上代价 / 反转 / 最坏的一下（他必须面对的那一下）',
-        '4. 合：收场 —— **这件事最后是什么结果**（不是「更大的事要来了」）',
-        '（4~5 条，按顺序推进；每一条都是「一章」的体量；最后一条必须是归宿）',
+        '走向: 这条长线的**几个大阶段**（整部戏的骨架，3~4 个；**不是章节表、不要写起承转合**）',
+        '1. （一大段：局势处在什么局面；这一段里什么东西会变、谁和谁的关系到哪一步）',
+        '2. （下一大段：压力或代价怎么升级到新的层面，局面在哪一点上不可逆）',
+        '3. （收束：这条线最后是什么结果 —— 不是「更大的事又要来了」）',
+        '（3~4 条，每条是**一大块**，粒度远大于一章；每章只在这几段里推进一点）',
         '伏笔: 三到六个还没兑现的细节，用「；」分开（要具体到能被复述）',
         '既成事实: 已经发生、不可撤销的事（用「；」分开；第一次定纲时写现在的处境）',
-        '当前进程: 启程 / 试炼 / 至暗 / 转折 / 终局（选一个）',
+        '当前进程: 启程 / 试炼 / 至暗 / 转折 / 终局（选一个，标记整条线走到哪儿了）',
         '</StoryEpic>',
         '',
         '⚠ 走向写的是**世界的动作**，不是{{user}}的动作：',
         '好例子：「使团的密信被人劫走，他的差事变成了别人的把柄」',
         '坏例子：「他决定暗中调查密信的去向」← 这是替他做决定',
+        '⚠ 走向也**不要写成**「1. 起：… 2. 承：…」这种一章一段的章纲 —— 那是主线的工作。',
     );
     return lines.join('\n');
 }
@@ -1673,6 +1685,84 @@ async function buildUserPrompt(task, userText = '') {
 }
 
 // 阶段九：神谕联动（生成 / 采用 / 模式注册）
+
+/**
+ * 通用对话框：把一段自建内容放进酒馆的标准弹窗里，带自定义按钮。
+ *
+ * 用**原生 `<dialog>`**（酒馆的弹窗就是它）而不是自己搭浮层，好处是不用处理层级 / 遮罩 / Esc：
+ * 我们的面板嵌在酒馆页面里，自己搭的浮层容易被外面的层叠上下文夹住。
+ *
+ * @param {object} spec
+ * @param {string} spec.title 窗口标题
+ * @param {string|HTMLElement} spec.body 正文（HTML 字符串或现成节点）
+ * @param {Array<{label:string,result:*,kind?:'ok'|'cancel',emit?:boolean}>} spec.actions 按钮
+ * @returns {Promise<*>} 点中的按钮 result（emit 时会把 [data-field] 的值挂成 `result.fields`）；
+ *                       按 Esc / 点遮罩关闭时回 null
+ */
+function storyDialog({ title, body, actions = [] }) {
+    return new Promise((resolve) => {
+        const dialog = document.createElement('dialog');
+        dialog.className = 'sd-dialog';
+        const box = document.createElement('div');
+        box.className = 'sd-dialog-box';
+
+        const head = document.createElement('div');
+        head.className = 'sd-dialog-head';
+        head.textContent = title;
+        box.appendChild(head);
+
+        const content = document.createElement('div');
+        content.className = 'sd-dialog-body';
+        if (typeof body === 'string') content.innerHTML = body;
+        else content.appendChild(body);
+        box.appendChild(content);
+
+        let settled = false;
+        const finish = (value) => {
+            if (settled) return;
+            settled = true;
+            try { dialog.close(); } catch { /* 已经关了 */ }
+            dialog.remove();
+            resolve(value);
+        };
+
+        const row = document.createElement('div');
+        row.className = 'sd-dialog-actions';
+        for (const action of actions) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = action.kind === 'ok' ? 'sd-btn sd-btn-primary' : 'sd-btn';
+            button.textContent = action.label;
+            button.addEventListener('click', () => {
+                // emit=true：把整份表单读出来，挂在 result 上一起交回去（「按这些要求生成」那种）
+                const value = action.result;
+                if (action.emit && value && typeof value === 'object') value.fields = readDialogFields(content);
+                finish(value);
+            });
+            row.appendChild(button);
+        }
+        box.appendChild(row);
+        dialog.appendChild(box);
+
+        // Esc 键 → 视为取消（浏览器会自己关；拦截 close 事件以便 resolve）
+        dialog.addEventListener('cancel', (event) => { event.preventDefault(); finish(null); });
+        // 点遮罩（dialog 本体，不含内部盒子）→ 取消
+        dialog.addEventListener('click', (event) => { if (event.target === dialog) finish(null); });
+        dialog.addEventListener('close', () => finish(null));
+
+        document.body.appendChild(dialog);
+        dialog.showModal();
+        const first = content.querySelector('textarea, input, select');
+        if (first) setTimeout(() => first.focus(), 30);
+    });
+}
+
+/** 从对话框内容里读出所有 [data-field] 控件的值。 */
+function readDialogFields(container) {
+    const out = {};
+    container.querySelectorAll('[data-field]').forEach((node) => { out[node.dataset.field] = node.value; });
+    return out;
+}
 
 let storyGenerating = false;
 /** 上一次开始生成的时间戳：用来兜住「模型请求挂死」——否则 storyGenerating 永远是 true，整个插件不动。 */
@@ -1910,6 +2000,63 @@ async function generateInterludeChapter({ quiet = true, userText = '', force = f
         endGenerate();
         if (panel && !panel.hidden) render();
     }
+}
+
+/**
+ * 「手动定纲」弹窗：让用户先说说她想要什么样的总纲，留空就走默认。
+ *
+ * 返回 true = 已经发起生成；false = 用户取消了。
+ */
+async function openEpicDialog({ mode = 'establish', entry = 0, diverged = '' } = {}) {
+    const s = settings();
+    const rebuilding = mode === 'establish';
+    const currentTone = TONES[toneOf(s.tone)]?.label || '自动';
+
+    const body = document.createElement('div');
+    body.className = 'sd-epic-form';
+    body.innerHTML = `
+        <p class="sd-dialog-note">
+            <b>总纲是「大势」不是章纲</b> —— 它只讲整部戏分几个大阶段、在争什么。
+            一章内部怎么起承转合由主线自己设计，所以<b>不用在这里安排章节</b>。
+        </p>
+        <label class="sd-dialog-field">
+            <span>你对这条总纲的要求 / 倾向<b>（留空 = 让它自己按角色卡与当前剧情判断）</b></span>
+            <textarea data-field="ask" rows="6" placeholder="例如：&#10;· 我想要一条关于「旧账被人翻出来」的线，别搞世界危机&#10;· 主角身边的人至少有一个会背叛，但不要太早&#10;· 结局别是简单的胜利，留一点没解决的东西&#10;· 少写打斗，多写人情与试探"></textarea>
+        </label>
+        <div class="sd-dialog-row">
+            <label class="sd-dialog-field"><span>基调（这条线是什么型的故事）</span>
+                <select data-field="tone">
+                    ${toneOptions().map((item) => `<option value="${esc(item.value)}" ${toneOf(s.tone) === item.value ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}
+                </select>
+            </label>
+        </div>
+        <p class="sd-dialog-hint">当前基调：${esc(currentTone)}　·　${rebuilding ? '本次是<b>重新定纲</b>（换一部）' : '本次是<b>按现在的情况重新校准</b>（长线不丢，路线可改）'}</p>
+    `;
+
+    const picked = await storyDialog({
+        title: rebuilding ? '重新定纲（换一部）' : '按现在的情况重新校准',
+        body,
+        actions: [
+            { label: '取消', result: null, kind: 'cancel' },
+            { label: '留空，让它自己判断', result: { go: true, ask: '' } },
+            { label: '按这些要求生成', result: { go: true, submit: true }, kind: 'ok', emit: true },
+        ],
+    });
+
+    if (!picked || !picked.go) return false;        // 取消 / Esc / 点遮罩
+
+    const ask = String(picked.ask || '').trim() || String(picked.fields?.ask || '').trim();
+    // 弹窗里改过基调就顺手存下来（提示词会按新基调重写）。
+    // ⚠ 只有「按这些要求生成」那条路才会带 fields；「留空」那条没有 —— 所以这里必须用 fields 判断，
+    //   不能直接拿 fields?.tone 去算：toneOf(undefined) 会兜底成 'auto'，那会把用户原有的基调悄悄改掉。
+    if (picked.fields) {
+        const pickedTone = toneOf(picked.fields.tone);
+        if (pickedTone !== toneOf(s.tone)) { s.tone = pickedTone; save(); }
+    }
+
+    const userText = epicAskText(ask);
+    void generateEpic({ quiet: false, force: true, mode, entry, diverged, userText });
+    return true;
 }
 
 /** 生成 / 校准史诗（总纲）。entry = 这一份总纲算「校准到第几章」。 */
@@ -3645,14 +3792,15 @@ function renderEpicTab() {
             <label class="sd-field"><span>基调（决定这条长线是什么型的故事；由你选，不由模型判断）</span><select name="tone">
                 ${toneOptions().map((item) => `<option value="${esc(item.value)}" ${toneOf(s.tone) === item.value ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}
             </select></label>
-            <p class="sd-note">先有这条长线，每一章只是它的一拍 —— 主线才不平淡。它写的是「围绕他会发生什么」，
-            <b>不写他会怎么做</b>：他中途走出剧本是常态，插件会在开新章之前按他实际做的事重新校准。<br>
+            <p class="sd-note">这条长线写的是「围绕他会发生什么」，<b>不写他会怎么做</b>：他中途走出剧本是常态，
+            插件会在开新章之前按他实际做的事重新校准。<br>
+            <b>它是「大势」不是章纲</b> —— 只讲整部戏分几个大阶段、现在走到哪；<b>一章内部怎么起承转合由主线自己设计</b>。<br>
             基调会作为**最高优先级的创作方针**同时给到总纲与每一章的设计：选「冒险」就允许远行、险境、突围；
             选「日常」就明确不要大事件，张力来自关系的小位移。换基调之后点一次「重新定纲（换一部）」才会按新基调重写。</p>
             ${started ? `
                 <label class="sd-field"><span>标题</span><input name="epic-title" value="${esc(String(unwrap(epic[EP.title]) ?? ''))}"></label>
-                <label class="sd-field"><span>总纲（两三句）</span><textarea name="epic-line" rows="3">${esc(String(unwrap(epic[EP.line]) ?? ''))}</textarea></label>
-                <label class="sd-field"><span>走向（一行一段，按顺序推进）</span><textarea name="epic-movements" rows="6">${esc(movements.map((text, i) => `${i + 1}. ${text}`).join('\n'))}</textarea></label>
+                <label class="sd-field"><span>总纲（两三句，说清在争什么）</span><textarea name="epic-line" rows="3">${esc(String(unwrap(epic[EP.line]) ?? ''))}</textarea></label>
+                <label class="sd-field"><span>大阶段（一行一段，整部戏的骨架 —— <b>不是章节表</b>，别写起承转合）</span><textarea name="epic-movements" rows="6">${esc(movements.map((text, i) => `${i + 1}. ${text}`).join('\n'))}</textarea></label>
                 <label class="sd-field"><span>伏笔（用「；」分开）</span><textarea name="epic-hooks" rows="2">${esc(hooks.join('；'))}</textarea></label>
                 <label class="sd-field"><span>既成事实（不可撤销）</span><textarea name="epic-ledger" rows="2">${esc(String(unwrap(epic[EP.ledger]) ?? ''))}</textarea></label>
                 <label class="sd-field"><span>当前进程</span><select name="epic-stage">
@@ -3680,10 +3828,10 @@ function renderEpicTab() {
     });
     host.querySelector('.sd-save-epic')?.addEventListener('click', () => { void saveEpicFromForm(); });
     host.querySelector('.sd-evolve-epic')?.addEventListener('click', () => {
-        void generateEpic({ quiet: false, force: true, mode: 'evolve', entry: past });
+        void openEpicDialog({ mode: 'evolve', entry: past });
     });
     host.querySelector('.sd-rebuild-epic')?.addEventListener('click', () => {
-        void generateEpic({ quiet: false, force: true, mode: 'establish', entry: past });
+        void openEpicDialog({ mode: 'establish', entry: past });
     });
 }
 

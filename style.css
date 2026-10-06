@@ -229,3 +229,81 @@
     #story-director-bubble { transition: none; }
     #story-director-bubble:hover { transform: none; }
 }
+
+/* ────────────────────────────────────────────────────────────
+   「手动定纲」弹窗。
+   ⚠ 它挂在 document.body 上（原生 <dialog>），**不在** #story-director-panel 里面，
+   所以上面那些 .sd-btn / .sd-field 的规则够不到它，这里必须另写一套。
+   ──────────────────────────────────────────────────────────── */
+dialog.sd-dialog {
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.16));
+    border-radius: 12px;
+    padding: 0;
+    width: min(560px, calc(100vw - 32px));
+    max-height: min(86vh, 760px);
+    background: var(--SmartThemeBlurTintColor, rgba(24, 26, 34, 0.97));
+    color: var(--SmartThemeBodyColor, #eae8e4);
+    font-size: 13px;
+    overflow: hidden;
+}
+dialog.sd-dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+
+dialog.sd-dialog .sd-dialog-box { display: flex; flex-direction: column; max-height: inherit; }
+
+dialog.sd-dialog .sd-dialog-head {
+    padding: 11px 14px;
+    font-weight: 700;
+    font-size: 13.5px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.14));
+}
+
+dialog.sd-dialog .sd-dialog-body { padding: 12px 14px; overflow-y: auto; }
+
+dialog.sd-dialog .sd-dialog-actions {
+    display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end;
+    padding: 10px 14px;
+    border-top: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.14));
+}
+
+dialog.sd-dialog .sd-btn {
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.18));
+    background: var(--black30a, rgba(255, 255, 255, 0.06));
+    color: inherit;
+    border-radius: 7px;
+    padding: 6px 12px;
+    font: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+    transition: background 0.14s ease, border-color 0.14s ease;
+}
+dialog.sd-dialog .sd-btn:hover { background: rgba(140, 170, 220, 0.2); }
+dialog.sd-dialog .sd-btn-primary {
+    background: rgba(140, 170, 220, 0.3);
+    border-color: rgba(160, 190, 240, 0.65);
+    font-weight: 600;
+}
+dialog.sd-dialog .sd-btn-primary:hover { background: rgba(140, 170, 220, 0.42); }
+
+dialog.sd-dialog .sd-dialog-field { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; flex: 1 1 160px; }
+dialog.sd-dialog .sd-dialog-field > span { font-size: 11.5px; opacity: 0.78; }
+dialog.sd-dialog .sd-dialog-field textarea,
+dialog.sd-dialog .sd-dialog-field select,
+dialog.sd-dialog .sd-dialog-field input {
+    font: inherit; font-size: 12.5px;
+    color: inherit;
+    background: var(--black30a, rgba(0, 0, 0, 0.25));
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.18));
+    border-radius: 7px;
+    padding: 6px 8px;
+    resize: vertical;
+}
+dialog.sd-dialog .sd-dialog-row { display: flex; flex-wrap: wrap; gap: 10px; }
+dialog.sd-dialog .sd-dialog-note {
+    margin: 0 0 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(140, 170, 220, 0.12);
+    font-size: 12px;
+    line-height: 1.55;
+}
+dialog.sd-dialog .sd-dialog-hint { margin: 10px 0 0; font-size: 11.5px; opacity: 0.7; }
