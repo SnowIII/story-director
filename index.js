@@ -42,7 +42,7 @@ import {
     renderInterludeChapterSection,
     chapterFromBlock, threadFromBlock, interludeFromBlock, interludeChapterFromBlock,
     applyNsCommands, extractNsCommands, worldbookDigest, setInterludeWritesAllowed, beatOrderSkipsRead,
-    mergeBeats, remainingBeatBudget,
+    mergeBeats, remainingBeatBudget, worldbookUpdateDecision,
 } from './model.js';
 
 const ID = 'story-director';
@@ -265,6 +265,14 @@ const DEFAULT = {
     /** 世界书。 */
     bookMode: 'full',
     autoInstallBook: true,
+    /**
+     * ★ 自带世界书的**内容**更新时自动重装。
+     *
+     * 为什么需要：插件原来只在「世界书缺失」时才安装 —— 我们自己改了世界书（加纪律、改变量契约），
+     * 已经装过的人**永远拿不到新内容**，只能靠人手动点「安装／重装」。
+     * 开这个之后会拿带版本标记的那份比对，发现旧了就自动更新（**旧内容先备份**，不动用户原有的书）。
+     */
+    autoUpdateBook: true,
     autoMountBook: true,
 
     /** 运行游标（每个聊天一份切片，随聊天切换）。 */
@@ -965,33 +973,133 @@ async function ensureWorldListLoaded() {
     return Array.isArray(world_names) && world_names.length > 0;
 }
 
-/** 把插件自带的 worldbook/story-director.json 装进酒馆（缺失时自动装）。 */
-async function installBundledWorldbook({ notify = true, mount = null } = {}) {
+/** 自带世界书里那个版本标记（第一次读到就记住，给诊断行用）。 */
+let BUNDLED_WORLD_VERSION = '';
+
+/**
+ * 酒馆里那本「故事导演」的版本标记（没有标记 = 老版本，需要更新）。
+ * 直接 loadWorldInfo 读它自己，不依赖它有没有被挂载。
+ */async function installedWorldbookVersion() {
+    try {
+        const helperGet = window.TavernHelper?.getWorldbook;
+        if (typeof helperGet === 'function') {
+            const entries = await helperGet(PLUGIN_WORLD);
+            const meta = entries?.['0']?.srVersion ?? entries?.[0]?.srVersion;
+            if (meta) return String(meta);
+        }
+    } catch { /* 往下试别的读法 */ }
+    try {
+        const load = window.SillyTavern?.getContext?.()?.loadWorldInfo;
+        if (typeof load === 'function') {
+            const book = await load(PLUGIN_WORLD);
+            if (book?.srVersion) return String(book.srVersion);
+        }
+    } catch { /* 读不到就当老版本 */ }
+    return '';
+}
+
+/** 把自带世界书拉下来并做基础校验（返回 null 表示失败）。 */
+async function fetchBundledWorldbook() {
+    try {
+        const response = await fetch(bundledWorldbookUrl());
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (!isPlainObject(data?.entries) || !Object.keys(data.entries).length) throw new Error('没有 entries');
+        if (data.srVersion) BUNDLED_WORLD_VERSION = String(data.srVersion);
+        for (const entry of Object.values(data.entries)) {
+            if (entry && typeof entry === 'object') entry.enabled = entry.disable !== true;
+        }
+        return data;
+    } catch (error) {
+        console.debug('[故事导演] 读取自带世界书失败', error);
+        return null;
+    }
+}
+
+/** 更新前先把旧内容备份成「原名 + 后缀」，绝不覆盖掉用户手里的那份。 */
+async function backupWorldbook(suffix) {
+    try {
+        const load = window.SillyTavern?.getContext?.()?.loadWorldInfo;
+        if (typeof load !== 'function') return '';
+        const current = await load(PLUGIN_WORLD);
+        if (!isPlainObject(current?.entries)) return '';
+        const name = `${PLUGIN_WORLD}${suffix}`;
+        await saveWorldInfo(name, current, true);
+        try { await updateWorldInfoList(); } catch { /* 刷新失败不影响备份本身 */ }
+        return name;
+    } catch (error) {
+        console.debug('[故事导演] 备份世界书失败', error);
+        return '';
+    }
+}
+
+/**
+ * 把插件自带的 worldbook/story-director.json 装进酒馆。
+ *
+ * @param {object} opts
+ * @param {boolean} opts.notify      要不要弹提示
+ * @param {boolean|null} opts.mount  装完要不要挂到全局（null = 跟随设置）
+ * @param {boolean} opts.ifMissing   缺失时才装（手动按钮走 false，表示「就是要重装」）
+ * @param {boolean} opts.ifOlderVersion 只在自己那本**版本更旧**时才更新（自动路径走这个）
+ *
+ * 背景：以前这里只有「缺失才装」，于是我们改了世界书内容（加纪律、改变量契约），
+ * 已经装过的人永远拿不到 —— 现在按版本标记比对，旧了就自动更新（**先备份**）。
+ */
+async function installBundledWorldbook({ notify = true, mount = null, ifMissing = true, ifOlderVersion = false } = {}) {
     if (!(await ensureWorldListLoaded())) {
         if (notify) toast('酒馆的世界书列表还没加载出来——稍等一下再试，或点「刷新列表」。', 'warning');
         return 'unknown';
     }
-    if (world_names.includes(PLUGIN_WORLD)) {
+    const exists = world_names.includes(PLUGIN_WORLD);
+
+    if (exists && ifMissing && !ifOlderVersion) {
         if (notify) toast(`酒馆里已经有世界书「${PLUGIN_WORLD}」了，不用重新安装。`, 'info');
         return 'exists';
     }
-    let data;
-    try {
-        const response = await fetch(bundledWorldbookUrl());
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        data = await response.json();
-    } catch (error) {
-        console.debug('[故事导演] 读取自带世界书失败', error);
+
+    // 已经存在、且是「只更新旧的」模式 → 先比版本；一样新就不动
+    if (exists && ifOlderVersion) {
+        const data0 = await fetchBundledWorldbook();
+        if (!data0) {
+            if (notify) toast('读不到插件自带的世界书文件（worldbook/ 子目录别漏掉）。', 'error');
+            return 'failed';
+        }
+        const bundled = String(data0.srVersion || '');
+        const installed = await installedWorldbookVersion();
+        const decision = worldbookUpdateDecision(bundled, installed);
+        if (decision === 'up-to-date') return 'up-to-date';
+        if (decision === 'no-version') {
+            console.debug('[故事导演] 自带世界书没有版本标记，跳过自动更新。');
+            return 'no-version';
+        }
+        const backup = await backupWorldbook(`（更新前备份 ${installed || '无版本'}）`);
+        try {
+            await saveWorldInfo(PLUGIN_WORLD, data0, true);
+        } catch (error) {
+            console.debug('[故事导演] 更新自带世界书失败', error);
+            if (notify) toast('更新世界书失败，详见控制台。', 'error');
+            return 'failed';
+        }
+        try { await updateWorldInfoList(); } catch (error) { console.debug('[故事导演] 刷新世界书列表失败', error); }
+        if (panel && !panel.hidden) render();
+        console.info(`[故事导演] 自带世界书已更新：${installed || '(无版本)'} → ${bundled}` + (backup ? `；旧内容备份为「${backup}」` : ''));
+        if (notify) {
+            toast(
+                `自带世界书「${PLUGIN_WORLD}」已更新到 ${bundled}` +
+                (backup ? `（旧内容备份成「${backup}」，可以随时对照或删掉）` : '') + '。',
+                'success',
+            );
+        }
+        return 'updated';
+    }
+
+    const data = await fetchBundledWorldbook();
+    if (!data) {
         if (notify) toast('读不到插件自带的世界书文件（worldbook/story-director.json）——手动拷扩展目录时别漏掉 worldbook 子目录。', 'error');
         return 'failed';
     }
-    if (!isPlainObject(data?.entries) || !Object.keys(data.entries).length) {
-        if (notify) toast('自带的世界书文件内容不对（没有 entries）。', 'error');
-        return 'failed';
-    }
-    for (const entry of Object.values(data.entries)) {
-        if (entry && typeof entry === 'object') entry.enabled = entry.disable !== true;
-    }
+    // 真·重装：也给旧内容留一份备份
+    if (exists) await backupWorldbook('（重装前备份）');
     try {
         await saveWorldInfo(PLUGIN_WORLD, data, true);
     } catch (error) {
@@ -1154,6 +1262,15 @@ function renderDiagnostics(text = null, contract = null) {
             `生成闸门：${storyGenerating ? '进行中' : (isPending(`epic:${chatKey()}`) ? '定篇章排队中' : '空闲')}${failedKeys.size ? `　退避中 ${failedKeys.size} 项` : ''}`,
             `命名空间：${namespaceReport(ns)}`,
             `世界书：${isGlobalBookEnabled(PLUGIN_WORLD) ? '已挂载' : '未挂载'}`,
+            // 自带世界书的版本状态（这一行是给「要不要手动更新一下」用的）
+            (() => {
+                // ⚠ 导入的名字是 world_info（下划线）。且它可能还没加载 → 全程可选链。
+                const installed = world_info?.[PLUGIN_WORLD]?.srVersion ? String(world_info[PLUGIN_WORLD].srVersion) : '';
+                const bundled = String(BUNDLED_WORLD_VERSION || '(未读)');
+                if (!installed) return `世界书版本：酒馆里那本没有版本标记（很旧）· 自带 ${bundled}`;
+                if (installed === bundled) return `世界书版本：${installed}（最新）`;
+                return `世界书版本：酒馆 ${installed} · 自带 ${bundled} ⚠ 需要更新（点「安装／重装」或开着自动更新）`;
+            })(),
             `神谕接口：${(() => { const r = oracleCompatReport(); return r.fatal ? `不可用（${r.missing[0] || '未知'}）` : (r.ok ? '齐全' : `缺 ${r.missing.length} 项可选能力`); })()}`,
             `导演：${s.autoDirector ? '自动推进中' : '已暂停'}`,
             `本聊天切片：${s.chatSliceKey || '未就绪'}`,
@@ -3826,6 +3943,9 @@ function renderSetTab() {
                 ${Object.entries(BOOK_MODES).map(([key, item]) => `<option value="${key}">${esc(item.label)}</option>`).join('')}
             </select></label>
             <label class="sd-switch"><input name="auto-install-book" type="checkbox"> 缺失时自动安装自带世界书</label>
+            <label class="sd-switch"><input name="auto-update-book" type="checkbox"> <b>内容有更新时自动重装</b>（按版本标记比对；<b>旧内容会先备份</b>）</label>
+            <p class="sd-note">规则与变量契约都在自带世界书里，我们改了它就会升版本号 —— 开着这项就不用每次手点「安装／重装」。
+            更新前会把酒馆里那份**原样备份**成「${esc(PLUGIN_WORLD)}（更新前备份 …）」，你可以随时对照或删掉。</p>
             <label class="sd-switch"><input name="auto-mount-book" type="checkbox"> 安装后挂到全局世界书</label>
             <div class="sd-row">
                 <button type="button" class="sd-btn sd-install-book">安装／重装自带世界书</button>
@@ -3891,6 +4011,7 @@ function renderSetTab() {
     bind('evolve-epic', 'evolveEpic');
     bind('transcript-limit', 'transcriptLimit', 'value');
     bind('auto-install-book', 'autoInstallBook');
+    bind('auto-update-book', 'autoUpdateBook');
     bind('auto-mount-book', 'autoMountBook');
     bind('bubble-size', 'bubbleSize', 'value');
     bind('bubble-icon', 'bubbleIcon', 'value');
@@ -3905,7 +4026,10 @@ function renderSetTab() {
         bm.value = BOOK_MODES[s.bookMode] ? s.bookMode : 'full';
         bm.addEventListener('change', () => { s.bookMode = bm.value; save(); void applyBookMode(); });
     }
-    host.querySelector('.sd-install-book')?.addEventListener('click', () => { void installBundledWorldbook({ notify: true, mount: settings().autoMountBook }); });
+    host.querySelector('.sd-install-book')?.addEventListener('click', () => {
+        // 手动点 = 明确的重装意图：不管版本标记，直接把自带那份写回去（旧内容会先备份）
+        void installBundledWorldbook({ notify: true, mount: settings().autoMountBook, ifMissing: false });
+    });
     host.querySelector('.sd-mount-book')?.addEventListener('click', () => {
         setGlobalBook(PLUGIN_WORLD, true);
         toast('已把世界书「' + PLUGIN_WORLD + '」挂到全局世界书。', 'success');
@@ -4523,7 +4647,14 @@ function init() {
     bindDirectorSignals();
     syncMainInjection();
     void resolveMvu().then(async () => {
-        if (settings().autoInstallBook) void installBundledWorldbook({ notify: true });
+        // 缺失 → 装一份；已经装了但**版本旧了** → 按版本标记自动更新（先备份旧内容）。
+        if (settings().autoInstallBook || settings().autoUpdateBook) {
+            void installBundledWorldbook({
+                notify: true,
+                ifMissing: !!settings().autoInstallBook,
+                ifOlderVersion: !!settings().autoUpdateBook,
+            });
+        }
         await ensureNamespace();
         syncMainInjection();
         if (!panel.hidden) render();

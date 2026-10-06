@@ -1437,3 +1437,18 @@ export function remainingBeatBudget(keep, target) {
   const k = Math.max(0, Math.round(Number(keep) || 0));
   return k > 0 ? Math.max(1, t - k) : t;
 }
+
+/**
+ * 自带世界书要不要更新？—— 抽成纯函数是为了能离线测（真正的更新要酒馆 API）。
+ *
+ * @param {string} bundled   自带那份的版本标记（世界书 JSON 的 srVersion）
+ * @param {string} installed 酒馆里那本的版本标记（空串 = 老版本，没标记）
+ * @returns {'update'|'up-to-date'|'no-version'}
+ */
+export function worldbookUpdateDecision(bundled, installed) {
+  const b = String(bundled ?? '').trim();
+  const i = String(installed ?? '').trim();
+  if (!b) return 'no-version';    // 自带那份没标记 → 不动（宁可不动，也别把用户手里的覆盖掉）
+  if (i === b) return 'up-to-date';
+  return 'update';                // 没标记（很旧）或版本不同 → 更新
+}

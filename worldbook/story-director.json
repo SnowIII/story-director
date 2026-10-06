@@ -433,5 +433,6 @@
       "delay": null,
       "triggers": []
     }
-  }
+  },
+  "srVersion": "0.17.0"
 }
