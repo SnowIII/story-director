@@ -181,14 +181,23 @@ export function epicStarted(epic) {
 }
 
 /**
- * 「手动定纲」弹窗里，用户填的要求 → 交给神谕的那段 userText。
+ * 「手动生成」弹窗里，用户填的要求 → 交给神谕的那段 userText。
  * 抽成纯函数是为了能离线测（弹窗本身要 DOM）。
  * 留空（或只有空白）→ 回空串，等于「不加要求，让它自己判断」。
+ *
+ * @param {string} raw 用户填的原文
+ * @param {'epic'|'chapter'} kind 生成的是总纲还是某一章（只影响那句话的措辞）
  */
-export function epicAskText(raw) {
+export function userAskText(raw, kind = 'epic') {
   const ask = String(raw ?? '').trim();
   if (!ask) return '';
-  return `用户对这条总纲的要求与倾向（**优先满足**，与下面其它规则冲突时以它为准）：\n${ask}`;
+  const what = kind === 'epic' ? '这条总纲' : '这一章';
+  return `用户对${what}的要求与倾向（**优先满足**，与下面其它规则冲突时以它为准）：\n${ask}`;
+}
+
+/** 向后兼容的别名（总纲用）。 */
+export function epicAskText(raw) {
+  return userAskText(raw, 'epic');
 }
 
 /**

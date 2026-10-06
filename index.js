@@ -28,7 +28,7 @@ import {
 import {
     NS, PATH, THREAD_FIELDS, INTERLUDE_FIELDS, MAIN_TITLE, MAIN_ARC, MAIN_SCOPE, MAIN_GOAL, MAIN_BEATS, MAIN_STARTED, MAIN_ENDED, MAIN_CLOSED,
     INTERLUDE, IL, emptyInterlude, interludeChapterOf, interludeActive, interludeBeatsOf, interludeBeat,
-    EPIC, EP, EPIC_STAGES, emptyEpic, epicOf, epicStarted, epicMovements, epicHooks, epicChapter, renderEpicSection, epicFromBlock, epicAskText,
+    EPIC, EP, EPIC_STAGES, emptyEpic, epicOf, epicStarted, epicMovements, epicHooks, epicChapter, renderEpicSection, epicFromBlock, epicAskText, userAskText,
     TONES, toneOf, toneOptions, toneDirective,
     KEY_BEAT, KEY_BEAT_DONE, KEY_CHAPTER_DONE, KEY_READY, KEY_REVIEW, KEY_REVIEW_NOTE,
     REVIEW_PASS, REVIEW_STATES, REVIEW_MAX_RETRY,
@@ -1702,6 +1702,12 @@ async function buildUserPrompt(task, userText = '') {
  */
 function storyDialog({ title, body, actions = [] }) {
     return new Promise((resolve) => {
+        // 同一时间只允许一个导演弹窗：先清掉可能残留的（Esc / 切页 / 重渲染都可能留下一个开着的）。
+        for (const old of document.querySelectorAll('dialog.sd-dialog')) {
+            try { old.close(); } catch { /* 已经关了 */ }
+            old.remove();
+        }
+
         const dialog = document.createElement('dialog');
         dialog.className = 'sd-dialog';
         const box = document.createElement('div');
@@ -1735,9 +1741,14 @@ function storyDialog({ title, body, actions = [] }) {
             button.className = action.kind === 'ok' ? 'sd-btn sd-btn-primary' : 'sd-btn';
             button.textContent = action.label;
             button.addEventListener('click', () => {
-                // emit=true：把整份表单读出来，挂在 result 上一起交回去（「按这些要求生成」那种）
+                // emit：把表单里所有 [data-field] 读出来挂在 result 上（「按这些要求生成」那种）
                 const value = action.result;
                 if (action.emit && value && typeof value === 'object') value.fields = readDialogFields(content);
+                // emitText：把内容里那个输入框的值直接当结果返回（给「只想收一段文字」的调用方用）
+                if (action.emitText) {
+                    const node = content.querySelector('[data-field="ask"], textarea, input');
+                    return finish(node ? node.value : '');
+                }
                 finish(value);
             });
             row.appendChild(button);
@@ -2053,8 +2064,53 @@ async function openEpicDialog({ mode = 'establish', entry = 0, diverged = '' } =
         if (pickedTone !== toneOf(s.tone)) { s.tone = pickedTone; save(); }
     }
 
-    const userText = epicAskText(ask);
+    const userText = userAskText(ask, 'epic');
     void generateEpic({ quiet: false, force: true, mode, entry, diverged, userText });
+    return true;
+}
+
+/**
+ * 「设计下一章 / 重新生成本章」弹窗：让用户先说说她想要这一章怎么写，留空就走默认。
+ * 返回 true = 已经发起生成；false = 用户取消了。
+ */
+async function openChapterDialog({ regenerate = false } = {}) {
+    const body = document.createElement('div');
+    body.className = 'sd-chapter-form';
+    body.innerHTML = `
+        <p class="sd-dialog-note">
+            <b>这是给「这一章」的方向，不是给整部戏的。</b>
+            整部戏的大势由总纲管；这里写的只影响<b>接下来这一章</b>的拍列表。
+        </p>
+        <label class="sd-dialog-field">
+            <span>你对这一章的要求 / 倾向<b>（留空 = 让它自己按当前处境判断）</b></span>
+            <textarea data-field="ask" rows="6" placeholder="例如：&#10;· 这一章我想让她先发现自己被跟踪，别直接摊牌&#10;· 少写打斗，多写试探和眼神&#10;· 结尾留个钩子，但别把主线谜底揭开&#10;· 让那个配角这次站在她这边"></textarea>
+        </label>
+        <label class="sd-dialog-field"><span>这一章几拍（共 3~6 拍）</span>
+            <input data-field="beats" type="number" min="3" max="6" step="1" value="${esc(String(settings().beatTarget))}">
+        </label>
+        <p class="sd-dialog-hint">${regenerate ? '本次是<b>重新生成本章</b>（整章推倒重写）' : '本次是<b>设计下一章</b>'}　·　只想改后面几拍就用「主线」页的「只重排剩下的拍」。</p>
+    `;
+
+    const picked = await storyDialog({
+        title: regenerate ? '重新生成本章' : '设计下一章',
+        body,
+        actions: [
+            { label: '取消', result: null, kind: 'cancel' },
+            { label: '留空，让它自己判断', result: { go: true, ask: '' } },
+            { label: '按这些要求生成', result: { go: true, submit: true }, kind: 'ok', emit: true },
+        ],
+    });
+
+    if (!picked || !picked.go) return false;        // 取消 / Esc / 点遮罩
+
+    const ask = String(picked.ask || '').trim() || String(picked.fields?.ask || '').trim();
+    // 拍数顺手存下来（只有「按这些要求生成」带 fields）
+    if (picked.fields && picked.fields.beats !== undefined) {
+        const beats = Math.max(BEAT_MIN, Math.min(BEAT_MAX, Math.round(toNumber(picked.fields.beats, settings().beatTarget))));
+        if (beats !== settings().beatTarget) { settings().beatTarget = beats; save(); }
+    }
+
+    void generateChapter({ quiet: false, regenerate, force: true, userText: userAskText(ask, 'chapter') });
     return true;
 }
 
@@ -3100,7 +3156,7 @@ function renderNowTab() {
         </details>`;
 
     host.querySelector('.sd-generate-chapter')?.addEventListener('click', () => {
-        void generateChapter({ quiet: false, regenerate: !!title, force: true });
+        void openChapterDialog({ regenerate: !!title });
     });
     host.querySelector('.sd-force-open')?.addEventListener('click', () => { void forceOpenStory(); });
     host.querySelector('.sd-next-beat')?.addEventListener('click', () => {
@@ -3171,7 +3227,7 @@ function renderMainTab() {
         </div>`;
 
     host.querySelector('.sd-save-main')?.addEventListener('click', () => { void saveMainFromForm(); });
-    host.querySelector('.sd-generate-chapter')?.addEventListener('click', () => { void generateChapter({ quiet: false, regenerate: true, force: true }); });
+    host.querySelector('.sd-generate-chapter')?.addEventListener('click', () => { void openChapterDialog({ regenerate: true }); });
     host.querySelector('.sd-regen-rest')?.addEventListener('click', () => { void regenerateRemainingBeats(); });
     host.querySelectorAll('.sd-intensity').forEach((button) => {
         button.addEventListener('click', () => {
