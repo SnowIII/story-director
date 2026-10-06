@@ -1385,3 +1385,38 @@ export function worldbookDigest(entries) {
     })
     .join('\n\n');
 }
+
+/**
+ * 把「新设计的拍」并进「已有的拍列表」——**保住已经演过的那些，新拍接在后面**。
+ *
+ * ★ 补事故：以前 applyChapter 的 keep 默认 0，任何没显式传 keep 的路径都会把已演的拍全丢掉、
+ *   拍号回到 1（用户演到第 2 拍、主线一重生成就被打回第 1 拍重来）。
+ *   抽成纯函数就是为了能离线测这个行为。
+ *
+ * @param {string[]} oldBeats 当前拍列表
+ * @param {number} played     已经真的演过几拍（以「当前拍 - 1」为准）
+ * @param {string[]} fresh    新设计出来的拍
+ * @param {number} maxBeats   总拍数上限
+ * @returns {string[]} 合并后的拍列表
+ */
+export function mergeBeats(oldBeats, played, fresh, maxBeats) {
+  const old = (Array.isArray(oldBeats) ? oldBeats : []).filter((b) => String(b ?? '').trim());
+  const cap = Math.max(1, Math.round(Number(maxBeats) || 1));
+  const kept = Math.max(0, Math.min(old.length, Math.round(Number(played) || 0)));
+  const room = Math.max(1, cap - kept);
+  const added = (Array.isArray(fresh) ? fresh : []).filter((b) => String(b ?? '').trim()).slice(0, room);
+  // 只做「保住已演的 + 接上新设计的」。**不**去补回旧的、还没演的拍：
+  // 那些正是这次要换掉的（它们已经被判定走不通），捡回来等于把废案重新塞进队列。
+  // 最后再夹一次上限：极端情况下（played 已达上限）追加会让总数超一点。
+  return [...old.slice(0, kept), ...added].slice(0, cap);
+}
+
+/**
+ * 给神谕的「只写剩余的 N 拍」：`keep` 为 0 时给一整章，否则给剩下的额度。
+ * 与 mergeBeats 配套（否则会多给拍、或者少给拍）。
+ */
+export function remainingBeatBudget(keep, target) {
+  const t = Math.max(1, Math.round(Number(target) || 1));
+  const k = Math.max(0, Math.round(Number(keep) || 0));
+  return k > 0 ? Math.max(1, t - k) : t;
+}

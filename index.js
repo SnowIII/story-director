@@ -42,6 +42,7 @@ import {
     renderInterludeChapterSection,
     chapterFromBlock, threadFromBlock, interludeFromBlock, interludeChapterFromBlock,
     applyNsCommands, extractNsCommands, worldbookDigest, setInterludeWritesAllowed, beatOrderSkipsRead,
+    mergeBeats, remainingBeatBudget,
 } from './model.js';
 
 const ID = 'story-director';
@@ -2145,22 +2146,36 @@ async function askOracle({ task = 'chapter', userText = '', regenerate = false, 
 
 /**
  * 解析并采用一条主线。
- * `keep` = 保留前几拍不动（用于「只重排剩下的拍」：已经演过的内容一个字不改）。
+ *
+ * ★ `keep` 的语义（这一条是补事故的）：
+ *   · `undefined`（默认）→ **自动**：这一章已经演过几拍就保住几拍，新给的拍接在**后面**。
+ *     —— 以前默认是 0，于是任何没显式传 keep 的路径都会把已演的拍全丢掉、拍号回到 1：
+ *        用户演到第 2 拍、主线一重生成，就被打回第 1 拍重来。
+ *   · `0` → **整章重来**（拍号从 1 开始）。只在「重新生成本章」这种明确说了推倒重写的入口用。
+ *   · `>0` → 强制保留前 N 拍（「只重排剩下的拍」用）。
+ *
+ * `restart: true` 是 `keep: 0` 的显式写法（更不容易被误读），两者都表示整章重来。
  */
-async function applyChapter(chapter, { live = null, quiet = false, keep = 0 } = {}) {
+async function applyChapter(chapter, { live = null, quiet = false, keep = undefined, restart = false } = {}) {
     const s = settings();
     const fresh = Array.isArray(chapter?.[MAIN_BEATS]) ? chapter[MAIN_BEATS] : [];
-    if (!fresh.length && keep <= 0) {
+    const previous = mainState(live);
+    const old = beatsOf(previous);
+    // 已经真的演过几拍：以 MVU 里的「当前拍 - 1」为准（这是唯一的真相来源）
+    const alreadyPlayed = Math.max(0, Math.min(old.length, currentBeat(previous) - 1));
+    const played = restart || keep === 0
+        ? 0                                                   // 明确要求整章重来
+        : (keep === undefined || keep === null
+            ? alreadyPlayed                                   // 默认：保住已演的，接着往后排
+            : Math.max(0, Math.min(old.length, Math.round(toNumber(keep, 0)))));
+    if (!fresh.length && played <= 0) {
         if (!quiet) toast('这一章没有拍列表，没有采用。', 'warning');
         return false;
     }
-    const previous = mainState(live);
-    const old = beatsOf(previous);
-    const played = Math.max(0, Math.min(old.length, Math.round(toNumber(keep, 0))));
     // 先把新给的拍裁到剩下的额度里，再拼接：这样总拍数**永远**不超过 BEAT_MAX，
     // 与注入（renderMainSection 的 maxBeats）和状态机（beats.length）三处同源。
-    const room = Math.max(1, BEAT_MAX - played);
-    const beats = [...old.slice(0, played), ...fresh.slice(0, room)];
+    // 保住已演过的、只换掉后面的 —— 算法在 model.js 里（纯函数，可离线测）。
+    const beats = mergeBeats(old, played, fresh, BEAT_MAX);
     const fields = {
         [MAIN_TITLE]: played > 0 ? (String(unwrap(previous[MAIN_TITLE]) ?? '').trim() || chapter[MAIN_TITLE]) : chapter[MAIN_TITLE],
         [MAIN_ARC]: played > 0 ? (String(unwrap(previous[MAIN_ARC]) ?? '').trim() || chapter[MAIN_ARC]) : chapter[MAIN_ARC],
@@ -2408,7 +2423,9 @@ async function openChapterDialog({ regenerate = false } = {}) {
         else { clearPin('chapter'); }
     }
 
-    void generateChapter({ quiet: false, regenerate, force: true, userText: userAskText(ask, 'chapter') });
+    // ★「重新生成本章」= 用户明确说要推倒重写 → 允许拍号回到 1（restart）。
+    //   其它所有路径（审查重排 / 重设计 / 采用 / 自动）都走自动保留，不会把进度打回去。
+    void generateChapter({ quiet: false, regenerate, restart: regenerate, force: true, userText: userAskText(ask, 'chapter') });
     return true;
 }
 
@@ -2467,7 +2484,19 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
 /**
  * 生成新的一章主线（面板按钮 / 自动开章 / 重排剩余拍共用）。keep>0 时保留前 keep 拍不动。
  */
-async function generateChapter({ quiet = true, regenerate = false, rejected = null, userText = '', force = false, keep = 0 } = {}) {
+async function generateChapter({ quiet = true, regenerate = false, rejected = null, userText = '', force = false, keep = undefined, restart = false } = {}) {
+    // ★ 先把 keep 归一成**明确的数字**，后面所有判断与落盘都用它。
+    //   undefined = 自动：保住这一章已经演过的拍，新拍接在后面（默认行为，防「重生成把进度打回第 1 拍」）；
+    //   0 / restart: true = 整章重来；
+    //   >0 = 强制保留前 N 拍。
+    {
+        const current = mainState();
+        const currentBeats = beatsOf(current);
+        const playedNow = Math.max(0, Math.min(currentBeats.length, currentBeat(current) - 1));
+        keep = (restart || keep === 0)
+            ? 0
+            : (keep === undefined || keep === null ? playedNow : Math.max(0, Math.round(toNumber(keep, 0))));
+    }
     if (!mvu()?.replaceMvuData && !mvu()?.getMvuData) {
         if (!quiet) toast('MVU 未加载：先确认酒馆助手与 MVU 装好了、这个聊天有变量。', 'warning');
         return false;
@@ -2487,7 +2516,7 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
             regenerate,
             rejected,
             keep,
-            remaining: keep > 0 ? Math.max(1, Math.round(toNumber(settings().beatTarget, 4))) : 0,
+            remaining: remainingBeatBudget(keep, settings().beatTarget),
             quiet,
             userText,
         });
@@ -2660,18 +2689,21 @@ async function handleBeatReview({ live = null } = {}) {
         // ② 级：这一章的设计本身立不住 → **废掉整章重建**（不再保留已演过的拍）
         s.run.redesignsL2 = l2 + 1;
         save();
-        toast(`这一章重排 ${maxL1} 次仍然报「${why}——判断为**这一章的设计立不住**，已废掉整章、正在按新的处境重建（第 ${l2 + 1}/${REDESIGN_MAX_L2} 次）。`, 'warning');
-        console.info(`[故事导演] 升级到②级：废弃《${title || '当前章'}》并重建（原因：${state}${note ? ' —— ' + note : ''}）。`);
+        toast(`这一章重排 ${maxL1} 次仍然报「${why}——判断为**这一章的设计立不住**，正在**重设计剩下的拍**（已演过的 ${played} 拍保留；第 ${l2 + 1}/${REDESIGN_MAX_L2} 次）。`, 'warning');
+        console.info(`[故事导演] 升级到②级：重设计《${title || '当前章'}》剩下的拍（保留已演的 ${played} 拍；原因：${state}${note ? ' —— ' + note : ''}）。`);
         void generateChapter({
-            quiet: true, regenerate: true, force: true, keep: 0,
+            // ★ 保留已经演过的拍（keep 走自动）—— 重设计的是**剩下的**那一部分。
+            //   以前这里是 keep: 0（把整章连进度一起废掉）；那会让用户「演了一半被打回第 1 拍」，
+            //   而且刚播下的伏笔、已经付掉的代价一起作废，反而更容易再被判站不住。
+            quiet: true, regenerate: true, force: true,
             rejected: {
                 state,
                 note,
                 scrap: true,
-                badBeats: beatsOf(main),
-                reason: `这一章的设计整体不成立（重排 ${maxL1} 次仍未解决）：${note || state}。`
-                    + '**不要**沿用原来的地点、人物组合与事件顺序 —— 换一个真正立得住的开场与推进方式，'
-                    + '但这一章要服务的长线目标不能丢。',
+                badBeats: beatsOf(main).slice(played),
+                reason: `这一章的**剩余部分**反复立不住（重排 ${maxL1} 次仍未解决）：${note || state}。`
+                    + '请**换一套推进方式**：不要沿用原来剩下的那几拍的地点、人物组合与事件顺序，'
+                    + '换一条在当前处境下真正走得通的路 —— 但这一章要服务的长线目标不能丢。',
             },
         });
         return true;
@@ -2696,12 +2728,13 @@ async function handleBeatReview({ live = null } = {}) {
             toast('总纲没能重设成功 —— 仍然会重建这一章（它只是配料）。', 'warning');
         }
         void generateChapter({
-            quiet: true, regenerate: true, force: true, keep: 0,
+            // ★ 同样保留已演过的拍：总纲换了方向，也只是「剩下的怎么走」要重新想。
+            quiet: true, regenerate: true, force: true,
             rejected: {
                 state, note, scrap: true,
-                badBeats: beatsOf(main),
+                badBeats: beatsOf(main).slice(played),
                 reason: '长线这一段的方向已经被判定立不住，总纲刚刚重设过。'
-                    + '这一章要按**新的长线方向**重新设计，不要沿用原来的设计。',
+                    + '这一章的**剩余部分**要按**新的长线方向**重新设计，不要沿用原来的设计。',
             },
         });
     })();
@@ -3261,6 +3294,9 @@ function registerOracleAction(api) {
             }
             const chapter = chapterFromBlock(blocks[blocks.length - 1], { index: Object.keys(settings().chapters || {}).length });
             if (!chapter[MAIN_BEATS].length) { toast('这个区块里没有可识别的拍列表。', 'warning'); return; }
+            // ★ 不传 keep = 自动：本章已经演过的拍会保留，新设计的拍接在后面。
+            //   以前这里是裸调用（keep 默认 0），一按就把进度打回第 1 拍 ——
+            //   用户演到第 2 拍时点这个按钮，等于把前两拍白演了。
             void applyChapter(chapter, { quiet: false });
         },
     });
