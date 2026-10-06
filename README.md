@@ -278,6 +278,7 @@ SillyTavern/public/scripts/extensions/third-party/
 ### 授权
 
 本插件以 **MIT** 发布（见 `LICENSE`）。上面列的依赖各自归其作者，请遵守它们各自的许可。
+若作者对此有不同要求，请联系喵辉夜进行调整。
 
 ### 特别致谢
 
