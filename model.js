@@ -58,6 +58,13 @@ export const THREAD_FIELDS = {
 };
 
 export const MAIN_TITLE = '标题';
+/**
+ * 这一章属于哪一部。
+ *
+ * ⚠ 显示标签叫「**分卷**」而不是「篇章」：**「篇章」已经被史诗那一层占用了**
+ *   （`史诗.篇章` = 整条长线在争什么）。两者含义不同，同名会让面板与提示词都分不清在说哪一层。
+ *   **键名仍然是 `篇章`** —— 改键名会动老存档，得不偿失。
+ */
 export const MAIN_ARC = '篇章';
 export const MAIN_SCOPE = '范围';
 export const MAIN_GOAL = '章目标';
@@ -68,28 +75,30 @@ export const MAIN_ENDED = '结束';
 export const MAIN_CLOSED = '已收尾';
 
 /**
- * 「史诗」（总纲）—— 围绕 **{{user}}** 的那条长线，跨越**很多章**。
+ * 「史诗」（篇章）—— 围绕 **{{user}}** 的那条长线，跨越**很多章**。
  *
  * 为什么需要它：只按章续写时，模型只能就着眼前写，很容易写出「跟着商队走来走去」这种平铺直叙。
- * 有了总纲，每一章都是这条长线的一拍：章与章之间有「势」，长度上去了才有史诗感。
+ * 有了篇章，每一章都是这条长线的一拍：章与章之间有「势」，长度上去了才有史诗感。
  *
  * 两条必须同时成立的原则（缺一条就会走偏）：
- *   · **{{user}} 是主角**：总纲写的是「围绕他发生了什么事、他被卷进什么里面、他身边这些人怎么变」。
+ *   · **{{user}} 是主角**：篇章写的是「围绕他发生了什么事、他被卷进什么里面、他身边这些人怎么变」。
  *     与他无关的势力动向只作背景与压力，不要喧宾夺主。
- *   · **但不替他行动**：总纲规划的是**世界这边会怎么压过来**，不是「他会怎么做」。
- *     他中途走出剧本是常态 —— 所以总纲要留出「他会不按套路来」的余地，
+ *   · **但不替他行动**：篇章规划的是**世界这边会怎么压过来**，不是「他会怎么做」。
+ *     他中途走出剧本是常态 —— 所以篇章要留出「他会不按套路来」的余地，
  *     并且每一个新章开始之前都要按「他实际做了什么」重新校准。
  */
 export const EPIC = '史诗';
 export const EP = {
   title: '标题',
-  line: '总纲',
+  line: '篇章',
+  /** 老存档里这个字段叫「总纲」——读取时兼容，避免升级后看起来像丢了总纲。 */
+  lineLegacy: '总纲',
   /**
    * 这条长线的**宏观阶段**（整部戏的骨架，不是章节计划）。
    *
-   * ⚠ 这一层刻意**不写「下一章做什么」**：总纲只回答「整部戏分几个大阶段、现在走到哪」，
+   * ⚠ 这一层刻意**不写「下一章做什么」**：篇章只回答「整部戏分几个大阶段、现在走到哪」，
    * 具体一章怎么起承转合由**主线自己**设计。
-   * 历史上这里存的是「4~5 段 = 未来 4~5 章」的章纲，那会把总纲压得和章一样细 —— 该用法已废弃；
+   * 历史上这里存的是「4~5 段 = 未来 4~5 章」的章纲，那会把篇章压得和章一样细 —— 该用法已废弃；
    * 字段名保留只为兼容老存档（面板与注入都按"阶段"读它）。
    */
   movements: '走向',
@@ -112,7 +121,7 @@ export const EPIC_STAGES = ['启程', '试炼', '至暗', '转折', '终局'];
  * 基调决定这条长线是什么「型」的故事 —— 冒险有大事件与险境，日常有日常的张力，
  * 推理有谜面与揭破……同一个骨架在不同基调下的内容完全不同。
  *
- * 每条 tone 会作为**最上位的创作方针**塞进总纲提示词（以及章节提示词）。
+ * 每条 tone 会作为**最上位的创作方针**塞进篇章提示词（以及章节提示词）。
  * `auto` = 不设基调，沿用世界的自然走向。
  */
 export const TONES = {
@@ -172,10 +181,18 @@ export function emptyEpic() {
 export function epicOf(root) {
   const ns = isPlainObject(root?.[NS]) ? root[NS] : null;
   const box = ns && isPlainObject(ns[EPIC]) ? ns[EPIC] : null;
-  return box ? { ...emptyEpic(), ...box } : emptyEpic();
+  if (!box) return emptyEpic();
+  const merged = { ...emptyEpic(), ...box };
+  // ⚠ 老存档里这一条叫「总纲」；新的是「篇章」。
+  //   读取时把老键搬过来（**不**回写 MVU，避免每次心跳都动变量）。
+  if (!String(merged[EP.line] ?? '').trim()) {
+    const legacy = String(unwrap(box[EP.lineLegacy]) ?? '').trim();
+    if (legacy) merged[EP.line] = legacy;
+  }
+  return merged;
 }
 
-/** 史诗是否已经有内容（决定要不要自动生成总纲）。 */
+/** 史诗是否已经有内容（决定要不要自动生成篇章）。 */
 export function epicStarted(epic) {
   return !!String(unwrap(epic?.[EP.line]) ?? '').trim() || !!String(unwrap(epic?.[EP.title]) ?? '').trim();
 }
@@ -186,16 +203,16 @@ export function epicStarted(epic) {
  * 留空（或只有空白）→ 回空串，等于「不加要求，让它自己判断」。
  *
  * @param {string} raw 用户填的原文
- * @param {'epic'|'chapter'} kind 生成的是总纲还是某一章（只影响那句话的措辞）
+ * @param {'epic'|'chapter'} kind 生成的是篇章还是某一章（只影响那句话的措辞）
  */
 export function userAskText(raw, kind = 'epic') {
   const ask = String(raw ?? '').trim();
   if (!ask) return '';
-  const what = kind === 'epic' ? '这条总纲' : '这一章';
+  const what = kind === 'epic' ? '这条篇章' : '这一章';
   return `用户对${what}的要求与倾向（**优先满足**，与下面其它规则冲突时以它为准）：\n${ask}`;
 }
 
-/** 向后兼容的别名（总纲用）。 */
+/** 向后兼容的别名（篇章用）。 */
 export function epicAskText(raw) {
   return userAskText(raw, 'epic');
 }
@@ -225,15 +242,15 @@ export function epicHooks(epic) {
   return splitBeats(raw);
 }
 
-/** 总纲更新到第几章了（用来判断要不要在开新章前重新校准）。 */
+/** 篇章更新到第几章了（用来判断要不要在开新章前重新校准）。 */
 export function epicChapter(epic) {
   return Math.max(0, Math.round(toNumber(epic?.[EP.chapter], 0)));
 }
 
 /**
- * 把总纲渲染成给**导演层（面板 / 诊断）**看的一节：大势 + 走到哪个大阶段了。
+ * 把篇章渲染成给**导演层（面板 / 诊断）**看的一节：大势 + 走到哪个大阶段了。
  *
- * ⚠ **不要把它注入正文** —— 总纲不进正文注入（见 buildInjection 里的注释）：
+ * ⚠ **不要把它注入正文** —— 篇章不进正文注入（见 buildInjection 里的注释）：
  *   叙事者一眼看完整条长线的走向与结局，就会急着把剧情往前赶、伏笔还没铺就被兑现。
  *   这一节只是给人看的；叙事者那边只有「这一章」。
  */
@@ -270,7 +287,7 @@ export function epicFromBlock(raw, { chapter = 0 } = {}) {
   return {
     ...emptyEpic(),
     [EP.title]: sanitize(attrOf(attrs, '标题', 'title'), 60),
-    [EP.line]: sanitize(attrOf(attrs, '总纲', '纲', 'line'), 400),
+    [EP.line]: sanitize(attrOf(attrs, '篇章', '总纲', '纲', 'line'), 400),
     [EP.movements]: movements.map((text) => sanitize(text, 300)).slice(0, 12),
     [EP.hooks]: hooks.map((text) => sanitize(text, 200)).slice(0, 8),
     [EP.ledger]: sanitize(attrOf(attrs, '既成事实', '事实', 'ledger'), 600),
@@ -891,7 +908,7 @@ export function renderContractSection({ banUserAction = true } = {}) {
     `_.set('${PATH.threads}.t1.${THREAD_FIELDS.done}', true);`,
     `_.set('${PATH.interludes}.i1.${INTERLUDE_FIELDS.done}', true);`,
     '```',
-    `　· \`${NS}.${EPIC}.*\`（总纲）是**导演写的，你只读** —— 不要自己改它。`,
+    `　· \`${NS}.${EPIC}.*\`（篇章）是**导演写的，你只读** —— 不要自己改它。`,
     '　· 只有**真的写进正文之后**才写这些命令；写不出、拿不准就什么都不写（插件不会因此卡住，下一轮照旧引导）。',
     `　· \`${PATH.interlude}.*\` 只在**间章**时段有效（注入块里有【间章】时）；主线时段写它会被插件忽略。`,
     '　· 不要自己改 `拍` 列表与 `标题`（那是导演的事）；不要写 `故事导演` 之外的新根键。',
