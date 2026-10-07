@@ -37,11 +37,41 @@ export const KEY_READY = '可进下一章';
 export const KEY_REVIEW = '合理性审查';
 export const KEY_REVIEW_NOTE = '审查说明';
 export const REVIEW_PASS = '通过';
+/**
+ * ★ 给正文模型的**自由裁量权**（0.27.0，用户定的）：
+ * 「如果这一拍的内容已经偏离事实、或缺少铺垫、或有什么错，但**不到需要打回重写的地步**，
+ *   可以在保证剧情发展的范围内，按现有趋势调整这一拍。」
+ *
+ * 所以 `调整` 的语义变了：**模型自己就地改执行方式**（换场合 / 换个人触发 / 补一句因 / 晚一点发生），
+ * **目的与结果不变**；插件**不重排拍、不花神谕**，只回它一句边界提醒。
+ * （以前 `调整` 会触发一次神谕重排 —— 为一个小问题烧一次调用，模型于是宁愿硬演。）
+ */
 export const REVIEW_ADJUST = '调整';
+/** 真的立不住（要成立就得硬加设定 / 会让人物出戏 / 和已发生的事直接矛盾）→ 才走打回阶梯。 */
 export const REVIEW_REJECT = '驳回';
-export const REVIEW_STATES = [REVIEW_PASS, REVIEW_ADJUST, REVIEW_REJECT];
+/** ★ 这一拍**能演、但缺一步因**：谁为什么会这么做 / 这个局面为什么会突然变成这样。 */
+export const REVIEW_SETUP = '缺铺垫';
+export const REVIEW_STATES = [REVIEW_PASS, REVIEW_ADJUST, REVIEW_REJECT, REVIEW_SETUP];
 /** 同一个位置连续被退回几次就停手，免得两个模型互相顶牛。 */
 export const REVIEW_MAX_RETRY = 3;
+
+/**
+ * 一个审查结论该怎么处理（纯函数 —— 三档处置必须能离线测）。
+ *
+ *   · `pass`  —— 没意见，什么都不做；
+ *   · `lite`  —— **模型自己能消化**（`调整` / `缺铺垫`）：**不花神谕、不动计划**，
+ *                只给它一句注入备注；`缺铺垫` 还要把这一拍**按住**（`hold`）等它补完；
+ *   · `redo`  —— 真立不住（`驳回`）：才走打回阶梯（重排剩下的拍 / 三次之后改篇章）。
+ *
+ * ⚠ 这三档的分界线就是用户的原话：「不到需要打回重写的地步」的，都归 `lite`。
+ */
+export function reviewAction(state) {
+  const s = String(state ?? '').trim();
+  if (!s || s === REVIEW_PASS) return { kind: 'pass', hold: false };
+  if (s === REVIEW_SETUP) return { kind: 'lite', note: 'setup', hold: true };
+  if (s === REVIEW_ADJUST) return { kind: 'lite', note: 'adjust', hold: false };
+  return { kind: 'redo', hold: false };
+}
 
 /** 支线字段名（世界书与插件共享的契约）。 */
 export const THREAD_FIELDS = {
@@ -837,7 +867,7 @@ export function renderInjectionHeader({ banUserAction = true, mode = 'main' } = 
 /**
  * 主线区块：整条线的拍列表 + 本轮聚焦哪一拍 + 落拍回报怎么写。
  */
-export function renderMainSection(main, { maxBeats = 8, root = null, banUserAction = true, focusStale = '' } = {}) {
+export function renderMainSection(main, { maxBeats = 8, root = null, banUserAction = true, focusStale = '', setupNote = '', beatNote = '' } = {}) {
   const lines = [];
   const title = String(unwrap(main[MAIN_TITLE]) ?? '').trim();
   const arc = String(unwrap(main[MAIN_ARC]) ?? '').trim();
@@ -891,7 +921,22 @@ export function renderMainSection(main, { maxBeats = 8, root = null, banUserActi
     lines.push('　**不要复读**：已经写过的对话、比喻、动作不要换几个词再写一遍。连着两轮用同一个句式开头、说同一类话，就算失败。');
   }
 
-  // ★ **落拍前的三关**（0.26.1 加，补用户反馈的「推得太快」）：
+  // ★ 这一拍还缺一步因（模型自己报的 `缺铺垫`）→ 这一轮先补它（用户提的「缓插」）。
+  if (setupNote) {
+    lines.push(
+      `⚠ **这一拍先按住，补一步铺垫再演**：${setupNote}`,
+      '　　先把这一步写进正文（谁为什么会这么做 / 这个局面为什么会变成这样），补完再照常推进这一拍；',
+      '　　补到位了就照常报「这一拍落了」，插件会接着往下走。',
+    );
+  }
+  // ★ 模型自己按趋势改过这一拍的执行（`调整`）→ 回它一句边界：改执行可以，改目的不行。
+  if (beatNote) {
+    lines.push(
+      `✅ **这一拍你调整过**（${beatNote}）—— 照你调整后的演，**不改这一拍要达到的结果**，继续推进。`,
+    );
+  }
+
+  // ★ 落拍前的三关（0.26.1 加，补用户反馈的「推得太快」）：
   //   以前只写「真的写进正文之后才回报」，但模型会**一句话带过**就把一拍算落了 ——
   //   典型症状：上一轮还在宿舍跟人说话，这一轮已经在列车上了（跳场）。
   //   所以把「演完了没 / 跳场没 / 上一拍收尾没」变成能判定的三条，和「换场要演过渡」一起给。

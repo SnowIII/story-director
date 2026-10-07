@@ -36,7 +36,7 @@ import {
     REVIEW_PASS, REVIEW_STATES, REVIEW_MAX_RETRY,
     STATUS_PENDING, STATUS_ACTIVE, STATUS_DONE, STATUS_SKIPPED, STATUS_STALLED,
     isPlainObject, unwrap, unwrapDeep, display, toNumber, truthy,
-    reviewLadder, STRIKES_BEFORE_EPIC, nsHasState, beatRollbackTarget,
+    reviewLadder, STRIKES_BEFORE_EPIC, nsHasState, beatRollbackTarget, reviewAction, REVIEW_SETUP,
     capText, splitBeats, beatsOf, parseBlocks,
     emptyMain, mainOf, listOf, currentBeat, reviewStateOf, reviewNoteOf,
     isLiveThread, threadLanded, interludePending, interludeAfter,
@@ -317,6 +317,17 @@ const DEFAULT = {
      * 正是「推了一下剧情篇章大纲就自己变了」。所以直接删掉，不给第三种改法。
      */
     autoEpic: true,
+    /**
+     * ★ **每章演完后检查一次篇章**（0.27.0，用户提的）。
+     *
+     * 「一章完美结束了之后，是不是应该加一个篇章检查任务呢？不像之前的任务是重新生成篇章 ——
+     *   已经有完成的章节了，只是检测，看看事情现在的发展，适当调整之后的发展。」
+     *
+     * 所以它和「重新定篇章」「重新校准」都不一样：**先判断，默认不动**；只有真的走不通的那几章才改。
+     * 时机利用**间章**那几轮（旧章刚完、新章还不该立刻衔接），不占主线的等待；不走间章时在开下一章前做。
+     * 成本：**一部一次/章**。
+     */
+    auditEpic: true,
     /** 基调：由用户在下拉里选（冒险 / 日常 / 悬疑……），决定这条长线是什么型的故事。 */
     tone: 'auto',
     storyTranscript: true,
@@ -450,6 +461,18 @@ const DEFAULT = {
          * 只有「回复数变少」才可能把这一拍的进度退回去（见 syncBeatBackOnRollback）。
          */
         lastCount: 0,
+        /**
+         * ★ 一次性的注入备注（0.27.0，用户提的「缓插 / 先铺垫再插」）：
+         *   · `setupNote` —— 正文模型报了 `缺铺垫`，它说缺哪一步；这一拍**按住**，直到补完（换拍/换章时清掉）；
+         *   · `beatNote`  —— 正文模型报了 `调整`（自己按趋势改了执行方式）；回它一句边界，下一轮就清掉。
+         * 两者都**不花神谕**：模型自己能消化的事，不该为它烧一次调用。
+         */
+        setupNote: '',
+        beatNote: '',
+        /** 已经为哪一章做过「篇章检查」（键 = closedChapter，换章即失效）。 */
+        auditedFor: '',
+        /** 上一次篇章检查的结论（面板上留个可见的记录）。 */
+        lastAudit: null,
     },
     chapters: {},
     /** 已经报过一次的信息性提示（见 toastOnce）—— 免得每次刷新都弹同一句。 */
@@ -1552,7 +1575,12 @@ function buildInjection(live = null) {
             const chapter = interludeChapterOf(root);
             mainLines = renderInterludeChapterSection(chapter, { maxBeats: BEAT_MAX, banUserAction: ban }).lines;
         } else if (hasMain) {
-            mainLines = renderMainSection(main, { maxBeats: BEAT_MAX, root, banUserAction: ban, focusStale: s.run.focusStale }).lines;
+            mainLines = renderMainSection(main, {
+                maxBeats: BEAT_MAX, root, banUserAction: ban, focusStale: s.run.focusStale,
+                // ★ 0.27.0：模型自己报的「缺铺垫」与「微调」各回它一句（只出现一轮 / 补完为止）。
+                setupNote: s.run.setupNote || '',
+                beatNote: s.run.beatNote || '',
+            }).lines;
         } else {
             // ⚠ 还没开篇 → **一个字节都不注入**。
             //   导演还没有这一章，就不该对正文说任何话：不要「等你准备好」的占位、
@@ -2446,13 +2474,26 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
         '你是「故事导演」的**篇章设计师**，为一个正在进行的角色扮演服务。',
         mode === 'establish'
             ? '你的唯一任务：**为这个故事定下一部「篇章」**（一部完整的大故事）—— 它由若干「章」组成，每一章自己也是一个完整的小故事。之后每一章都由主线细化成「拍」。'
-            : '你的唯一任务：**按 {{user}} 实际做了什么，重新校准这一部篇章**（只改**还没写**的那几章）。他不是按剧本走的，你要跟着他改。',
+            : (mode === 'audit'
+                // ★ 0.27.0：章末的**检查**任务（用户提的）——「只是检测，看看事情现在的发展，适当调整之后的发展」。
+                //   与「重新校准」最大的区别：**默认不动**。成立就一字不改地抄回来。
+                ? '你的唯一任务：**检查这一部篇章还成不成立** —— 一章刚刚演完，{{user}} 未必按剧本走（可能早就偏离、甚至反着来）。'
+                    + '你要判断的是：**往后还没写的那几章，在「已经发生的这些事」之后还走得通吗？**'
+                : '你的唯一任务：**按 {{user}} 实际做了什么，重新校准这一部篇章**（只改**还没写**的那几章）。他不是按剧本走的，你要跟着他改。'),
         '规则优先级：用户在本插件里明确提出来的要求（优先满足）> 本提示词里的设计规则 > 角色卡自带设定（只作可选参考）；卡与世界书里已有的设定是**既成事实**，只能沿用、不能改写。',
         '你交的是一份**篇章**：这一部大故事在争什么、**由几章组成、每一章是什么**、大高潮落在哪一章。不写正文、不写台词。',
         '',
         ...(mode === 'establish' ? [
             '⚠ **这是「新的一部」**：上面「防重复」里列的是**上一部已经讲过的章表** —— 要避开，不是照着填。',
             '　换一个「在争的东西」、换一套因果：把新排的几章和上一部摊开对照，**除了换几个名字还有区别吗？**',
+            '',
+        ] : mode === 'audit' ? [
+            '⚠ **这是一次「检查」，不是重写。默认什么都不改。**',
+            '　· **先判断**：往后那几章，按现在这个局面（{{user}} 实际做了什么、哪些人还在、什么已经不可逆）还走得通吗？',
+            '　· **走得通 → 一字不改地照抄回来**（标题、章内容、大高潮、伏笔、既成事实全部原样），最后写一句 `检查: 照旧`。',
+            '　· **只有真的走不通的那几章**才动它：让它**从现在的局面自然长出来**（不要求它保持原来的剧情，只要求它服务同一个终局）。',
+            '　· **已经写过的章一个字都不许动**（那是既成事实）；**标题也不许改**；能少改就少改，`检查:` 里一句话说清改了什么、为什么。',
+            '　· ⚠ 常见病：{{user}} 早就没按原计划走，可后面的章还写着「靠他出手才成事」—— 这种**必须改**，改成「没有他出手，事情会变成什么样」。',
             '',
         ] : [
             '⚠ **还是同一部，标题不要改**：上面给的标题就是这一部的名字，已经写过的章挂在它下面。',
@@ -2513,7 +2554,10 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
         if (chapter > 0) lines.push(`这部篇章从**接下来那一章**开始排；**章表第 1 条就该是「马上要发生的事」**。`);
         lines.push(`请从**现在的处境**出发：读最近对话，看他是谁、他身边有谁、他手里有什么、什么东西正在逼近他。然后排满 ${perEpic} 章。`);
     } else {
-        lines.push('本次是**重新校准**，请按下面这些事实改写篇章：');
+        // `audit`（章末检查）与 `evolve`（重新校准）共用这段事实交代 —— 两者都要看「实际走过的路」。
+        lines.push(mode === 'audit'
+            ? '这一部已经演完的章、以及**每一章实际达成的目标**（审查这次的判断依据）：'
+            : '本次是**重新校准**，请按下面这些事实改写篇章：');
         if (last) lines.push(`最近一章：「${last}」`);
         if (history.length) lines.push(`走过的章：${history.join(' → ')}`);
         const chapterGoals = completedChapterGoals(rootOf());
@@ -2527,11 +2571,15 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
             '  就**改掉那几章**，而不是硬把它们圆回去。',
             '- 自检的判据只有一条：**下一章还能从当前处境里自然长出来吗？** 长不出来，就是章表要改。',
             '',
-            '校准的原则（**大故事不丢，路线可以改**）：',
+            mode === 'audit' ? '检查的原则（**默认不动，能少改就少改**）：' : '校准的原则（**大故事不丢，路线可以改**）：',
             '- 已经发生的事**不可撤销**：把它们全部并入「既成事实」，后面的一切建立在上面；',
             '- 他做过的事、他表过的态，就是这一部现在的走向 —— 不要假装没发生，也不要拉他回去；',
-            '- 如果他的做法让原来那几章不成立了，就**换一条通往同一个终局的路**（保留他在乎的东西与要付的代价，改中间的路径）；',
-            '- 如果他走出了一个完全没想到的方向，就**顺着他的方向重新想这部大故事的去处与终局** —— 那可能比原来的更好；',
+            mode === 'audit'
+                ? '- ★ **走得通就一字不改地照抄**（这是最正常的结果）；只有真的走不通的那几章才动它，**章数不变**；'
+                : '- 如果他的做法让原来那几章不成立了，就**换一条通往同一个终局的路**（保留他在乎的东西与要付的代价，改中间的路径）；',
+            mode === 'audit'
+                ? '- 改的时候**从现在的局面自然长出来**：不要求保住原来的剧情，只要求保住这一部在争的东西与终局。'
+                : '- 如果他走出了一个完全没想到的方向，就**顺着他的方向重新想这部大故事的去处与终局** —— 那可能比原来的更好；',
             '- ★ **只改还没写的那几章**：已经写过的章要**原样保留**（它们已经演掉了），章表的总章数不要变；',
             '- 大高潮如果落在已经写过的章上，就把它往前挪到**还没写的某一章**（一部大故事的高潮不能已经过去）。',
         );
@@ -2553,6 +2601,12 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
         '伏笔: 三到六个还没兑现的细节，用「；」分开（要具体到能被复述）',
         '既成事实: 已经发生、不可撤销的事（用「；」分开；第一次定篇章时写现在的处境）',
         '</StoryEpic>',
+        // ★ 检查任务要的结论：写在区块**外面**单独一行，插件只拿它给你一句可见的回执。
+        ...(mode === 'audit' ? [
+            '',
+            '然后在区块**外面**单独写一行结论（插件会把它念给用户听）：',
+            '检查: 照旧 ／ 或 检查: 第 3 章起改成了……，因为……',
+        ] : []),
         '',
         '⚠ 章内容写的是**世界的动作**，不是{{user}}的动作：',
         '好例子：「使团的密信被人劫走，他的差事变成了别人的把柄」',
@@ -3233,10 +3287,10 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
         }
         const blocks = parseBlocks(raw, 'StoryEpic');
         const epic = blocks.length ? epicFromBlock(blocks[blocks.length - 1], { chapter: progress }) : null;
-        // ★ 校准（evolve）**不许换名字**：这一部还叫这个名字 —— 已经写过的章挂在它下面，
-        //   中途改名就是用户看到的「大纲自己变了」。要换名字只有两条路：
+        // ★ 校准（evolve）与检查（audit）**都不许换名字**：这一部还叫这个名字 —— 已经写过的章挂在
+        //   它下面，中途改名就是用户看到的「大纲自己变了」。要换名字只有两条路：
         //   ① 这一部写完了自动开新的一部（establish）；② 用户手动点「重新定篇章（换一部）」。
-        if (epic && mode === 'evolve') {
+        if (epic && (mode === 'evolve' || mode === 'audit')) {
             const keepTitle = String(unwrap(epicOf(rootOf())[EP.title]) ?? '').trim();
             if (keepTitle) epic[EP.title] = keepTitle;
         }
@@ -3245,6 +3299,26 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
             toast('没解析到 <StoryEpic> 区块，原始回复已打印到控制台。', 'warning');
             markFailed(key);
             return false;
+        }
+        // ★ 检查（audit）：比对章表，把结论**念给用户听**（默认「照旧」才是正常结果）。
+        if (mode === 'audit') {
+            const before = epicChapters(epicOf(rootOf()));
+            const after = epicChapters(epic);
+            const changed = stableJson(before) !== stableJson(after);
+            const verdict = String((raw.match(/检查[:：]\s*([^\n]+)/) || [])[1] ?? '').trim();
+            const run = settings().run;
+            run.lastAudit = {
+                at: aiMessageCount(),
+                章: String(unwrap(epicOf(rootOf())[EP.chapter]) ?? ''),
+                结果: changed ? 'adjusted' : 'unchanged',
+                说明: verdict.slice(0, 200),
+            };
+            save();
+            toast(changed
+                ? `篇章检查：往后几章已按实际发展调整${verdict ? ` —— ${verdict}` : '。'}`
+                : `篇章检查：这一部往后几章还成立，没动它${verdict ? `（${verdict}）` : '。'}`,
+                'info');
+            console.info(`[故事导演] 篇章检查结果：${changed ? '有调整' : '照旧'}${verdict ? `｜${verdict}` : ''}`);
         }
         await applyEpic(epic, { quiet: false, entry: progress });
         return true;
@@ -3409,6 +3483,20 @@ function mainStarted(live = null) {
 }
 
 /**
+ * 把「活变量」里那份审查结论也复位。
+ *
+ * 为什么：同一个 MVU 事件里，`rootOf(live)` 会被读好几次，而 `live` 是**事件带来的快照** ——
+ * 我们只写 `story`（与 MVU 存储）的话，后面几次读又会把旧结论（`调整` / `缺铺垫` / `驳回`）
+ * 从这份快照里拉回来，本轮就会反复处理同一个信号。抹掉它，两边当轮就一致了。
+ */
+function clearReviewInLive(live) {
+    const ns = live?.stat_data?.[NS];
+    if (!isPlainObject(ns) || !isPlainObject(ns[MAIN_SECTION])) return;
+    ns[MAIN_SECTION][KEY_REVIEW] = REVIEW_PASS;
+    ns[MAIN_SECTION][KEY_REVIEW_NOTE] = '';
+}
+
+/**
  * 这一章的身份（审查额度按它统计）。
  * 优先用 `run.chapterId`（真开章时播下、重排不动）；老存档没有就退回章名（只为兼容）。
  */
@@ -3441,20 +3529,49 @@ async function handleBeatReview({ live = null } = {}) {
     if (!s.autoDirector || !s.autoRedesign) return false;
     const main = mainState(live);
     const state = reviewStateOf(main);
-    if (state === REVIEW_PASS) {
-        // ⚠ **不清零审查额度**：原则是「同一章累计三次」，中间夹一次通过不该把前两次抹掉
-        //   （以前这里一通过就清零，于是永远攒不满 3 次 —— 梯子形同虚设）。
-        //   只把节流基准清掉，让下一次信号不必等。
-        if (s.run.redesignAt) { s.run.redesignAt = 0; save(); }
-        return false;
-    }
-
-    // 新的章 → 审查额度重新算（由 chapterId 判定，不看章名 —— 章名会变、也会重名）
     const chapterId = currentChapterId(live);
+    // 新的章 → 审查额度重新算（由 chapterId 判定，不看章名 —— 章名会变、也会重名）
     if (s.run.reviewStrikesFor !== chapterId) {
         s.run.reviewStrikesFor = chapterId;
         s.run.reviewStrikes = 0;
         s.run.epicRewroteFor = '';
+        s.run.setupNote = '';       // 换章了：上一章按着的那一拍作废
+        s.run.beatNote = '';
+    }
+    if (state === REVIEW_PASS) {
+        // ⚠ **不清零审查额度**：原则是「同一章累计三次」，中间夹一次通过不该把前两次抹掉
+        //   （以前这里一通过就清零，于是永远攒不满 3 次 —— 梯子形同虚设）。
+        //   只把节流基准清掉，让下一次信号不必等。
+        // ★ 顺手把「上一轮给过的微调回执」收掉 —— 它只该出现一轮（0.27.0）。
+        if (s.run.beatNote) { s.run.beatNote = ''; save(); }
+        if (s.run.redesignAt) { s.run.redesignAt = 0; save(); }
+        return false;
+    }
+
+    // ★ **模型自己能消化的事，不花神谕**（0.27.0：用户给正文模型的自由裁量权）：
+    //   `调整`   = 它已经按当前趋势把这一拍的**执行方式**改了（目的不变）→ 回它一句边界，继续推进；
+    //   `缺铺垫` = 这一步还缺一个来由 → **把这一拍按住**，并在下一轮注入里要求它先补上（用户提的「缓插」）。
+    //   两者都**不动计划、不计入打回阶梯**（阶梯只数 `驳回`）。
+    const action = reviewAction(state);
+    if (action.kind === 'lite') {
+        const note = reviewNoteOf(main);
+        await patchMain({ [KEY_REVIEW]: REVIEW_PASS, [KEY_REVIEW_NOTE]: '' }, { live });
+        clearReviewInLive(live);
+        if (action.note === 'setup') {
+            s.run.setupNote = note || '这一步还缺一个来由（谁为什么会这么做 / 局面为什么会突然变成这样）';
+            s.run.beatNote = '';
+            save();
+            toast('正文模型报「这一拍还缺一步铺垫」—— 先按住它，让它补完再演。', 'info');
+            console.info(`[故事导演] 缺铺垫：这一拍按住，要求下一轮先补 —— ${s.run.setupNote}`);
+        } else {
+            s.run.setupNote = '';
+            s.run.beatNote = note ? `你改成了：${note}` : '你按当前趋势调整了这一拍的执行';
+            save();
+            toast('正文模型按当前趋势微调了这一拍的执行（不重排、不花神谕）。', 'info');
+            console.info(`[故事导演] 微调：${s.run.beatNote}`);
+        }
+        if (!panel?.hidden) render();
+        return action.hold;         // 缺铺垫：本轮就停在这儿（把这一拍按住）
     }
 
     // 节流：两次重设计之间至少隔 redesignGap 轮（否则模型连着报两次就把调用全烧在这上面）
@@ -3469,6 +3586,7 @@ async function handleBeatReview({ live = null } = {}) {
     const note = reviewNoteOf(main);
     // 复位结论，免得下一轮又照它重设计一次
     await patchMain({ [KEY_REVIEW]: REVIEW_PASS, [KEY_REVIEW_NOTE]: '' }, { live });
+    clearReviewInLive(live);
 
     // ★ 判定交给纯函数（model.js 的 reviewLadder）—— 这条原则必须能被离线测。
     const verdict = reviewLadder({
@@ -3652,6 +3770,27 @@ async function evaluateDirector({ live = null } = {}) {
             const ilBeats = interludeBeatsOf(chapter);
             const ilBeat = interludeBeat(chapter);
 
+            // ★ **篇章检查**（0.27.0，用户提的）：旧章刚演完、新章还不该立刻衔接 —— 正好趁间章这几轮，
+            //   静默做一次「往后还没写的那几章，在已经发生的这些事之后还成立吗」。
+            //   结果只有两种：照旧（不动）或只改没写的章；下一章回到主线时就已经用上新章表了。
+            if (s.autoEpic && s.auditEpic && !epicFinished(epicOf(rootOf(live)))
+                && epicChapter(epicOf(rootOf(live))) > 0
+                && rt.closedChapter && rt.auditedFor !== rt.closedChapter
+                && !isPending(`epic:${chatKey()}`) && !blockedByCooldown(s, count, rt)
+                && typeof oracleApi()?.run === 'function') {
+                rt.auditedFor = rt.closedChapter;
+                markPending(`epic:${chatKey()}`);
+                markGenerated(rt, count);
+                save();
+                console.info('[故事导演] 趁间章做一次篇章检查（只判断，默认不改）。');
+                void generateEpic({
+                    quiet: true, force: true, mode: 'audit', entry: null,
+                    diverged: '这一部已经演完的章见上；请判断**往后还没写的那几章**在现在这个局面下还成不成立，'
+                        + '尤其注意 {{user}} 是否早就没有按原计划走（那他原本要在后面几章里做的事，就都不成立了）。',
+                });
+                return;
+            }
+
             // 间章里的换拍：与主线同款算法（focusInterlude 是基准，模型可能自己把拍号写成 N+1）
             if (s.autoBeat && truthy(chapter[IL.beatDone])) {
                 const at = Math.round(toNumber(rt.beatAt, 0));
@@ -3822,6 +3961,8 @@ async function evaluateDirector({ live = null } = {}) {
                 rt.beatAt = count;
                 rt.focusBeatSince = count;          // 换拍了：同一拍的「连着演了几轮」重新计时
                 rt.focusStale = '';
+                rt.setupNote = '';                  // 这一拍落了 → 之前按着它的铺垫要求完成使命
+                rt.beatNote = '';
                 save();
                 await patchMain({ [KEY_BEAT]: next, [KEY_BEAT_DONE]: false }, { live });
                 toast(`第 ${Math.min(focus, next - 1)} 拍已落地，进入第 ${next} 拍。`, 'success');
@@ -3854,6 +3995,18 @@ async function evaluateDirector({ live = null } = {}) {
             await rememberChapter(main, { live });
             syncInterludeWrites();
             const useInterlude = s.autoInterludeChapter;
+            // ★ 不走间章时（`autoInterludeChapter` 关着）：**开下一章之前**先把篇章检查做掉 ——
+            //   否则新章已经按旧计划开出来了，检查就白做了。（走间章时在间章那几轮里静默做，见上面。）
+            if (!useInterlude && s.autoEpic && s.auditEpic && epicChapter(epicOf(rootOf(live))) > 0
+                && !epicFinished(epicOf(rootOf(live))) && rt.auditedFor !== mainKey) {
+                rt.auditedFor = mainKey;
+                save();
+                console.info('[故事导演] 本章收尾：开下一章之前先做一次篇章检查（只判断，默认不改）。');
+                await generateEpic({
+                    quiet: true, force: true, mode: 'audit', entry: null,
+                    diverged: '这一部已经演完的章见上；请判断**往后还没写的那几章**在现在这个局面下还成不成立。',
+                });
+            }
             toast(useInterlude
                 ? '本章收尾，间隙交给间章 —— 正在请故事神谕设计一段日常…'
                 : '本章目标达成，正在请故事神谕开下一章…', 'success');
@@ -4674,6 +4827,7 @@ function renderSetTab() {
             </select></label>
             <label class="sd-field"><span>近期对话上限（字符）</span><input name="transcript-limit" type="number" min="2000" max="60000" step="500"></label>
             <label class="sd-switch"><input name="auto-epic" type="checkbox"> <b>自动定篇章</b>（先有一部完整的大故事，再开第一章）</label>
+            <label class="sd-switch"><input name="audit-epic" type="checkbox"> <b>每章演完后检查一次篇章</b>（趁间章做，只判断、默认不改；一部一次/章）</label>
             <label class="sd-field"><span>一个篇章写几章（1~12；写满这一部就收尾、换新的一部）</span><input name="chapters-per-epic" type="number" min="1" max="12" step="1" value="${esc(String(chaptersPerEpic()))}"></label>
             <p class="sd-note">章数决定这一部多大：4 章左右最稳（太短撑不起大高潮，太长会松散）。定篇章花一次调用。<br>
             <b>篇章不会自己变</b>：只有正文模型**在同一章里累计三次**报「当前主线不合适」，或者你在「篇章」页手动点，才会改到它。</p>
@@ -4752,6 +4906,7 @@ function renderSetTab() {
     bind('max-interludes', 'maxInterludes', 'value');
     bind('story-transcript', 'storyTranscript');
     bind('auto-epic', 'autoEpic');
+    bind('audit-epic', 'auditEpic');
     bind('transcript-limit', 'transcriptLimit', 'value');
     bind('auto-install-book', 'autoInstallBook');
     bind('auto-update-book', 'autoUpdateBook');
@@ -5157,6 +5312,10 @@ function exposeDiagnostics() {
                         拍数: beatsOf(mainOf({ [NS]: settings().story || {} })).length,
                     },
                     MVU里的token: Object.fromEntries(TOKEN_PUSH.map((p) => [p, getPath({ [NS]: mvuData()?.stat_data?.[NS] || {} }, `${NS}.${p}`)])),
+                    // ★ 0.27.0：给正文模型的自由裁量权 + 篇章检查，都在这儿看得见。
+                    待补的铺垫: settings().run.setupNote || '',
+                    上一轮的微调回执: settings().run.beatNote || '',
+                    篇章检查: settings().run.lastAudit || null,
                     定篇章已试: Math.round(toNumber(settings().run.epicTries, 0)),
                     // ★ 审查升级梯的记账（用户报「大纲自己变了」时，先看这三个数）：
                     //   同一章累计 3 次「不合适」才会去改篇章，而且**同一章最多改一次**。
