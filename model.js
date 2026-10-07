@@ -1632,6 +1632,41 @@ export function nsHasState(ns) {
 }
 
 /**
+ * ★ **回退一层时，这一拍该退到第几拍？**（纯函数，0.26.2）
+ *
+ * 用户问的：「把最新回复删掉、回退一层，那这一拍已经落了的标识能回退吗？
+ * 然后重新生成的时候，重新注入这一拍。」
+ *
+ * 事实是：`本拍已落` 这些 token 住在**每一楼的变量快照**里，删掉那一楼它就自然没了 ——
+ * 但 `当前拍` 是**插件自己的数字**（只推不拉，见 TOKEN_PULL 的注释），不跟着退。
+ * 于是「标识说没落、数字说已落」，重新生成就会去注入**下一拍**（正是用户看到的不对劲）。
+ *
+ * 所以：检测到**回复数变少**（删楼）时，去读 MVU 当前楼层快照里的 `当前拍` ——
+ * 那是「那一楼的时候模型看到的进度」，比手里的数字更接近被撤掉那段剧情的真实状态。
+ * 只往回退、不往前追；快照拿不到、或者并不更早 → 什么都不做（宁可不退，也不要乱退）。
+ *
+ * @param {object} opts
+ * @param {number} opts.count 现在的 AI 回复数
+ * @param {number} opts.lastCount 上一次心跳时的 AI 回复数（0 = 还没记过）
+ * @param {number} opts.mine 插件手里的 `当前拍`
+ * @param {number} opts.snapshot MVU 当前楼层快照里的 `当前拍`
+ * @returns {number|null} 要退回的拍号；null = 不动
+ */
+export function beatRollbackTarget({ count = 0, lastCount = 0, mine = 0, snapshot = NaN } = {}) {
+  const rawNow = Number(count);
+  const rawBefore = Number(lastCount);
+  // 回复数只可能是「非负整数」：不是这个形状就什么都不做（比如刚存进来是 undefined）。
+  if (!Number.isFinite(rawNow) || rawNow < 0 || !Number.isFinite(rawBefore) || rawBefore < 0) return null;
+  const now = Math.round(rawNow);
+  const before = Math.round(rawBefore);
+  if (!before || now >= before) return null;            // 没有回退（或还没记过基准）
+  const snap = Math.round(Number(snapshot));
+  const cur = Math.max(1, Math.round(Number(mine) || 1));
+  if (!Number.isFinite(snap) || snap < 1 || snap >= cur) return null;   // 快照并不更早 → 不回退
+  return snap;
+}
+
+/**
  * 同一章里收到几次「当前主线不合适」才允许**动篇章**。
  *
  * 这是用户定的原则，原话：

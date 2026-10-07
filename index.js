@@ -36,7 +36,7 @@ import {
     REVIEW_PASS, REVIEW_STATES, REVIEW_MAX_RETRY,
     STATUS_PENDING, STATUS_ACTIVE, STATUS_DONE, STATUS_SKIPPED, STATUS_STALLED,
     isPlainObject, unwrap, unwrapDeep, display, toNumber, truthy,
-    reviewLadder, STRIKES_BEFORE_EPIC, nsHasState,
+    reviewLadder, STRIKES_BEFORE_EPIC, nsHasState, beatRollbackTarget,
     capText, splitBeats, beatsOf, parseBlocks,
     emptyMain, mainOf, listOf, currentBeat, reviewStateOf, reviewNoteOf,
     isLiveThread, threadLanded, interludePending, interludeAfter,
@@ -445,6 +445,11 @@ const DEFAULT = {
         closedChapter: '',
         /** 上一次**任何**自动生成发生在第几条 AI 回复（跨线节流用；0 = 还没生成过）。 */
         lastGenerateAt: 0,
+        /**
+         * 上一次心跳时的 AI 回复数 —— 用来检测**回退**（删楼 / 回退一层）。
+         * 只有「回复数变少」才可能把这一拍的进度退回去（见 syncBeatBackOnRollback）。
+         */
+        lastCount: 0,
     },
     chapters: {},
     /** 已经报过一次的信息性提示（见 toastOnce）—— 免得每次刷新都弹同一句。 */
@@ -1067,6 +1072,10 @@ async function syncNsToChat(live = null) {
  */
 async function ensureNamespace({ notify = false, live = null } = {}) {
     const api = mvu();
+    // ★ **先看有没有回退**（删楼 / 回退一层），而且必须在**任何写 MVU 之前**：
+    //   否则我们会先把手里的旧进度推回去，把「快照里那个更早的进度」覆盖掉，就再也退不回来了
+    //   （真踩过：先 pushTokens 再检查，快照已经被我们改成新值）。
+    syncBeatBackOnRollback(aiMessageCount());
     if (!live && !api?.replaceMvuData && !api?.getMvuData) {
         if (notify) toast('MVU 未加载，无法初始化变量。', 'warning');
         return false;
@@ -3618,6 +3627,8 @@ async function evaluateDirector({ live = null } = {}) {
         // ★ 回退聊天（重新生成 / 删楼 / 换 swipe）会让回复数变少，把「按回复数记账」的游标修回来。
         //   必须放在**任何冷却判断之前** —— 否则冷却会因为差值为负而永久卡死。
         if (repairRunCursors(s.run, aiMessageCount())) save();
+        // ★ 回退一层（删楼）时，把这一拍的进度也退回去 —— 见 syncBeatBackOnRollback。
+        if (syncBeatBackOnRollback(aiMessageCount())) save();
 
         if (await handleBeatReview({ live })) return;
 
@@ -4034,6 +4045,41 @@ function blockedByCooldown(s, count, rt) {
 /** 记下「刚刚生成过一次」（跨线节流用）。 */
 function markGenerated(rt, count) {
     rt.lastGenerateAt = count;
+}
+
+/**
+ * ★ **回退一层时，把这一拍的进度也退回去**（用户提的）。
+ *
+ * 「把最新回复删掉、回退一层，那这一拍已经落了的标识能回退吗？重新生成的时候，重新注入这一拍。」
+ *  — 标识（`本拍已落` 等）**会自动退**：它们住在每楼的变量快照里，删掉那一楼就没了；
+ *    但 `当前拍` 是插件自己的数字（只推不拉），不跟着退 → 「标识说没落、数字说已落」，
+ *    重新生成就会去注入**下一拍**。所以这里按快照把它退回来，两者才一致。
+ *
+ * 触发条件只有「回复数变少」；退回目标由纯函数 `beatRollbackTarget` 判定（见它的注释）。
+ */
+function syncBeatBackOnRollback(count) {
+    const rt = settings().run;
+    const target = beatRollbackTarget({
+        count,
+        lastCount: rt.lastCount,
+        mine: getPath(storyNs(), `${MAIN_SECTION}.${KEY_BEAT}`),
+        snapshot: getPath(mvuData()?.stat_data?.[NS], `${MAIN_SECTION}.${KEY_BEAT}`),
+    });
+    rt.lastCount = count;
+    if (target === null) return false;
+    const story = storyNs();
+    story[MAIN_SECTION][KEY_BEAT] = target;
+    // 聚焦游标也得跟着退：它比 `当前拍` 大一点就会「跳拍」（next = max(beat, focus+1)）。
+    if (Math.round(toNumber(rt.focusBeat, 0)) > target) rt.focusBeat = target;
+    rt.beatAt = 0;                       // 回退后允许立刻重新落拍 —— 用户就是要重来这一拍
+    rt.focusBeatSince = count;
+    rt.focusStale = '';
+    save();
+    // 聊天级那一份刚才可能还留着「已落」的进度 —— 对齐一下，否则下一楼从它继承，又跳回去了。
+    void syncNsToChat();
+    console.info(`[故事导演] 检测到回退：这一拍退回第 ${target} 拍（按 MVU 那一楼快照里的进度），`
+        + '重新生成会重新注入它。');
+    return true;
 }
 
 /**
