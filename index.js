@@ -1426,11 +1426,17 @@ async function collectContextBlocks(task = 'chapter') {
     const s = settings();
     const blocks = [];
 
-    // ① 我们自己的世界书：规则来源，放最前面
+    // ① 我们自己的世界书里**面向剧情**的条目。
+    //   ⚠ 0.21.0 起，这本世界书只剩**变量机制**的条目（`[mvu_update]` 变量契约 / 快照 / 输出格式、
+    //     `[InitVar]` 初始化）。它们全是**写给叙事者的**（「你不需要自己设计剧情走向，照计划演就行」），
+    //     把它当「设计规则来源」喂给篇章设计师，等于一边说「你是设计师」一边说「你不用设计」。
+    //     所以这里按标签过滤掉它们：今天过滤完是空的 → 整块不发；以后真加了剧情条目也照样能收到。
+    //     设计规则本来就在设计提示词里（`DESIGN_RULES`），单一来源，不必靠世界书转发。
     try {
         const ours = await readOurWorldbookEntries();
-        const digest = worldbookDigest(ours);
-        if (digest) blocks.push(`=== 世界书「${PLUGIN_WORLD}」（本模块的最高规则来源，冲突一律以它为准）===\n${capText(digest, 24000)}`);
+        const plot = ours.filter((entry) => !/\[mvu_update\]|\[InitVar\]/i.test(String(entry?.comment ?? entry?.name ?? '')));
+        const digest = worldbookDigest(plot);
+        if (digest) blocks.push(`=== 本插件自带世界书「${PLUGIN_WORLD}」里面向剧情的条目 ===\n${capText(digest, 24000)}`);
     } catch (error) {
         console.debug('[故事导演] 读取自己的世界书失败', error);
     }
@@ -1693,7 +1699,7 @@ function buildChapterSystemPrompt({ regenerate = false, rejected = null, remaini
         partial
             ? '你的唯一任务：**按现在的处境重排这一章剩下的拍**（已经演过的部分不许动），并把它拆成可以按顺序演出的「拍」。'
             : '你的唯一任务：设计**下一章主线**，并把它拆成可以按顺序演出的「拍」。',
-        '规则优先级：世界书「' + PLUGIN_WORLD + '」> 用户在本插件里的设定；角色卡自带设定只作可选参考。',
+        '规则优先级：用户在本插件里明确提出来的要求（优先满足）> 本提示词里的设计规则 > 角色卡自带设定（只作可选参考）；卡与世界书里已有的设定是**既成事实**，只能沿用、不能改写。',
         '你不写正文，只交一份给叙事者照做的演出计划。',
         '',
         ...COMMON_RULES,
@@ -1917,7 +1923,7 @@ function buildInterludeChapterSystemPrompt({ rejected = null } = {}) {
     const lines = [
         '你是「故事导演」的剧情设计师，为一个正在进行的角色扮演服务。',
         '你的唯一任务：设计一段**间章** —— 主线收着的时候演的一段**日常**。',
-        '规则优先级：世界书「' + PLUGIN_WORLD + '」> 用户在本插件里的设定；角色卡自带设定只作可选参考。',
+        '规则优先级：用户在本插件里明确提出来的要求（优先满足）> 本提示词里的设计规则 > 角色卡自带设定（只作可选参考）；卡与世界书里已有的设定是**既成事实**，只能沿用、不能改写。',
         '你不写正文，只交一份给叙事者照做的演出计划。',
         '',
         ...COMMON_RULES,
@@ -1980,7 +1986,7 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
         mode === 'establish'
             ? '你的唯一任务：定下这个故事**围绕 {{user}} 的那条长线**（篇章）。之后每一章都只是它的一拍。'
             : '你的唯一任务：**按 {{user}} 实际做了什么，重新校准这条长线**（篇章）。他不是按剧本走的，你要跟着他改。',
-        '规则优先级：世界书「' + PLUGIN_WORLD + '」> 用户在本插件里的设定；角色卡自带设定只作可选参考。',
+        '规则优先级：用户在本插件里明确提出来的要求（优先满足）> 本提示词里的设计规则 > 角色卡自带设定（只作可选参考）；卡与世界书里已有的设定是**既成事实**，只能沿用、不能改写。',
         '你只交一份篇章，不写正文、不写台词。',
         '',
         '两条必须同时守住的原则：',
