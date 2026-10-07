@@ -100,20 +100,27 @@
 }
 
 /* ★ 总开关：面板最上面那一条，切到哪个页都看得见（见 toggleMaster / renderPower）。
-   开 = 绿边；关 = 红边 + 淡底 —— 一眼就能看出插件此刻会不会自己调模型。 */
+   开 = 绿边；关 = 红边 + 淡底 —— 一眼就能看出插件此刻会不会自己调模型。
+   ⚠ sticky：长页（比如「设定」）往下滚时它要一直贴在顶上 —— 这个按钮的价值就在「随手能关」。
+   底色必须**接近不透明**，否则滚动的内容会从它后面透出来。 */
 #story-director-panel .sd-powerbar {
+    position: sticky;
+    top: -10px;                 /* 抵消 .sd-body 的 padding-top，贴住滚动区上沿 */
+    z-index: 2;
     display: flex;
     align-items: center;
     gap: 8px;
     border: 1px solid rgba(120, 200, 150, 0.5);
-    background: rgba(120, 200, 150, 0.1);
     border-radius: 9px;
     padding: 6px 9px;
     flex: 0 0 auto;
+    background-color: var(--SmartThemeBlurTintColor, rgba(24, 26, 34, 0.94));
+    background-image: linear-gradient(rgba(120, 200, 150, 0.12), rgba(120, 200, 150, 0.12));
+    backdrop-filter: blur(4px);
 }
 #story-director-panel .sd-powerbar.is-off {
     border-color: rgba(220, 140, 140, 0.5);
-    background: rgba(220, 140, 140, 0.09);
+    background-image: linear-gradient(rgba(220, 140, 140, 0.11), rgba(220, 140, 140, 0.11));
 }
 #story-director-panel .sd-power {
     display: flex;
