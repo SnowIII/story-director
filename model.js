@@ -185,11 +185,55 @@ export function epicOf(root) {
   const merged = { ...emptyEpic(), ...box };
   // ⚠ 老存档里这一条叫「总纲」；新的是「篇章」。
   //   读取时把老键搬过来（**不**回写 MVU，避免每次心跳都动变量）。
+  //   —— 真正把键名换掉的是 migrateEpicKeys()（在 ensureNamespace 里跑一次）。
   if (!String(merged[EP.line] ?? '').trim()) {
     const legacy = String(unwrap(box[EP.lineLegacy]) ?? '').trim();
     if (legacy) merged[EP.line] = legacy;
   }
   return merged;
+}
+
+/**
+ * 把**老存档里残留的旧键名**真的改掉：`史诗.总纲` → `史诗.篇章`（并清掉已废弃的 `史诗.赌注`）。
+ *
+ * ★ 为什么不能只在读取时兼容（补事故）：
+ *   `epicOf()` 一直把老键搬进**内存里**的对象，值读得出来、面板也显示得对 —— 但 MVU 里那个键
+ *   **仍然叫「总纲」**。于是有两处会一直露馅：
+ *     · 酒馆的变量面板 / MVU 前端上，字段名就是「总纲」；
+ *     · `[mvu_update]` 那张变量快照把 `总纲` 原样喂回模型，模型下一轮很可能照着吐 `总纲:` ——
+ *       **自己喂自己**，不真改名就永远改不掉。
+ *   所以这里在**变量本身**上改一次名。值不会丢：只有新键为空时才从老键搬。
+ *
+ * 纯函数（就地改 `ns`，不回写）：返回做了什么，调用方决定要不要落盘。
+ *
+ * @param {object} ns `stat_data.故事导演`
+ * @returns {{changed: boolean, renamed: boolean, dropped: string[]}}
+ */
+export function migrateEpicKeys(ns) {
+  const out = { changed: false, renamed: false, dropped: [] };
+  const box = isPlainObject(ns?.[EPIC]) ? ns[EPIC] : null;
+  if (!box) return out;
+
+  if (Object.prototype.hasOwnProperty.call(box, EP.lineLegacy)) {
+    const legacy = unwrap(box[EP.lineLegacy]);
+    const legacyText = String(legacy ?? '').trim();
+    if (legacyText && !String(unwrap(box[EP.line]) ?? '').trim()) {
+      box[EP.line] = legacy;          // 原样搬（保住类型）
+      out.renamed = true;
+    }
+    delete box[EP.lineLegacy];
+    out.changed = true;
+  }
+
+  // 「赌注」是已经砍掉的一层（0.14 起不再有），老存档里可能还挂着这个空键。
+  for (const dead of ['赌注']) {
+    if (Object.prototype.hasOwnProperty.call(box, dead)) {
+      delete box[dead];
+      out.dropped.push(dead);
+      out.changed = true;
+    }
+  }
+  return out;
 }
 
 /** 史诗是否已经有内容（决定要不要自动生成篇章）。 */

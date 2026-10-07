@@ -28,7 +28,7 @@ import {
 import {
     NS, PATH, THREAD_FIELDS, INTERLUDE_FIELDS, MAIN_TITLE, MAIN_ARC, MAIN_SCOPE, MAIN_GOAL, MAIN_BEATS, MAIN_STARTED, MAIN_ENDED, MAIN_CLOSED,
     INTERLUDE, IL, emptyInterlude, interludeChapterOf, interludeActive, interludeBeatsOf, interludeBeat,
-    EPIC, EP, EPIC_STAGES, emptyEpic, epicOf, epicStarted, epicMovements, epicHooks, epicChapter, renderEpicSection, epicFromBlock, epicAskText, userAskText,
+    EPIC, EP, EPIC_STAGES, emptyEpic, epicOf, epicStarted, migrateEpicKeys, epicMovements, epicHooks, epicChapter, renderEpicSection, epicFromBlock, epicAskText, userAskText,
     TONES, toneOf, toneOptions, toneDirective,
     KEY_BEAT, KEY_BEAT_DONE, KEY_CHAPTER_DONE, KEY_READY, KEY_REVIEW, KEY_REVIEW_NOTE,
     REVIEW_PASS, REVIEW_STATES, REVIEW_MAX_RETRY,
@@ -768,6 +768,16 @@ async function ensureNamespace({ notify = false, live = null } = {}) {
             if (!Array.isArray(box[key])) { box[key] = splitBeats(box[key]).slice(0, 12); changed = true; }
         }
         if (!Number.isInteger(toNumber(box[EP.chapter], NaN))) { box[EP.chapter] = 0; changed = true; }
+        // ★ 老存档的**旧键名**要真的改掉，不能只在读取时兼容 ——
+        //   否则变量面板上一直写着「总纲」，而变量快照又把这个名字喂回模型（自己喂自己）。
+        const migration = migrateEpicKeys(ns);
+        if (migration.changed) {
+            changed = true;
+            const bits = [];
+            if (migration.renamed) bits.push('总纲 → 篇章');
+            if (migration.dropped.length) bits.push(`清掉已废弃的 ${migration.dropped.join('、')}`);
+            if (bits.length) console.info(`[故事导演] 老存档的字段名已迁移：${bits.join('；')}`);
+        }
     }
     // 间章：与主线互斥的另一幕（日常）。老存档里没有这个键就补齐。
     if (!isPlainObject(ns[INTERLUDE])) { ns[INTERLUDE] = emptyInterlude(); changed = true; }
