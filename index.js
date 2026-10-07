@@ -339,6 +339,13 @@ const DEFAULT = {
         epicAt: 0,
         /** 本聊天里「定篇章 / 校准」已经试过几次：超过上限就放行开章，不让它把整个插件卡住。 */
         epicTries: 0,
+        /**
+         * 已经作废的篇章（换新的一部时把旧的记进来，只留最近 3 部）。
+         * 用途：换新的一部时把「上一部讲过的章表」当**要避开的东西**喂给神谕 ——
+         * 补一次真事故：重新生成章纲出来的四章和上一版几乎一字不差。
+         * @type {Array<{title: string, chapters: string[]}>}
+         */
+        retiredEpics: [],
         /** 连续被驳回的次数。 */
         redesigns: 0,
         /**
@@ -1399,7 +1406,7 @@ function cleanupStatusEchoInChat({ notify = true } = {}) {
  *   · `chapter`：只给**当前这一章**（含聚焦到哪一拍、这一章要埋的伏笔）+ 章节史压缩成「章名（目标）」一行；
  *   · 其它（篇章 / 支线 / 插曲 / 间章）：保持原来的口袋，但同样把章节史压成一行。
  */
-function focusedStateBlock(task) {
+function focusedStateBlock(task, { replacingEpic = false } = {}) {
     const s = settings();
     const root = rootOf();
     const lines = [];
@@ -1415,6 +1422,26 @@ function focusedStateBlock(task) {
         const chapters = epicChapters(epic);
         const written = epicChapter(epic);
         const climax = epicClimax(epic);
+
+        // ★★ 换新的一部时**绝不能把旧章表当"这一册的章内容"发过去**（补事故）：
+        //    以前不管什么任务都把整张章表发下去，于是「重新生成章纲」拿到的就是
+        //    「这是你这一册的四章」+「再给我排一次」—— 模型最省力的做法就是把它重抄一遍。
+        //    真事故：重新生成出来的四章和上一版几乎一字不差。
+        //    现在旧章表改由「防重复」块以**要避开的东西**的身份出现（见 antiRepeatBlock）。
+        if (replacingEpic) {
+            lines.push(`【篇章】本次是**换新的一部**：上一部${title ? `《${title}》` : ''}已经作废`
+                + '（它写过的几章在下面的「防重复」里，是**要避开**的东西，不是要你填的表格）。');
+            lines.push('在争什么 / 章表 / 大高潮 请**重新定**，不要照着上一部重写。');
+            lines.push('');
+            // 旧章表不进这里 —— 但「既成事实」仍要给：新的一部得从现在的处境出发
+            if (ledger) lines.push(`既成事实：${ledger}`);
+            if (hooks.length) lines.push(`**还没兑现的伏笔**（要埋就得与它们同源，不要另起炉灶）：${hooks.join('；')}`);
+            lines.push('');
+            // ⚠ 必须和函数正常出口一样**拼成字符串**再返回：collectContextBlocks 是把它当**一整块**塞进去的，
+            //   返回数组会被 join(',') 拼成一行（踩过：三条之间冒出逗号）。
+            return `=== 当前 ${NS} 状态（已按本次任务裁剪：只给相关的那些）===\n${lines.join('\n')}`;
+        }
+
         lines.push(`【篇章】${title ? `《${title}》` : ''}${chapters.length ? `　共 ${chapters.length} 章，已写到第 ${written} 章` : ''}`);
         if (line) lines.push(`在争什么：${line}`);
         if (climax) lines.push(`大高潮：${climax}`);
@@ -1476,7 +1503,7 @@ function focusedStateBlock(task) {
     return `=== 当前 ${NS} 状态（已按本次任务裁剪：只给相关的那些）===\n${lines.join('\n')}`;
 }
 
-async function collectContextBlocks(task = 'chapter') {
+async function collectContextBlocks(task = 'chapter', taskOpts = {}) {
     const s = settings();
     const blocks = [];
 
@@ -1534,7 +1561,7 @@ async function collectContextBlocks(task = 'chapter') {
 
     // ④ 当前剧情状态（**按任务裁剪**：写章节时只给当前这一章，不再整包发命名空间）
     try {
-        const focused = focusedStateBlock(task);
+        const focused = focusedStateBlock(task, taskOpts);
         if (focused) blocks.push(focused);
     } catch (error) {
         console.debug('[故事导演] 组装剧情状态失败，退回整包变量', error);
@@ -1625,14 +1652,55 @@ function completedChapterGoals(root) {
         .filter(Boolean);
 }
 
-/** 已走过的章 + 已用过的标题：喂给神谕做「不要重复」的硬约束。 */
-function antiRepeatBlock() {    const root = rootOf();
+/**
+ * 已走过的章 + 已用过的标题：喂给神谕做「不要重复」的硬约束。
+ *
+ * ★ 换新的一部篇章时（`task === 'epic'`），这里还要带上**上一部讲过的章表** ——
+ *   这是补一次真事故：用户点「重新生成章纲」，出来的四章和上一版几乎一字不差。
+ *   原因之一就是旧章表被当成「你这一册的章内容」发下去了（模型当然照着抄），
+ *   而防重复块里**只有章名标题、没有内容**，模型根本不知道"这套因果已经写过了"。
+ *   现在旧章表以「**要避开**的东西」的身份出现在这里。
+ */
+function antiRepeatBlock(task = '') {
+    const s = settings();
+    const root = rootOf();
     const history = completedMainTitles(root);
     const titles = takenTitles(root);
     const lines = [];
     if (history.length) lines.push(`已经走过的章（不要重演，也不要换个说法再来一遍）：${history.join('、')}`);
     if (titles.length) lines.push(`已经用过的标题（新的标题不要与它们重复或近似）：${titles.join('、')}`);
+    if (task === 'epic') {
+        const retired = Array.isArray(s.run.retiredEpics) ? s.run.retiredEpics : [];
+        for (const old of retired.slice(-2)) {
+            const chapters = Array.isArray(old?.chapters) ? old.chapters : [];
+            if (!chapters.length) continue;
+            lines.push(`=== 上一部篇章《${String(old?.title ?? '').trim() || '（未命名）'}》已经讲过的（**新的一部不许是它的换皮**）===`);
+            chapters.forEach((text, i) => lines.push(`　第 ${i + 1} 章：${text}`));
+            lines.push('新的一部**必须换一套因果**：起因不同、推动的人不同、代价不同、落点不同；');
+            lines.push('连「推进形状」也不能一样（例：如果上一部是「有人接连施压 → 把他逼到绝境 → 用把柄摊牌 → 妥协、失去栖身之所」，这一部就不许再来一遍）。');
+        }
+    }
     return lines.length ? `=== 防重复 ===\n${lines.join('\n')}` : '';
+}
+
+/**
+ * 把一部**已经作废**的篇章记进「上一部」名单（换新的一部时调用）。
+ * 幂等：同一部（标题 + 章表都一样）只记一次，重试不会把它堆成好几条。
+ * 只留最近 3 部。
+ */
+function rememberRetiredEpic(epic) {
+    const s = settings();
+    const entry = {
+        title: String(unwrap(epic?.[EP.title]) ?? '').trim(),
+        chapters: epicChapters(epic).slice(0, 24),
+    };
+    if (!entry.chapters.length) return false;
+    const list = Array.isArray(s.run.retiredEpics) ? s.run.retiredEpics : [];
+    const same = (a) => JSON.stringify(a?.chapters) === JSON.stringify(entry.chapters) && String(a?.title ?? '') === entry.title;
+    if (list.some(same)) return false;
+    s.run.retiredEpics = [...list, entry].slice(-3);
+    save();
+    return true;
 }
 
 /**
@@ -1745,6 +1813,15 @@ const DESIGN_ARC = [
     '- 有起（怎么进这一章）、有它自己的冲突、有**它自己落定的结果**（成了 / 砸了 / 摊牌了 / 东西到手了）。',
     '- 「这一章推进了一点，但什么也没落定」——那不算一章，那是半章，读者会觉得一直在铺垫。',
     '- 但**不要**在章表里写「第一拍 / 第二拍」：拍是章节设计师把那一段细化出来的东西。',
+    '',
+    '## 换新的一部时：**必须换一套因果，不能是上一部的换皮**',
+    '同一套「谁施压 → 他被逼到绝境 → 摊牌 → 妥协」连着写两遍，读者一眼就看出是套模板。所以：',
+    '- **换一个「在争的东西」**：上一部在争的是某样东西，这一部就争别的；起因、推动的人、代价、落点都要换。',
+    '- **连「推进形状」也不许复用**。特别要避开这种循环：**有人拿着把柄接连施压 → 把他逼到绝境 → 他用把柄摊牌 → 妥协、失去什么**。',
+    '  这一套**可以**是某一部的形状，但**不许连着两部都用它**。',
+    '- 上一部留下的既成事实（人物、处境、欠下的人情）**是这一部的起点，不是它的骨架**：起点照用，骨架重搭。',
+    '- **四章之间也不许一个形状**：不要四章都是「有人搞事 → 他应对」。有的章可以是「他这边主动做成一件事」，',
+    '  有的章可以是「一件旧事自己浮上来」，有的章可以整章都在处理一个关系。',
     '',
 ];
 
@@ -2121,6 +2198,13 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
         '规则优先级：用户在本插件里明确提出来的要求（优先满足）> 本提示词里的设计规则 > 角色卡自带设定（只作可选参考）；卡与世界书里已有的设定是**既成事实**，只能沿用、不能改写。',
         '你交的是一份**篇章**：这一部大故事在争什么、**由几章组成、每一章是什么**、大高潮落在哪一章。不写正文、不写台词。',
         '',
+        ...(mode === 'establish' ? [
+            '⚠ **这是「新的一部」**（不是接着上一部往下排）—— 除非这就是这个故事的第一部，否则：',
+            '　· 上面「防重复」里列的是**上一部已经讲过的章表**，它是**要避开的东西**，不是让你照着填的表格；',
+            '　· 新的一部必须**换一个「在争的东西」**，并且**换一套因果与推进形状**（详见下面的设计规则）。',
+            '　· 判定标准：把新排的几章和上一部摊开对照 —— **除了换几个名字，还有没有区别？** 没有就重排。',
+            '',
+        ] : []),
         '两条必须同时守住的原则：',
         '1. **主角是 {{user}}**：这条长线写的是「围绕他发生了什么事、他被卷进什么里面、他身边的人怎么变」。',
         '   与他无关的势力动向只作背景与压力，不要喧宾夺主。',
@@ -2334,14 +2418,14 @@ function buildInterludeSystemPrompt() {
     ].join('\n');
 }
 
-async function buildUserPrompt(task, userText = '') {
-    const blocks = await collectContextBlocks(task);
+async function buildUserPrompt(task, userText = '', taskOpts = {}) {
+    const blocks = await collectContextBlocks(task, taskOpts);
     const ask = String(userText || '').trim();
     // ★ 钉住的用户要求（若已钉）—— 每轮都带上，这样插件自己触发的重生成也不会把它丢掉。
     const pinned = pinnedAskText(task);
     if (pinned) blocks.push(`=== 用户钉住的要求（**每一轮都要满足**，与其它规则冲突时以它为准）===\n${pinned}`);
     if (ask) blocks.push(`=== 用户的额外要求（优先满足）===\n${ask}`);
-    const anti = antiRepeatBlock();
+    const anti = antiRepeatBlock(task);
     if (anti) blocks.push(anti);
     const tail = {
         chapter: '请按上面的格式输出一个 <StoryChapters> 区块。',
@@ -2515,7 +2599,7 @@ function modeSystemPrompt(userText) {
 }
 
 /** 借神谕的模型连接裸调用一次（不带任何上下文 → 我们自己把上下文拼进去）。 */
-async function askOracle({ task = 'chapter', userText = '', regenerate = false, rejected = null, keep = 0, remaining = 0, quiet = true, ephemeralSystem = '' } = {}) {
+async function askOracle({ task = 'chapter', userText = '', regenerate = false, rejected = null, keep = 0, remaining = 0, quiet = true, ephemeralSystem = '', taskOpts = {} } = {}) {
     const api = oracleApi();
     if (typeof api?.run !== 'function') {
         if (!quiet) toast('没有可用的模型连接——需要启用「故事神谕」扩展。也可以在主线上直接手写。', 'warning');
@@ -2525,7 +2609,7 @@ async function askOracle({ task = 'chapter', userText = '', regenerate = false, 
         : task === 'side' ? buildInterludeSystemPrompt()
             : task === 'interlude' ? buildInterludeChapterSystemPrompt({ rejected })
                 : buildChapterSystemPrompt({ regenerate, rejected, keep, remaining: Math.max(0, Math.round(toNumber(remaining, 0))) }));
-    const user = await buildUserPrompt(task, userText);
+    const user = await buildUserPrompt(task, userText, taskOpts);
     // ⚠ **绝不往神谕窗口里写东西**（这一条是补事故）。
     //   这里以前用 api.appendReply() 把「导演请求全文」和「模型原始回复」追加进神谕的对话里 ——
     //   后果有两个，都很难绷：
@@ -2848,9 +2932,17 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
     const origin = chatKey();
     // establish = 换新的一部 → 进度归零；evolve = 校准 → 不动进度
     const progress = mode === 'establish' ? 0 : null;
+    // ★ 换新的一部之前，先把**旧的这一部**记进「上一部」名单：
+    //   ① 它会被当成「要避开的东西」进防重复块（不然新的一部就是它的换皮）；
+    //   ② 同时告诉上下文构造器：**别再拿旧章表当"这一册的章内容"发下去**。
+    if (mode === 'establish') {
+        const outgoing = epicOf(rootOf());
+        if (epicStarted(outgoing)) rememberRetiredEpic(outgoing);
+    }
     try {
         const raw = await askOracle({
             task: 'epic',
+            taskOpts: { replacingEpic: mode === 'establish' },
             ephemeralSystem: buildEpicSystemPrompt({
                 mode,
                 diverged,
