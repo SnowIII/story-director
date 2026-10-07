@@ -2787,8 +2787,8 @@ async function openChapterDialog({ regenerate = false } = {}) {
     const s = settings();
     syncChapterPin();                               // 章名变了就先把上一章的钉清掉
     const pinnedChapter = String(s.run.chapterPin || '').trim();
-    // ★ 朱批只在「这一章已经有上一版拍列表」时出现（regenerate = 整章推倒重写，一定有）。
-    const canCritique = regenerate || beatsOf(mainState()).length > 0;
+    // ★ 朱批只在「这一章已经有上一版拍列表」时出现 —— 没有旧拍可批时这一栏没有意义。
+    const canCritique = beatsOf(mainState()).length > 0;
     const body = document.createElement('div');
     body.className = 'sd-chapter-form';
     body.innerHTML = `
