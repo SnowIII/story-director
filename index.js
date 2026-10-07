@@ -146,6 +146,53 @@ const FOCUS_STALE_REPLIES = 2;
 /** 注入的状态块标签：被模型抄进正文时按它做确定性剥离。 */
 const STATUS_TAG = 'story_director_status';
 
+/** 主线那一节的键名（`故事导演.主线`）。 */
+const MAIN_SECTION = '主线';
+
+/**
+ * ★ MVU 里到底留哪几个字段 —— 这是**唯一**要跟世界书对齐的清单。
+ *
+ * 分工见 `storyNs` 上方那段说明：MVU 只放「模型要写/要看」的 token，计划住在插件里。
+ *   · `TOKEN_PULL` —— **模型写**的那些（进度信号），每轮从 MVU 抄进剧情状态；
+ *   · `TOKEN_PUSH` —— 我们往 MVU 写的那些（比 PULL 多两个：当前拍、幕开关、已收尾）。
+ * 名字都取自 model.js 的常量，免得两处各写一遍中文字符串。
+ */
+const TOKEN_PULL = [
+    `${MAIN_SECTION}.${KEY_BEAT_DONE}`,
+    `${MAIN_SECTION}.${KEY_CHAPTER_DONE}`,
+    `${MAIN_SECTION}.${KEY_READY}`,
+    `${MAIN_SECTION}.${KEY_REVIEW}`,
+    `${MAIN_SECTION}.${KEY_REVIEW_NOTE}`,
+    `${INTERLUDE}.${IL.beatDone}`,
+    `${INTERLUDE}.${IL.done}`,
+    `${INTERLUDE}.${IL.ready}`,
+];
+const TOKEN_PUSH = [
+    ...TOKEN_PULL,
+    `${MAIN_SECTION}.${KEY_BEAT}`,
+    `${MAIN_SECTION}.${MAIN_CLOSED}`,
+    `${INTERLUDE}.${IL.active}`,
+];
+
+/** 按 `a.b.c` 取值 / 写值（token 清单用点号路径，短且好读）。 */
+function getPath(node, path) {
+    let cur = node;
+    for (const key of String(path).split('.')) {
+        if (!isPlainObject(cur)) return undefined;
+        cur = cur[key];
+    }
+    return cur === undefined ? undefined : unwrap(cur);
+}
+function setPath(node, path, value) {
+    const keys = String(path).split('.');
+    let cur = node;
+    for (const key of keys.slice(0, -1)) {
+        if (!isPlainObject(cur[key])) cur[key] = {};
+        cur = cur[key];
+    }
+    cur[keys[keys.length - 1]] = value;
+}
+
 const INTENSITIES = {
     seed: {
         label: '只铺垫',
@@ -394,21 +441,20 @@ const DEFAULT = {
         lastGenerateAt: 0,
     },
     chapters: {},
+    /** 已经报过一次的信息性提示（见 toastOnce）—— 免得每次刷新都弹同一句。 */
+    toldOnce: {},
     /**
-     * ★ **命名空间镜像**：`故事导演` 那一棵树的插件侧备份（每聊天一份）。
+     * ★ **这一局的剧情状态**（每聊天一份）：`故事导演` 整棵树 —— 篇章 / 章表 / 大高潮 /
+     * 主线（标题·篇章·范围·章目标·拍）/ 支线 / 插曲 / 章节史。
      *
-     * 为什么要备份（0.25.2）：剧情状态一直只住在 MVU 里 —— 而那棵树的**命**不归我们管：
-     *   换卡 / `[InitVar]` 重跑 / 某些卡每开一楼就从基准重起一份变量 …… 一旦它空了，
-     *   插件就以为「还没有篇章」，于是**又花一次神谕重新定一部**（用户报的
-     *   「刚生成好一个篇章，推进一步又重新生成了」就是这个）。
+     * 0.26.0 起**计划住在插件里**（用户定的分工）：MVU 只留「第几拍 + 各标记 + 审查结论」
+     * 那几个 token，因为那些要**模型自己写**。这样换卡 / `[InitVar]` 重跑 / 某些卡每楼重置
+     * 变量，最多丢一次进度信号，**不可能再弄丢一部篇章** —— 也就不存在
+     * 「MVU 空了要不要恢复进去」这个问题了。
      *
-     * 现在 MVU 仍然**是**给模型看的那一份（也随聊天走），但插件手里永远留一份镜像：
-     *   · 每次写入 MVU 之后顺手镜像（见 writeMvu → rememberNsBackup）；
-     *   · MVU 那一份空了 → **从镜像补回去，不重新花神谕**（见 ensureNamespace 的恢复分支）。
-     * 判断谁是权威：**MVU 有内容就以 MVU 为准**（用户可能在变量面板里手改过），
-     * 只有 MVU 空了才用镜像 —— 所以镜像不会把旧版本顶掉新版本。
+     * 老存档（计划整棵住在 MVU 里）会在第一次读的时候被**搬进来**（见 importStoryFromMvu）。
      */
-    nsBackup: {},
+    story: {},
 };
 
 function defaults() {
@@ -484,7 +530,7 @@ function armNow(rt = settings().run) {
  * 每份「随聊天走」的插件状态：运行游标 + 章节史 + **命名空间镜像**（跨刷新不丢、绝不串台）。
  * 模型侧的剧情状态住在 MVU 里，这里只放插件自己的记账与备份。
  */
-const CHAT_SLICE_KEYS = ['run', 'chapters', 'nsBackup'];
+const CHAT_SLICE_KEYS = ['run', 'chapters', 'story'];
 
 function sliceFromSettings(s) {
     const out = {};
@@ -499,7 +545,7 @@ function applySliceToSettings(s, slice) {
     }
     if (!isPlainObject(s.run)) s.run = JSON.parse(JSON.stringify(DEFAULT.run));
     if (!isPlainObject(s.chapters)) s.chapters = {};
-    if (!isPlainObject(s.nsBackup)) s.nsBackup = {};
+    if (!isPlainObject(s.story)) s.story = {};
 }
 
 function ensureChatSlice(s) {
@@ -509,7 +555,7 @@ function ensureChatSlice(s) {
     if (!isPlainObject(s.chats)) s.chats = {};
     if (s.chatSliceKey) s.chats[s.chatSliceKey] = sliceFromSettings(s);
     if (!isPlainObject(s.chats[key])) {
-        s.chats[key] = JSON.parse(JSON.stringify({ run: DEFAULT.run, chapters: {}, nsBackup: {} }));
+        s.chats[key] = JSON.parse(JSON.stringify({ run: DEFAULT.run, chapters: {}, story: {} }));
         // ★ 第一次见到这个聊天 → 立刻播下「就位基准」（见 run.armedAt）：
         //   所有「聊满 N 轮才动手」都从这一刻算起，而不是拿整个聊天的历史条数。
         armNow(s.chats[key].run);
@@ -555,57 +601,176 @@ async function resolveMvu() {
 }
 
 /**
- * ★ 读变量：优先**当前楼层**，但当前楼层里还没有我们的东西时**退回聊天级**。
+ * ★ MVU 里那棵小树（**只放模型自己要写的那几个 token**）。
  *
- * 为什么要有这个退路（0.25.1 修的真事故）：MVU 把变量分两处存 —— 当前楼层与聊天级。
- * 有的卡只会让「当前楼层」这一份继承我们写的东西（那种卡上一切正常），有的卡不会：
- * 新的一楼从聊天级的基准重新起一份变量，而基准里没有我们写的篇章 / 主线 ——
- * 于是插件在用户每发一条之后都读到「还没有篇章」，就**再定一部**。
- * 用户看到的就是「刚生成好一个篇章，推进一步又重新生成了」。
- * 读出退路 + `writeMvu` 的两处同写，合起来才真正稳住状态。
+ * 用户定的分工（原话）：「mvu 里面有执行到第几拍的数字不就行了，我一开始的设计
+ * 不就是只负责让正文变量模型返回当前拍是否执行的 token」—— 对。剧情计划（篇章 / 章表 /
+ * 拍 / 支线 / 插曲 / 章节史）**住在插件里**（见 `storyNs`），MVU 只是模型回报进度的通道。
+ *
+ * 这个读法仍然会「当前楼层读不到就退回聊天级」：有的卡每开一楼就从聊天级基准重起变量。
  */
 function mvuData() {
     const api = mvu();
     if (!api?.getMvuData) return null;
     let here = null;
     try { here = api.getMvuData({ type: 'message', message_id: 'latest' }) || null; } catch { /* ignore */ }
-    if (nsHasState(here?.stat_data?.[NS])) return here;
+    if (isPlainObject(here?.stat_data?.[NS])) return here;
     let whole = null;
     try { whole = api.getMvuData({ type: 'chat' }) || null; } catch { /* ignore */ }
-    if (nsHasState(whole?.stat_data?.[NS])) {
+    if (isPlainObject(whole?.stat_data?.[NS])) {
         console.debug('[故事导演] 当前楼层的变量还是空的 —— 退回聊天级那份（见 mvuData 的说明）。');
         return whole;
     }
     return here || whole;
 }
 
-/** 插件侧的命名空间镜像（当前聊天的）。 */
-function nsBackup() {
-    const box = settings().nsBackup;
-    return isPlainObject(box) ? box : {};
+// ───────────────── 剧情状态：住在插件里 ─────────────────
+//
+// 0.26.0 的分工（用户定的）：
+//   · **计划**（史诗 / 主线的标题·篇章·范围·章目标·拍 / 支线 / 插曲 / 章节史）→ 插件设置，
+//     每聊天一份（`story`，见 CHAT_SLICE_KEYS），跨刷新不丢；
+//   · **MVU**：只留「第几拍 + 各标记 + 审查结论」这几个 token，因为那些要**模型自己写**。
+// 于是换卡 / InitVar 重跑 / 某些卡每楼重置变量，最多丢一次「拍落到没落」的信号，
+// **不可能再弄丢一部篇章** —— 也就不存在「MVU 空了要不要恢复进去」这个问题。
+
+/** 这一局的剧情状态（插件的，不是 MVU 的）。 */
+function storyNs() {
+    const s = settings();
+    if (!isPlainObject(s.story)) s.story = {};
+    return s.story;
 }
 
-/** 把这一份命名空间镜像下来（只镜像「有内容」的，空的不覆盖已存的）。 */
-function rememberNsBackup(ns) {
+function saveStory() {
+    const s = settings();
+    migrateEpicKeys(s.story);
+    save();
+}
+
+/**
+ * MVU 里只该剩 token —— 把计划字段清掉。
+ * 老存档把计划搬进插件之后跑一次：否则变量面板与模型快照里还挂着一份**再也不更新**的旧计划。
+ */
+async function pruneMvuToTokens() {
+    const api = mvu();
+    if (!api?.replaceMvuData) return false;
+    const d = mvuData();
+    if (!isPlainObject(d?.stat_data)) return false;
+    const ns = d.stat_data[NS];
+    if (!isPlainObject(ns)) return false;
+    const kept = {};
+    for (const path of TOKEN_PUSH) {
+        const value = getPath(ns, path);
+        if (value !== undefined) setPath(kept, path, value);
+    }
+    if (stableJson(kept) === stableJson(ns)) return false;
+    d.stat_data[NS] = kept;
+    console.info('[故事导演] MVU 里那份计划已清掉（0.26.0 起它住在插件里，MVU 只留回报 token）。');
+    return writeMvu(d);
+}
+
+/**
+ * 老存档 / 首次升级：剧情状态原来整棵住在 MVU 里 → **搬进插件**（只搬一次）。
+ * 之后 MVU 里那些计划字段不再维护（顺手清掉），插件只往 MVU 写 token。
+ */
+function importStoryFromMvu() {
+    if (nsHasState(storyNs())) return false;
+    const ns = mvuData()?.stat_data?.[NS];
     if (!nsHasState(ns)) return false;
     try {
-        settings().nsBackup = JSON.parse(JSON.stringify(ns));
+        const s = settings();
+        s.story = JSON.parse(JSON.stringify(ns));
+        migrateEpicKeys(s.story);
         save();
+        console.info('[故事导演] 已把这局的剧情状态从 MVU 搬进插件（0.26.0 起计划由插件保管，MVU 只留回报 token）。');
+        void pruneMvuToTokens();
         return true;
     } catch (error) {
-        console.debug('[故事导演] 镜像命名空间失败', error);
+        console.debug('[故事导演] 从 MVU 搬迁剧情状态失败', error);
         return false;
     }
 }
 
 /**
- * ★ 写变量：**两个存放位置都写**（当前楼层 + 聊天级），顺手留一份插件侧镜像。
+ * 支线 / 插曲：**计划归插件，但「落了没」是模型回报的**。
  *
- * 只写当前楼层时，状态能不能活到下一楼全看 MVU 会不会把这一楼合并回聊天级 ——
- * 有的卡不会（见 `mvuData` 的说明）。两处同写之后，下一楼从哪一份起都读得到；
- * 再加上 `nsBackup` 这份镜像，就算 MVU 整棵树被换卡 / InitVar 重跑清掉，
- * 插件也能自己补回去，不必重新花一次神谕。
- * `d` 就是 `mvuData()` 给的那份（含 `stat_data`），两份必须放进**同一个命名空间对象**。
+ * 所以这两个动态集合不走 TOKEN_PULL 的点号路径，单独抄一下「已落 / 状态」——
+ * 标题、目标、落点那些**不抄**（那是插件与神谕定的，模型改了也不算）。
+ */
+function pullEntryFlags(live = null) {
+    const src = (live && isPlainObject(live.stat_data) ? live.stat_data : mvuData()?.stat_data)?.[NS];
+    if (!isPlainObject(src)) return false;
+    const story = storyNs();
+    let changed = false;
+    for (const kind of ['支线', '插曲']) {
+        const from = isPlainObject(src[kind]) ? src[kind] : null;
+        if (!from) continue;
+        const to = isPlainObject(story[kind]) ? story[kind] : (story[kind] = {});
+        for (const [id, box] of Object.entries(from)) {
+            if (id.startsWith('$') || !isPlainObject(box)) continue;
+            if (!isPlainObject(to[id])) continue;          // 插件里没有这条 → 不管（计划归插件）
+            for (const key of ['已落', '状态']) {
+                if (box[key] === undefined) continue;
+                if (stableJson(to[id][key]) === stableJson(box[key])) continue;
+                to[id][key] = box[key];
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
+/** 把 MVU 里模型写的 token 抄进剧情状态（模型刚回报的进度信号）。 */
+function pullTokens(live = null) {
+    const root = live && isPlainObject(live.stat_data) ? live.stat_data : mvuData()?.stat_data;
+    const ns = root?.[NS];
+    if (!isPlainObject(ns)) return false;
+    const story = storyNs();
+    let changed = false;
+    for (const path of TOKEN_PULL) {
+        const value = getPath(ns, path);
+        if (value === undefined) continue;
+        if (stableJson(getPath(story, path)) === stableJson(value)) continue;
+        setPath(story, path, value);
+        changed = true;
+    }
+    if (pullEntryFlags(live)) changed = true;
+    if (changed) save();
+    return changed;
+}
+
+/**
+ * 把剧情状态里的 token 写进 MVU（模型下一轮看得到第几拍，也看得到被复位过的标记）。
+ *
+ * ⚠ **一样就不写**。这不是省事：我们写 MVU 会让 MVU 发一次「变量更新完」，
+ * 那个事件又回头调 `ensureNamespace` —— 无条件写就变成「写 → 事件 → 又写」的回声。
+ * 比较一下再写，回声在第一圈就断掉了。
+ */
+async function pushTokens() {
+    const api = mvu();
+    if (!api?.replaceMvuData) return false;
+    const d = mvuData();
+    if (!isPlainObject(d?.stat_data)) return false;
+    if (!isPlainObject(d.stat_data[NS])) d.stat_data[NS] = {};
+    const ns = d.stat_data[NS];
+    const story = storyNs();
+    let changed = false;
+    for (const path of TOKEN_PUSH) {
+        const want = getPath(story, path);
+        if (want === undefined) continue;
+        if (stableJson(getPath(ns, path)) === stableJson(want)) continue;
+        setPath(ns, path, isPlainObject(want) || Array.isArray(want) ? JSON.parse(JSON.stringify(want)) : want);
+        changed = true;
+    }
+    if (!changed) return false;
+    return writeMvu(d);
+}
+
+/**
+ * ★ 写 MVU：**两个存放位置都写**（当前楼层 + 聊天级）。
+ *
+ * 只写当前楼层时，这个 token 能不能活到下一楼全看 MVU 会不会把这一楼合并回聊天级 ——
+ * 有的卡不会（见 `mvuData` 的说明）。两处同写之后，下一楼从哪一份起都读得到。
+ * `d` 就是 `mvuData()` 给的那份（含 `stat_data`）。
  */
 async function writeMvu(d) {
     const api = mvu();
@@ -624,14 +789,19 @@ async function writeMvu(d) {
             ok = true;
         }
     } catch (error) { console.debug('[故事导演] 写入聊天级失败', error); }
-    if (ok) rememberNsBackup(d.stat_data[NS]);
     return ok;
 }
 
-/** 取 stat_data（live 优先：MVU 事件回调里那份还没落盘的活变量）。 */
+/**
+ * 取这一局的**根**（形状与 MVU 的 `stat_data` 一样：`root[NS]` 才是我们的命名空间）。
+ *
+ * `live` 传 MVU 事件回调里那份**刚被模型改过**的 token —— 顺手抄进剧情状态。
+ * ⚠ 计划不再从 MVU 读 —— MVU 只提供 token（见文件上方那一大段分工说明）。
+ */
 function rootOf(live = null) {
-    if (live && isPlainObject(live.stat_data)) return live.stat_data;
-    return mvuData()?.stat_data || null;
+    importStoryFromMvu();
+    if (live && isPlainObject(live.stat_data)) pullTokens(live);
+    return { [NS]: storyNs() };
 }
 
 function namespaceOf(root = null) {
@@ -691,26 +861,26 @@ async function switchMode(next, { live = null, quiet = false } = {}) {
     return true;
 }
 
-/** 写 `故事导演.间章.*`（整份合并，live 优先）。 */
-async function patchInterlude(fields, { live = null } = {}) {
-    const apply = (root) => {
+/**
+ * ★ 写剧情状态：计划住在插件里 —— 改 `story` → 存盘 → 把 token 推给 MVU。
+ * 所有 `patchX` 都走它，「计划写哪、token 怎么写」只有这一处定义。
+ */
+async function writeStory(apply) {
+    const root = { [NS]: storyNs() };
+    apply(root);
+    saveStory();
+    await pushTokens();
+    return true;
+}
+
+/** 写 `故事导演.间章.*`。⚠ `_opts` 只是兼容几十个老调用点：计划不再写 MVU（见 writeStory）。 */
+async function patchInterlude(fields, _opts = {}) {
+    return writeStory((root) => {
         if (!isPlainObject(root[NS])) root[NS] = {};
         if (!isPlainObject(root[NS][INTERLUDE])) root[NS][INTERLUDE] = emptyInterlude();
         Object.assign(root[NS][INTERLUDE], fields);
         if (Array.isArray(fields[IL.beats])) root[NS][INTERLUDE][IL.beats] = fields[IL.beats].slice();
-    };
-    if (live && isPlainObject(live.stat_data)) { apply(live.stat_data); return true; }
-    const api = mvu();
-    const d = mvuData();
-    if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
-    apply(d.stat_data);
-    try {
-        await writeMvu(d);
-        return true;
-    } catch (error) {
-        console.debug('[故事导演] 写入间章失败', error);
-        return false;
-    }
+    });
 }
 
 /** 同步「间章时段之外不许写间章变量」这个开关（模型只能在自己那段幕里动它）。 */
@@ -720,28 +890,16 @@ function syncInterludeWrites() {
 
 // ---- 史诗 / 篇章（围绕 {{user}} 的那条长线）----
 
-/** 写 `故事导演.史诗.*`（整份合并，live 优先）。 */
-async function patchEpic(fields, { live = null } = {}) {
-    const apply = (root) => {
+/** 写 `故事导演.史诗.*`（计划住在插件里，见 writeStory）。 */
+async function patchEpic(fields, _opts = {}) {
+    return writeStory((root) => {
         if (!isPlainObject(root[NS])) root[NS] = {};
         if (!isPlainObject(root[NS][EPIC])) root[NS][EPIC] = emptyEpic();
         Object.assign(root[NS][EPIC], fields);
         for (const key of [EP.chapters, EP.hooks]) {
             if (Array.isArray(fields[key])) root[NS][EPIC][key] = fields[key].slice();
         }
-    };
-    if (live && isPlainObject(live.stat_data)) { apply(live.stat_data); return true; }
-    const api = mvu();
-    const d = mvuData();
-    if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
-    apply(d.stat_data);
-    try {
-        await writeMvu(d);
-        return true;
-    } catch (error) {
-        console.debug('[故事导演] 写入史诗失败', error);
-        return false;
-    }
+    });
 }
 
 /** 一个篇章排几章（用户可在「设定」里改；1~12 之间夹一下，默认 4）。 */
@@ -894,47 +1052,29 @@ async function syncNsToChat(live = null) {
 }
 
 /**
- * 命名空间自愈：我们的世界书自带 InitVar，但老聊天只会初始化一次，所以插件自己也保证结构存在。
- * `live` 传 MVU 事件回调里那份还没落盘的活变量 —— 直接改它就与 MVU 自己那次回写同源。
+ * 剧情状态自愈：保证 `story` 这棵树的结构完整（老存档缺字段就补齐）。
  *
- * ★ 顺带干两件「别让 MVU 的命管道决定我们的剧情」的事（0.25.1 / 0.25.2）：
- *   · `syncNsToChat`：把偏掉的聊天级那一份对齐回来；
- *   · **镜像恢复**：MVU 那一份整个空了（换卡 / InitVar 重跑 / 每楼重置）而插件手里有镜像
- *     → 直接从镜像补回去。**不重新花神谕**，也不会把已经演过的章丢掉。
+ * ⚠ 0.26.0 起这里**不再往 MVU 写计划** —— 计划住在插件里（见 story 的说明），
+ *   MVU 只拿 token。所以这个函数只做两件事：
+ *   · 第一次读时把老存档（计划整棵在 MVU 里）**搬进来**；
+ *   · 补齐结构，然后把 token 推给 MVU（模型那一轮才知道第几拍、以及我们复位过的标记）。
  */
 async function ensureNamespace({ notify = false, live = null } = {}) {
     const api = mvu();
-    // ★ 顺手把聊天级那一份对齐（见 syncNsToChat）：老聊天开一次插件就修好，
-    //   否则「当前楼层有、聊天级空」的聊天会一直重复定篇章。
+    if (!live && !api?.replaceMvuData && !api?.getMvuData) {
+        if (notify) toast('MVU 未加载，无法初始化变量。', 'warning');
+        return false;
+    }
+    // ★ 顺手把聊天级那一份对齐（见 syncNsToChat）：有的卡不会自己把楼层更新合并回去。
     void syncNsToChat(live);
-    const d = live && isPlainObject(live.stat_data) ? live : mvuData();
-    if (!isPlainObject(d?.stat_data)) {
-        if (notify) toast('当前聊天还没有 MVU 变量，先和角色聊一句再试。', 'warning');
-        return false;
-    }
-    if (!live && !api?.replaceMvuData) {
-        if (notify) toast('MVU 未加载，无法初始化命名空间。', 'warning');
-        return false;
-    }
-    if (!isPlainObject(d.stat_data[NS])) d.stat_data[NS] = {};
+    importStoryFromMvu();
+    if (live) pullTokens(live);
+    const ns = storyNs();
     let changed = false;
-    let restored = false;
-    // ★ MVU 那一份空了 → 用插件侧镜像补回去（这才是「篇章住在插件里」该有的样子）。
-    //   ⚠ 只在 MVU **空**的时候补：它有内容就以它为准（用户可能在变量面板里手改过）。
-    {
-        const backup = nsBackup();
-        if (!nsHasState(d.stat_data[NS]) && nsHasState(backup)) {
-            d.stat_data[NS] = JSON.parse(JSON.stringify(backup));
-            changed = true;
-            restored = true;
-            console.info('[故事导演] MVU 里的剧情状态是空的 —— 已用插件里的镜像恢复（没有重新花神谕）。');
-        }
-    }
-    const ns = d.stat_data[NS];
 
-    if (!isPlainObject(ns.主线)) { ns.主线 = emptyMain(); changed = true; }
+    if (!isPlainObject(ns[MAIN_SECTION])) { ns[MAIN_SECTION] = emptyMain(); changed = true; }
     else {
-        const main = ns.主线;
+        const main = ns[MAIN_SECTION];
         for (const [key, value] of Object.entries(emptyMain())) {
             if (!(key in main)) { main[key] = value; changed = true; }
         }
@@ -1015,90 +1155,41 @@ async function ensureNamespace({ notify = false, live = null } = {}) {
         }
     }
 
-    if (!changed) return true;
-    if (restored) {
-        toast('MVU 里的剧情状态被清掉了 —— 已用插件里的备份恢复（没有重新花神谕）。', 'info');
-    }
-    if (live) {
-        render();
-        // 活变量由 MVU 自己回写，但它只写自己那一处 —— 镜像恢复完要顺手把聊天级也对齐
-        void syncNsToChat(live);
-        return true;
-    }
-    try {
-        await writeMvu(d);
-    } catch (error) {
-        console.debug('[故事导演] 写入命名空间失败', error);
-        if (notify) toast('写入 MVU 失败，详见控制台。', 'error');
-        return false;
-    }
-    if (notify) toast('故事导演 命名空间已就绪。', 'success');
+    if (!changed) { void pushTokens(); return true; }
+    void pushTokens();          // 结构补齐后，token 也要让 MVU 那边跟上
+    if (notify) toast('故事导演 的剧情状态已就绪。', 'success');
     render();
     return true;
 }
 
-/**
- * 写 `故事导演.主线.*`。live 优先（与 MVU 同源），否则读改写。
- * 返回 true/false。
- */
-async function patchMain(fields, { live = null } = {}) {
-    const apply = (root) => {
+/** 写 `故事导演.主线.*`（计划住在插件里，见 writeStory）。 */
+async function patchMain(fields, _opts = {}) {
+    return writeStory((root) => {
         if (!isPlainObject(root[NS])) root[NS] = {};
-        if (!isPlainObject(root[NS].主线)) root[NS].主线 = emptyMain();
-        Object.assign(root[NS].主线, fields);
+        if (!isPlainObject(root[NS][MAIN_SECTION])) root[NS][MAIN_SECTION] = emptyMain();
+        Object.assign(root[NS][MAIN_SECTION], fields);
         if (Array.isArray(fields[MAIN_BEATS])) {
-            root[NS].主线[MAIN_BEATS] = fields[MAIN_BEATS].slice();
+            root[NS][MAIN_SECTION][MAIN_BEATS] = fields[MAIN_BEATS].slice();
         }
-    };
-    if (live && isPlainObject(live.stat_data)) { apply(live.stat_data); return true; }
-    const api = mvu();
-    const d = mvuData();
-    if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
-    apply(d.stat_data);
-    try {
-        await writeMvu(d);
-        return true;
-    } catch (error) {
-        console.debug('[故事导演] 写入主线失败', error);
-        return false;
-    }
+    });
 }
 
 /** 写 `故事导演.<kind>.<id>`（整份对象合并）。 */
-async function patchEntry(kind, id, fields, { live = null } = {}) {
-    const apply = (root) => {
+async function patchEntry(kind, id, fields, _opts = {}) {
+    return writeStory((root) => {
         if (!isPlainObject(root[NS])) root[NS] = {};
         if (!isPlainObject(root[NS][kind])) root[NS][kind] = {};
         const box = root[NS][kind];
         box[id] = isPlainObject(box[id]) ? { ...box[id], ...fields } : { ...fields };
-    };
-    if (live && isPlainObject(live.stat_data)) { apply(live.stat_data); return true; }
-    const api = mvu();
-    const d = mvuData();
-    if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
-    apply(d.stat_data);
-    try {
-        await writeMvu(d);
-        return true;
-    } catch (error) {
-        console.debug(`[故事导演] 写入 ${kind}.${id} 失败`, error);
-        return false;
-    }
+    });
 }
 
 /** 直接删一条支线/插曲（AI 不写命令时插件自己收尾用）。 */
-async function dropEntry(kind, id, { live = null } = {}) {
-    const apply = (root) => {
+async function dropEntry(kind, id, _opts = {}) {
+    return writeStory((root) => {
         const box = isPlainObject(root[NS]) && isPlainObject(root[NS][kind]) ? root[NS][kind] : null;
         if (box) delete box[id];
-    };
-    if (live && isPlainObject(live.stat_data)) { apply(live.stat_data); return true; }
-    const api = mvu();
-    const d = mvuData();
-    if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
-    apply(d.stat_data);
-    try { await writeMvu(d); return true; }
-    catch (error) { console.debug(`[故事导演] 删除 ${kind}.${id} 失败`, error); return false; }
+    });
 }
 
 /** 把「已走完的章」记进章节史（注入时用来提醒模型不要重演）。 */
@@ -1151,20 +1242,15 @@ async function rememberChapter(main, { live = null } = {}) {
         while (ids.length > 8) delete history[String(ids.shift())];
 
         // ★ 这一章写完了 → **篇章进度 +1**（只算主线章；间章走另一个函数，不计入）。
-        //   进度是**这一册自己的**：写满章表长度，这一部就收尾、换新的一部（见 needsEpic）。
+        //   进度是**这一册自己的**：写满章表长度，这一部就收尾、换新的一部。
         const epicBox = isPlainObject(target[NS][EPIC]) ? target[NS][EPIC] : null;
         if (epicBox) {
             const done = Math.max(0, Math.round(toNumber(epicBox[EP.chapter], 0))) + 1;
             epicBox[EP.chapter] = done;
         }
     };
-    if (live && isPlainObject(live.stat_data)) { apply(live.stat_data); return true; }
-    const api = mvu();
-    const d = mvuData();
-    if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
-    apply(d.stat_data);
-    try { await writeMvu(d); return true; }
-    catch (error) { console.debug('[故事导演] 记录章节史失败', error); return false; }
+    await writeStory(apply);
+    return true;
 }
 
 // 阶段五：世界书
@@ -1287,6 +1373,23 @@ async function backupWorldbook(suffix) {
  * 背景：以前这里只有「缺失才装」，于是我们改了世界书内容（加纪律、改变量契约），
  * 已经装过的人永远拿不到 —— 现在按版本标记比对，旧了就自动更新（**先备份**）。
  */
+/**
+ * ★ **只报一次**的信息性提示（按 key 记在设置里）。
+ *
+ * 为什么要它（用户提的）：「已装好世界书 / 已挂载到全局世界书」这类提示每刷新一次就弹一次，
+ * 但事情只发生过一次 —— 那是噪音，不是新闻。key 里带上版本号之类的标识，
+ * 所以「真的变了」时它还会再报一次。
+ */
+function toastOnce(key, message, type = 'info') {
+    const s = settings();
+    if (!isPlainObject(s.toldOnce)) s.toldOnce = {};
+    if (s.toldOnce[key]) return false;
+    s.toldOnce[key] = Date.now();
+    save();
+    toast(message, type);
+    return true;
+}
+
 async function installBundledWorldbook({ notify = true, mount = null, ifMissing = true, ifOlderVersion = false } = {}) {
     if (!(await ensureWorldListLoaded())) {
         if (notify) toast('酒馆的世界书列表还没加载出来——稍等一下再试，或点「刷新列表」。', 'warning');
@@ -1295,7 +1398,7 @@ async function installBundledWorldbook({ notify = true, mount = null, ifMissing 
     const exists = world_names.includes(PLUGIN_WORLD);
 
     if (exists && ifMissing && !ifOlderVersion) {
-        if (notify) toast(`酒馆里已经有世界书「${PLUGIN_WORLD}」了，不用重新安装。`, 'info');
+        if (notify) toastOnce(`book:exists:${PLUGIN_WORLD}`, `酒馆里已经有世界书「${PLUGIN_WORLD}」了，不用重新安装。`, 'info');
         return 'exists';
     }
 
@@ -1326,7 +1429,8 @@ async function installBundledWorldbook({ notify = true, mount = null, ifMissing 
         if (panel && !panel.hidden) render();
         console.info(`[故事导演] 自带世界书已更新：${installed || '(无版本)'} → ${bundled}` + (backup ? `；旧内容备份为「${backup}」` : ''));
         if (notify) {
-            toast(
+            toastOnce(
+                `book:updated:${bundled}`,
                 `自带世界书「${PLUGIN_WORLD}」已更新到 ${bundled}` +
                 (backup ? `（旧内容备份成「${backup}」，可以随时对照或删掉）` : '') + '。',
                 'success',
@@ -1354,7 +1458,8 @@ async function installBundledWorldbook({ notify = true, mount = null, ifMissing 
     if (shouldMount) setGlobalBook(PLUGIN_WORLD, true);
     if (panel && !panel.hidden) render();
     if (notify) {
-        toast(
+        toastOnce(
+            `book:installed:${String(data.srVersion || '')}`,
             `已从插件包装好世界书「${PLUGIN_WORLD}」（${Object.keys(data.entries).length} 条）` +
             (shouldMount ? '，并挂载到全局世界书。' : '。到「设定」页可以手动挂载。'),
             'success',
@@ -3427,7 +3532,9 @@ function firstChapterBlocker({ live = null } = {}) {
     const rounds = roundsSinceArmed(rt);
     if (!s.enabled) return { key: 'plugin-off', text: '插件已停用（扩展列表里重新启用）' };
     if (!mvu()) return { key: 'no-mvu', text: 'MVU 没加载：先确认酒馆助手与 MVU 装好了' };
-    if (!namespaceOf(rootOf(live))) return { key: 'no-namespace', text: '这个聊天还没有 MVU 变量：先和角色聊一句' };
+    // ⚠ 0.26.0 起剧情状态住在插件里，所以「有没有变量」要看 **MVU 那棵树在不在**
+    //   （它是模型回报进度、也是插件写 token 的地方），不能拿插件里的 story 判断。
+    if (!isPlainObject((live && live.stat_data) || mvuData()?.stat_data)) return { key: 'no-namespace', text: '这个聊天还没有 MVU 变量：先和角色聊一句' };
     if (!s.autoDirector) return { key: 'director-off', text: '「总开关」是关着的 —— 点面板顶上的 ⏻ 打开，或点下面的「设计下一章」手动开' };
     if (typeof oracleApi()?.run !== 'function') {
         return { key: 'no-oracle', text: '读不到「故事神谕」的模型连接 —— 确认故事神谕已安装并启用（版本要 1.21 以上，且它的 Hook API 没被关掉）' };
@@ -3483,7 +3590,8 @@ async function evaluateDirector({ live = null } = {}) {
         const s = settings();
         if (!s.enabled) return;
         if (!mvu()) return;
-        if (!namespaceOf(rootOf(live))) return;
+        // 变量树在不在（剧情状态本身住在插件里，见 ensureNamespace 上方那段说明）
+        if (!isPlainObject((live && live.stat_data) || mvuData()?.stat_data)) return;
 
         const key = chatKey();
         if (s.run.chatId !== key) {
@@ -3862,13 +3970,8 @@ async function rememberInterlude(chapter, { live = null } = {}) {
         const ids = Object.keys(history).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
         while (ids.length > 8) delete history[String(ids.shift())];
     };
-    if (live && isPlainObject(live.stat_data)) { apply(live.stat_data); return true; }
-    const api = mvu();
-    const d = mvuData();
-    if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
-    apply(d.stat_data);
-    try { await writeMvu(d); return true; }
-    catch (error) { console.debug('[故事导演] 记录间章失败', error); return false; }
+    await writeStory(apply);
+    return true;
 }
 
 /**
@@ -4831,26 +4934,22 @@ async function regenerateRemainingBeats() {
 }
 
 async function clearStory() {
-    if (!window.confirm('清空这个故事的主线、支线与插曲？MVU 里的 故事导演 命名空间会被重置（角色卡自己的变量不受影响）。')) return;
-    const fields = {
-        ...emptyMain(),
-    };
-    await patchMain(fields);
-    const api = mvu();
-    const d = mvuData();
-    if (api?.replaceMvuData && isPlainObject(d?.stat_data)) {
-        if (!isPlainObject(d.stat_data[NS])) d.stat_data[NS] = {};
-        d.stat_data[NS].支线 = {};
-        d.stat_data[NS].插曲 = {};
-        d.stat_data[NS].章节史 = {};
-        try { await writeMvu(d); } catch { /* ignore */ }
-    }
+    if (!window.confirm('清空这个故事的主线、支线与插曲？故事状态会被重置（角色卡自己的变量不受影响）。')) return;
+    await patchMain({ ...emptyMain() });
     const s = settings();
     s.chapters = {};
-    s.nsBackup = {};                 // 清空 = 连镜像一起清掉，否则下一次「MVU 空了」会把旧故事补回来
+    s.story = {};                    // 计划整个清掉（0.26.0 起它住在插件里）
     s.run = JSON.parse(JSON.stringify(DEFAULT.run));
     s.run.chatId = chatKey();
     save();
+    // MVU 那边只留 token 骨架：把它也复位，免得模型看到上一局留下的「本拍已落」
+    const api = mvu();
+    const d = mvuData();
+    if (api?.replaceMvuData && isPlainObject(d?.stat_data)) {
+        d.stat_data[NS] = {};
+        try { await writeMvu(d); } catch { /* ignore */ }
+    }
+    await pushTokens();
     failedKeys.clear();
     syncMainInjection();
     render();
@@ -4894,37 +4993,42 @@ async function forceOpenStory() {
 }
 
 /**
- * 把老存档的旧字段名改掉 —— **两个存放位置都过一遍**。
+ * 把老存档的旧字段名改掉。
  *   · `史诗.总纲`   → `史诗.篇章`    （0.21.1）
  *   · `史诗.走向`   → `史诗.章内容`  （0.22.0：阶段思维 → 章表）
  *   · 清掉已废弃的 `史诗.当前进程` / `史诗.赌注`
  *
- * MVU 的 `getMvuData/replaceMvuData` 支持 `type: 'message'`（当前楼层）与 `type: 'chat'`（聊天级）。
- * 我们平时只写 message，但**前端那个变量查看器读的是哪一份不好保证** ——
- * 用户报的正是「代码改了、前端上还写着总纲」。所以迁移时两处都查：
- * 哪一处没有、或者已经是新名字，就跳过（纯函数本身幂等），不会写着玩。
+ * 0.26.0 起计划住在**插件里**（`story`），所以真正要修的是那一份；
+ * MVU 那边顺手也过一遍（老版本留下的计划字段可能还赖在变量里，清干净免得模型看到过期货）。
  *
- * @returns {Promise<{message: object|null, chat: object|null, changed: boolean}>}
+ * @returns {Promise<{story: object|null, message: object|null, chat: object|null, changed: boolean}>}
  */
 async function migrateLegacyKeysBothScopes({ notify = false } = {}) {
     const api = mvu();
-    const report = { message: null, chat: null, changed: false };
-    if (typeof api?.getMvuData !== 'function' || typeof api?.replaceMvuData !== 'function') {
-        if (notify) toast('MVU 没加载，改不了字段名。', 'warning');
-        return report;
+    const report = { story: null, message: null, chat: null, changed: false };
+    // ① 插件侧的计划（真正在用的那一份）
+    try {
+        const r = migrateEpicKeys(storyNs());
+        report.story = r;
+        if (r.changed) { save(); report.changed = true; }
+    } catch (error) {
+        console.debug('[故事导演] 迁移插件侧字段名失败', error);
     }
-    for (const [label, opts] of [['message', { type: 'message', message_id: 'latest' }], ['chat', { type: 'chat' }]]) {
-        try {
-            const d = api.getMvuData(opts);
-            const ns = d?.stat_data?.[NS];
-            if (!isPlainObject(ns)) continue;
-            const r = migrateEpicKeys(ns);
-            if (!r.changed) { report[label] = r; continue; }
-            await api.replaceMvuData(d, opts);
-            report[label] = r;
-            report.changed = true;
-        } catch (error) {
-            console.debug(`[故事导演] 迁移「${label}」作用域的字段名失败`, error);
+    // ② MVU 里可能残留的老字段（0.26.0 之前的存档）
+    if (typeof api?.getMvuData === 'function' && typeof api?.replaceMvuData === 'function') {
+        for (const [label, opts] of [['message', { type: 'message', message_id: 'latest' }], ['chat', { type: 'chat' }]]) {
+            try {
+                const d = api.getMvuData(opts);
+                const ns = d?.stat_data?.[NS];
+                if (!isPlainObject(ns)) continue;
+                const r = migrateEpicKeys(ns);
+                if (!r.changed) { report[label] = r; continue; }
+                await api.replaceMvuData(d, opts);
+                report[label] = r;
+                report.changed = true;
+            } catch (error) {
+                console.debug(`[故事导演] 迁移「${label}」作用域的字段名失败`, error);
+            }
         }
     }
     if (report.changed) {
@@ -4933,11 +5037,11 @@ async function migrateLegacyKeysBothScopes({ notify = false } = {}) {
     }
     if (notify) {
         const done = Object.entries(report)
-            .filter(([k, v]) => k !== 'changed' && v?.changed)
-            .map(([k, v]) => `${k === 'message' ? '当前楼层' : '聊天级'}${v.renamed ? '（总纲 → 篇章）' : '（清掉旧键）'}`);
+            .filter(([k, v]) => !['changed'].includes(k) && v?.changed)
+            .map(([k, v]) => `${k === 'message' ? '当前楼层' : k === 'chat' ? '聊天级' : '插件里'}${v.renamed ? '（总纲 → 篇章）' : '（清掉旧键）'}`);
         toast(done.length
-            ? `老字段名已迁移：${done.join('；')}。刷新变量面板就能看到。`
-            : '没有需要迁移的旧字段 —— 两处都已经是「篇章」了。', done.length ? 'success' : 'info');
+            ? `老字段名已迁移：${done.join('；')}。`
+            : '没有需要迁移的旧字段 —— 已经是「篇章」了。', done.length ? 'success' : 'info');
         console.info('[故事导演] 字段名迁移结果', report);
     }
     return report;
@@ -4978,11 +5082,14 @@ function exposeDiagnostics() {
                     这一部已写几章: epicChapter(epicOf(rootOf())),
                     这一部写完没有: epicFinished(epicOf(rootOf())),
                     大高潮: epicClimax(epicOf(rootOf())),
-                    // ★ 插件侧镜像（0.25.2）：MVU 那棵树被清掉时靠它恢复，不重新花神谕。
-                    镜像备份: {
-                        有没有: nsHasState(settings().nsBackup),
-                        篇章名: String(unwrap((settings().nsBackup?.[EPIC] || {})[EP.title]) ?? ''),
+                    // ★ 0.26.0：计划住在插件里（`story`），MVU 只留 token —— 这里把两边都摊开。
+                    //   「插件的」出现 有没有:false，说明这一局还没内容（会从 MVU 搬，或重新定）。
+                    插件里的剧情状态: {
+                        有没有: nsHasState(settings().story),
+                        篇章名: String(unwrap((settings().story?.[EPIC] || {})[EP.title]) ?? ''),
+                        拍数: beatsOf(mainOf({ [NS]: settings().story || {} })).length,
                     },
+                    MVU里的token: Object.fromEntries(TOKEN_PUSH.map((p) => [p, getPath({ [NS]: mvuData()?.stat_data?.[NS] || {} }, `${NS}.${p}`)])),
                     定篇章已试: Math.round(toNumber(settings().run.epicTries, 0)),
                     // ★ 审查升级梯的记账（用户报「大纲自己变了」时，先看这三个数）：
                     //   同一章累计 3 次「不合适」才会去改篇章，而且**同一章最多改一次**。

@@ -1263,6 +1263,9 @@ export function nsPathOfCommand(command) {
 const PLUGIN_OWNED = new Set();
 for (const key of [MAIN_BEATS, MAIN_TITLE, MAIN_ARC, MAIN_SCOPE, MAIN_GOAL]) PLUGIN_OWNED.add(`${NS}.主线.${key}`);
 for (const key of [IL.title, IL.scene, IL.beats]) PLUGIN_OWNED.add(`${NS}.${INTERLUDE}.${key}`);
+// 0.26.0：计划整棵住在插件里，MVU 只留回报 token —— 所以「计划」那一整块谁都不许往变量里写，
+// 模型真写了也丢掉（不然变量里会重新长出一份再也不更新的旧计划）。
+PLUGIN_OWNED.add(`${NS}.${EPIC}`);
 /** 间章时段之外，模型对 `间章.*` 的写入一律忽略（防止它在主线时段乱改间章状态）。 */
 let interludeWritesAllowed = false;
 export function setInterludeWritesAllowed(flag) {
