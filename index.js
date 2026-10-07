@@ -394,6 +394,21 @@ const DEFAULT = {
         lastGenerateAt: 0,
     },
     chapters: {},
+    /**
+     * ★ **命名空间镜像**：`故事导演` 那一棵树的插件侧备份（每聊天一份）。
+     *
+     * 为什么要备份（0.25.2）：剧情状态一直只住在 MVU 里 —— 而那棵树的**命**不归我们管：
+     *   换卡 / `[InitVar]` 重跑 / 某些卡每开一楼就从基准重起一份变量 …… 一旦它空了，
+     *   插件就以为「还没有篇章」，于是**又花一次神谕重新定一部**（用户报的
+     *   「刚生成好一个篇章，推进一步又重新生成了」就是这个）。
+     *
+     * 现在 MVU 仍然**是**给模型看的那一份（也随聊天走），但插件手里永远留一份镜像：
+     *   · 每次写入 MVU 之后顺手镜像（见 writeMvu → rememberNsBackup）；
+     *   · MVU 那一份空了 → **从镜像补回去，不重新花神谕**（见 ensureNamespace 的恢复分支）。
+     * 判断谁是权威：**MVU 有内容就以 MVU 为准**（用户可能在变量面板里手改过），
+     * 只有 MVU 空了才用镜像 —— 所以镜像不会把旧版本顶掉新版本。
+     */
+    nsBackup: {},
 };
 
 function defaults() {
@@ -466,10 +481,10 @@ function armNow(rt = settings().run) {
 }
 
 /**
- * 每份「随聊天走」的插件状态：运行游标 + 章节史（跨刷新不丢、绝不串台）。
- * 模型侧的剧情状态住在 MVU 里，这里只放插件自己的记账。
+ * 每份「随聊天走」的插件状态：运行游标 + 章节史 + **命名空间镜像**（跨刷新不丢、绝不串台）。
+ * 模型侧的剧情状态住在 MVU 里，这里只放插件自己的记账与备份。
  */
-const CHAT_SLICE_KEYS = ['run', 'chapters'];
+const CHAT_SLICE_KEYS = ['run', 'chapters', 'nsBackup'];
 
 function sliceFromSettings(s) {
     const out = {};
@@ -484,6 +499,7 @@ function applySliceToSettings(s, slice) {
     }
     if (!isPlainObject(s.run)) s.run = JSON.parse(JSON.stringify(DEFAULT.run));
     if (!isPlainObject(s.chapters)) s.chapters = {};
+    if (!isPlainObject(s.nsBackup)) s.nsBackup = {};
 }
 
 function ensureChatSlice(s) {
@@ -493,7 +509,7 @@ function ensureChatSlice(s) {
     if (!isPlainObject(s.chats)) s.chats = {};
     if (s.chatSliceKey) s.chats[s.chatSliceKey] = sliceFromSettings(s);
     if (!isPlainObject(s.chats[key])) {
-        s.chats[key] = JSON.parse(JSON.stringify({ run: DEFAULT.run, chapters: {} }));
+        s.chats[key] = JSON.parse(JSON.stringify({ run: DEFAULT.run, chapters: {}, nsBackup: {} }));
         // ★ 第一次见到这个聊天 → 立刻播下「就位基准」（见 run.armedAt）：
         //   所有「聊满 N 轮才动手」都从这一刻算起，而不是拿整个聊天的历史条数。
         armNow(s.chats[key].run);
@@ -563,11 +579,32 @@ function mvuData() {
     return here || whole;
 }
 
+/** 插件侧的命名空间镜像（当前聊天的）。 */
+function nsBackup() {
+    const box = settings().nsBackup;
+    return isPlainObject(box) ? box : {};
+}
+
+/** 把这一份命名空间镜像下来（只镜像「有内容」的，空的不覆盖已存的）。 */
+function rememberNsBackup(ns) {
+    if (!nsHasState(ns)) return false;
+    try {
+        settings().nsBackup = JSON.parse(JSON.stringify(ns));
+        save();
+        return true;
+    } catch (error) {
+        console.debug('[故事导演] 镜像命名空间失败', error);
+        return false;
+    }
+}
+
 /**
- * ★ 写变量：**两个存放位置都写**（当前楼层 + 聊天级）。
+ * ★ 写变量：**两个存放位置都写**（当前楼层 + 聊天级），顺手留一份插件侧镜像。
  *
  * 只写当前楼层时，状态能不能活到下一楼全看 MVU 会不会把这一楼合并回聊天级 ——
- * 有的卡不会（见 `mvuData` 的说明）。两处同写之后，下一楼从哪一份起都读得到。
+ * 有的卡不会（见 `mvuData` 的说明）。两处同写之后，下一楼从哪一份起都读得到；
+ * 再加上 `nsBackup` 这份镜像，就算 MVU 整棵树被换卡 / InitVar 重跑清掉，
+ * 插件也能自己补回去，不必重新花一次神谕。
  * `d` 就是 `mvuData()` 给的那份（含 `stat_data`），两份必须放进**同一个命名空间对象**。
  */
 async function writeMvu(d) {
@@ -587,6 +624,7 @@ async function writeMvu(d) {
             ok = true;
         }
     } catch (error) { console.debug('[故事导演] 写入聊天级失败', error); }
+    if (ok) rememberNsBackup(d.stat_data[NS]);
     return ok;
 }
 
@@ -857,6 +895,11 @@ async function syncNsToChat(live = null) {
 /**
  * 命名空间自愈：我们的世界书自带 InitVar，但老聊天只会初始化一次，所以插件自己也保证结构存在。
  * `live` 传 MVU 事件回调里那份还没落盘的活变量 —— 直接改它就与 MVU 自己那次回写同源。
+ *
+ * ★ 顺带干两件「别让 MVU 的命管道决定我们的剧情」的事（0.25.1 / 0.25.2）：
+ *   · `syncNsToChat`：把偏掉的聊天级那一份对齐回来；
+ *   · **镜像恢复**：MVU 那一份整个空了（换卡 / InitVar 重跑 / 每楼重置）而插件手里有镜像
+ *     → 直接从镜像补回去。**不重新花神谕**，也不会把已经演过的章丢掉。
  */
 async function ensureNamespace({ notify = false, live = null } = {}) {
     const api = mvu();
@@ -873,8 +916,20 @@ async function ensureNamespace({ notify = false, live = null } = {}) {
         return false;
     }
     if (!isPlainObject(d.stat_data[NS])) d.stat_data[NS] = {};
-    const ns = d.stat_data[NS];
     let changed = false;
+    let restored = false;
+    // ★ MVU 那一份空了 → 用插件侧镜像补回去（这才是「篇章住在插件里」该有的样子）。
+    //   ⚠ 只在 MVU **空**的时候补：它有内容就以它为准（用户可能在变量面板里手改过）。
+    {
+        const backup = nsBackup();
+        if (!nsHasState(d.stat_data[NS]) && nsHasState(backup)) {
+            d.stat_data[NS] = JSON.parse(JSON.stringify(backup));
+            changed = true;
+            restored = true;
+            console.info('[故事导演] MVU 里的剧情状态是空的 —— 已用插件里的镜像恢复（没有重新花神谕）。');
+        }
+    }
+    const ns = d.stat_data[NS];
 
     if (!isPlainObject(ns.主线)) { ns.主线 = emptyMain(); changed = true; }
     else {
@@ -960,7 +1015,15 @@ async function ensureNamespace({ notify = false, live = null } = {}) {
     }
 
     if (!changed) return true;
-    if (live) { render(); return true; }   // 活变量由 MVU 自己回写
+    if (restored) {
+        toast('MVU 里的剧情状态被清掉了 —— 已用插件里的备份恢复（没有重新花神谕）。', 'info');
+    }
+    if (live) {
+        render();
+        // 活变量由 MVU 自己回写，但它只写自己那一处 —— 镜像恢复完要顺手把聊天级也对齐
+        void syncNsToChat(live);
+        return true;
+    }
     try {
         await writeMvu(d);
     } catch (error) {
@@ -4783,6 +4846,7 @@ async function clearStory() {
     }
     const s = settings();
     s.chapters = {};
+    s.nsBackup = {};                 // 清空 = 连镜像一起清掉，否则下一次「MVU 空了」会把旧故事补回来
     s.run = JSON.parse(JSON.stringify(DEFAULT.run));
     s.run.chatId = chatKey();
     save();
@@ -4913,6 +4977,11 @@ function exposeDiagnostics() {
                     这一部已写几章: epicChapter(epicOf(rootOf())),
                     这一部写完没有: epicFinished(epicOf(rootOf())),
                     大高潮: epicClimax(epicOf(rootOf())),
+                    // ★ 插件侧镜像（0.25.2）：MVU 那棵树被清掉时靠它恢复，不重新花神谕。
+                    镜像备份: {
+                        有没有: nsHasState(settings().nsBackup),
+                        篇章名: String(unwrap((settings().nsBackup?.[EPIC] || {})[EP.title]) ?? ''),
+                    },
                     定篇章已试: Math.round(toNumber(settings().run.epicTries, 0)),
                     // ★ 审查升级梯的记账（用户报「大纲自己变了」时，先看这三个数）：
                     //   同一章累计 3 次「不合适」才会去改篇章，而且**同一章最多改一次**。
