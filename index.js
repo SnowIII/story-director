@@ -36,6 +36,7 @@ import {
     REVIEW_PASS, REVIEW_STATES, REVIEW_MAX_RETRY,
     STATUS_PENDING, STATUS_ACTIVE, STATUS_DONE, STATUS_SKIPPED, STATUS_STALLED,
     isPlainObject, unwrap, unwrapDeep, display, toNumber, truthy,
+    reviewLadder, STRIKES_BEFORE_EPIC,
     capText, splitBeats, beatsOf, parseBlocks,
     emptyMain, mainOf, listOf, currentBeat, reviewStateOf, reviewNoteOf,
     isLiveThread, threadLanded, interludePending, interludeAfter,
@@ -127,17 +128,20 @@ const BEAT_MIN = 3;
 const FOCUS_STALE_REPLIES = 2;
 
 /**
- * ★ 合理性审查的升级梯（见 handleBeatReview）。
+ * ★ 合理性审查的升级梯（见 handleBeatReview / model.js 的 `reviewLadder`）。
  *
- *  ①「重排剩下的拍」：拍级、便宜，已演过的拍一字不动。最多试 REDESIGN_MAX_L1 次。
- *  ② 仍然报错 → **废掉这一章重建**（章级）：不再保留已演的拍 —— 因为病在「这一章的设计」上。
- *     （会保留段落级的历史，确保不重复已讲过的内容）
- *  ③ 再报错 → 请神谕**重设篇章这一段**（说明是长线方向立不住），然后重建这一章。
+ * 原则是用户定的（原话）：
+ *   「如果正文合理性审查，返回当前主线提示词不合适，则重新生成拍；
+ *     若三次在同一章节的主线收到不合适信号，才重整篇章。」
  *
- * 这道梯子取代了原来的「试满 N 次就永远停手」—— 那个做法会把故事卡在一个立不住的章上。
+ * 所以只有两级、只改两种东西：
+ *   · 第 1、2 次 → **重排还没演的拍**（已演的一字不动，篇章一个字不动）；
+ *   · 第 3 次（同一章累计）→ **改篇章还没写的章** + 重排剩下的拍；
+ *     并且**同一章最多改一次篇章**（否则会「改完又报、报了又改」，无限改大纲）。
+ *
+ * ⚠ 次数**不做成设置**：3 次是原则本身。以前那个 `redesignMax` 旋钮已删，
+ *   因为它能让人把梯子调成「报一次就改大纲」（太敏感）或「永远不改」。
  */
-const REDESIGN_MAX_L1 = 2;   // ①级最多试几次
-const REDESIGN_MAX_L2 = 2;   // ②级最多试几次，之后升到③
 
 /** 注入的状态块标签：被模型抄进正文时按它做确定性剥离。 */
 const STATUS_TAG = 'story_director_status';
@@ -220,16 +224,8 @@ const DEFAULT = {
     chapterGap: 4,
     threadWarmup: 3,
     /** 一拍至少演多少轮才允许换拍（防连跳）。 */
-    minReplies: 1,    /**
-     * 合理性审查的升级梯（见 handleBeatReview）：
-     *   · 第①级「重排剩下的拍」最多试这么多次；
-     *   · 仍然报错 → 第②级**废掉这一章**重建（可能连续两次）；
-     *   · 再报错 → 第③级请神谕**重设篇章这一段**（说明这个方向真的立不住），然后重建这一章。
-     * ⚠ 刻意**不是**「试满就永远停手」：那样反而会卡在一个立不住的章上不动。
-     *   节流靠两道：级内次数上限 + 两次重设计之间至少隔 `redesignGap` 轮。
-     */
-    redesignMax: REDESIGN_MAX_L1,
-    /** 两次「重设计」之间至少隔几轮（防连着重生成，烧 token 也把剧情搅乱）。 */
+    minReplies: 1,
+    /** 两次「重排剩下的拍」之间至少隔几轮（防连着重生成，烧 token 也把剧情搅乱）。 */
     redesignGap: 3,
 
     /** 注入开关。 */
@@ -258,11 +254,16 @@ const DEFAULT = {
     /**
      * 篇章：先定一部**围绕 {{user}}** 的大故事（由若干章组成，每章自己闭环），
      * 再由主线把每一章细化成拍 —— 主线不平淡的关键。
-     * autoEpic=true 时会在开第一章之前自动定篇章；之后每开新章前自动按「他实际做了什么」重新校准。
+     * autoEpic=true 时会在开第一章之前自动定篇章。
+     *
+     * ⚠ **篇章只由两件事动**（0.25.0 起的硬规矩，见 CHANGELOG 0.25.0）：
+     *   · 正文模型在同一章里**累计三次**报「当前主线不合适」→ 改掉还没写的章（`reviewLadder`）；
+     *   · 用户自己点「重新定篇章（换一部）」「按现在的情况重新校准」。
+     * 原来还有一个「每开新章前自动校准」的开关（`evolveEpic`）—— 它的触发条件自相矛盾，
+     * **从来没生效过**；而一旦按字面修好，就会变成「每换一章就改一次大纲」，
+     * 正是「推了一下剧情篇章大纲就自己变了」。所以直接删掉，不给第三种改法。
      */
     autoEpic: true,
-    /** 每开新章前重新校准篇章（多花一次调用，但能跟住玩家的偏离）。 */
-    evolveEpic: true,
     /** 基调：由用户在下拉里选（冒险 / 日常 / 悬疑……），决定这条长线是什么型的故事。 */
     tone: 'auto',
     storyTranscript: true,
@@ -362,16 +363,24 @@ const DEFAULT = {
          * @type {Array<{title: string, chapters: string[]}>}
          */
         retiredEpics: [],
-        /** 连续被驳回的次数。 */
-        redesigns: 0,
         /**
-         * ★ 合理性审查升级梯的记账（见 handleBeatReview）：
-         *   redesignFor —— 上面那个计数是**哪一章**的（换章清零，所以每章额度独立）；
-         *   redesignsL2  —— 已经走到②级（废章重建）几次；
-         *   redesignAt   —— 上一次重设计的轮数（节流用；回退聊天后由 repairRunCursors 兜住）。
+         * ★ **当前这一章的身份**：真开出一章时播下（= 开章那一轮的回复数），重排剩下的拍**不动它**。
+         *
+         * 为什么不能拿章名当身份（0.25.0 修的真事故）：审查升级梯原来用「章名」判断「是不是同一章」——
+         *   章名一变就清零（额度永远攒不满）、两章重名就**跨章累积**（不同章的各报一次也会去改篇章）。
+         *   而且①级重排本来就会重新生成整章，章名随时可能被改。
          */
-        redesignFor: '',
-        redesignsL2: 0,
+        chapterId: '',
+        /**
+         * ★ 合理性审查升级梯的记账（见 handleBeatReview 与 reviewLadder）：
+         *   reviewStrikes    —— 这一章**累计**收到过几次「当前主线不合适」（攒够 3 次才允许动篇章）；
+         *   reviewStrikesFor —— 上面那个计数是**哪一章**的（换章 / 用户整章重写就归零）；
+         *   epicRewroteFor   —— 这一章已经动过篇章了 → 之后只重排，**同一章最多动一次篇章**；
+         *   redesignAt       —— 上一次重排的轮数（节流用；回退聊天后由 repairRunCursors 兜住）。
+         */
+        reviewStrikes: 0,
+        reviewStrikesFor: '',
+        epicRewroteFor: '',
         redesignAt: 0,
         /** 上一段间章的标题（防重复用；间章本身不留在注入里）。 */
         lastInterlude: '',
@@ -647,28 +656,6 @@ async function patchEpic(fields, { live = null } = {}) {
         console.debug('[故事导演] 写入史诗失败', error);
         return false;
     }
-}
-
-/** 当前篇章是否需要（重新）生成：没建过，或者还没校准到最新章节。 */
-/**
- * 现在需不需要（重新）生成篇章。三种情况：
- *   · 还没有篇章 → 要（establish）；
- *   · **这一册写完了**（章表里的章都写过了）→ 要（establish 一部**新的**）；
- *   · 还没写完、但开着的「每开新章前重新校准」发现实际走过的章数超过了册子记的进度 → 要（evolve）。
- */
-function needsEpic(live = null) {
-    const epic = epicOf(rootOf(live));
-    if (!epicStarted(epic)) return true;
-    if (epicFinished(epic)) return true;          // 一册写完 → 换新的一部
-    if (!settings().evolveEpic) return false;
-    // 校准进度落后于「已经走过的章」，就要重新校准
-    const done = completedMainTitles(rootOf(live)).length;
-    return epicChapter(epic) < done;
-}
-
-/** 这一册是不是已经写完了（前端/日志用）。 */
-function epicIsFinished(live = null) {
-    return epicFinished(epicOf(rootOf(live)));
 }
 
 /** 一个篇章排几章（用户可在「设定」里改；1~12 之间夹一下，默认 4）。 */
@@ -2193,7 +2180,10 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
             '⚠ **这是「新的一部」**：上面「防重复」里列的是**上一部已经讲过的章表** —— 要避开，不是照着填。',
             '　换一个「在争的东西」、换一套因果：把新排的几章和上一部摊开对照，**除了换几个名字还有区别吗？**',
             '',
-        ] : []),
+        ] : [
+            '⚠ **还是同一部，标题不要改**：上面给的标题就是这一部的名字，已经写过的章挂在它下面。',
+            '',
+        ]),
         '两条必须同时守住的原则：',
         '1. **主角是 {{user}}**：写「围绕他发生了什么事、他被卷进什么里面、他身边的人怎么变」；与他无关的势力动向只作背景。',
         '2. **绝不替他行动**：写「世界这边会怎么压过来」（谁找上他、什么落到他头上、局势怎么变），不写「他会怎么做」。',
@@ -2641,12 +2631,23 @@ async function applyChapter(chapter, { live = null, quiet = false, keep = undefi
     const rt = s.run;
     rt.focusBeat = played + 1;
     rt.beatAt = aiMessageCount();
-    rt.chapterOpenedAt = rt.beatAt;
-    // 支线／插曲的节奏基准一起播在开章这一刻：这一个间隔之内只推主线，
-    // 满了一个间隔才开始考虑往里面插配菜（挂机/狂点都不会提前）。
-    rt.threadAt = rt.beatAt;
-    rt.interludeAt = rt.beatAt;
-    rt.redesigns = 0;
+    // ★ **只有真的开出一章**（played === 0）才播「这一章」的基准：
+    //   重排剩下的拍（played > 0）只是改后面的内容，不该把这一章的时钟与审查额度一起重置 ——
+    //   以前这里无条件写，于是①级重排会把 `redesigns` 清零（升级梯永远升不上去）、
+    //   把 `chapterOpenedAt` 推到当轮（余波 / 支线 warmup 的时钟被重排搅乱）。
+    if (played === 0) {
+        rt.chapterOpenedAt = rt.beatAt;
+        // 支线／插曲的节奏基准一起播在开章这一刻：这一个间隔之内只推主线，
+        // 满了一个间隔才开始考虑往里面插配菜（挂机/狂点都不会提前）。
+        rt.threadAt = rt.beatAt;
+        rt.interludeAt = rt.beatAt;
+        // 新的一章 = 审查额度重新算（见 handleBeatReview：计数按「章」累计）
+        rt.chapterId = `c${rt.beatAt}`;
+        rt.reviewStrikes = 0;
+        rt.reviewStrikesFor = rt.chapterId;
+        rt.epicRewroteFor = '';
+    }
+    if (!rt.chapterId) rt.chapterId = `c${rt.beatAt}`;      // 老存档兜底：至少有个身份
     save();
     syncMainInjection();
     if (!panel?.hidden) render();
@@ -2689,7 +2690,8 @@ async function applyInterludeChapter(chapter, { live = null, quiet = false } = {
     rt.beatAt = aiMessageCount();
     rt.interludeAt = rt.beatAt;
     rt.lastInterlude = String(chapter?.[IL.title] ?? '').trim();
-    rt.redesigns = 0;
+    // ⚠ 不在这里动审查额度：章的身份与额度由 applyChapter 在**真开出下一章**时统一重置
+    //   （进间章只是主线收着，回主线时才会开新章）。
     save();
     syncInterludeWrites();
     syncMainInjection();
@@ -2957,6 +2959,13 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
         }
         const blocks = parseBlocks(raw, 'StoryEpic');
         const epic = blocks.length ? epicFromBlock(blocks[blocks.length - 1], { chapter: progress }) : null;
+        // ★ 校准（evolve）**不许换名字**：这一部还叫这个名字 —— 已经写过的章挂在它下面，
+        //   中途改名就是用户看到的「大纲自己变了」。要换名字只有两条路：
+        //   ① 这一部写完了自动开新的一部（establish）；② 用户手动点「重新定篇章（换一部）」。
+        if (epic && mode === 'evolve') {
+            const keepTitle = String(unwrap(epicOf(rootOf())[EP.title]) ?? '').trim();
+            if (keepTitle) epic[EP.title] = keepTitle;
+        }
         if (!epic || !epicStarted(epic)) {
             console.info('[故事导演] 神谕没有返回可用的 <StoryEpic> 区块，原始回复：\n' + raw);
             toast('没解析到 <StoryEpic> 区块，原始回复已打印到控制台。', 'warning');
@@ -3126,35 +3135,52 @@ function mainStarted(live = null) {
 }
 
 /**
+ * 这一章的身份（审查额度按它统计）。
+ * 优先用 `run.chapterId`（真开章时播下、重排不动）；老存档没有就退回章名（只为兼容）。
+ */
+function currentChapterId(live = null) {
+    const rt = settings().run;
+    if (rt.chapterId) return String(rt.chapterId);
+    const title = String(unwrap(mainState(live)[MAIN_TITLE]) ?? '').trim();
+    return `title:${title}`;
+}
+
+/**
  * 处理「正文模型说这一拍站不住」的回报。返回 true 表示本轮已经重新设计，自动推进让位。
  *
- * ★ 升级梯（见 REDESIGN_MAX_L1 的注释）：
- *   ① 重排剩下的拍（保留已演过的）→ ② 仍然报错就**废掉这一章重建** → ③ 再报错就**重设篇章这一段**。
- * 节流两道：级内次数上限 + 两次重设计之间至少隔 `redesignGap` 轮。
- * 换章时（章名变了）整套计数清零，所以每一章的额度是独立的。
+ * ★ **升级梯就是用户定的那条原则**（见 `reviewLadder`）：
+ *   正文说「当前主线不合适」→ **只重新设计还没演的拍**（已演的一字不动，篇章不动）；
+ *   **同一章累计第 3 次**仍然不合适 → 才允许**改篇章**（只改还没写的章）+ 重建这一章。
+ *
+ * 两条容易被写坏的：
+ *   · 计数**按章累计**（不要求连续）；只在真开新章 / 用户整章重写时归零（见 applyChapter）；
+ *   · **同一章最多动一次篇章**（`epicRewroteFor`）—— 否则会「改篇章 → 又报一次 → 又改篇章」，
+ *     也就是用户看到的「大纲自己变了」。
+ *
+ * 节流：两次重排之间至少隔 `redesignGap` 轮（否则模型连着报两次就把调用全烧在这上面）。
  */
 async function handleBeatReview({ live = null } = {}) {
     const s = settings();
     // ★ 总开关关着 = 「只手动生成与采用」（见 DEFAULT.autoDirector 的说明）——
-    //   审查上的重排 / 废章重建同样是**插件自己调模型**，必须一起停。
+    //   审查上的重排同样是**插件自己调模型**，必须一起停。
     //   ⚠ 以前这里只看 autoRedesign，总闸关了它照样在重排 —— 做总开关时顺手审计出来的漏网之鱼。
     if (!s.autoDirector || !s.autoRedesign) return false;
     const main = mainState(live);
     const state = reviewStateOf(main);
     if (state === REVIEW_PASS) {
-        if (s.run.redesigns || s.run.redesignsL2 || s.run.redesignAt) {
-            s.run.redesigns = 0; s.run.redesignsL2 = 0; s.run.redesignAt = 0; save();
-        }
+        // ⚠ **不清零审查额度**：原则是「同一章累计三次」，中间夹一次通过不该把前两次抹掉
+        //   （以前这里一通过就清零，于是永远攒不满 3 次 —— 梯子形同虚设）。
+        //   只把节流基准清掉，让下一次信号不必等。
+        if (s.run.redesignAt) { s.run.redesignAt = 0; save(); }
         return false;
     }
 
-    // 换了章 → 每一章的审查额度独立（用章名当 key，和 closedChapter 一个路子）
-    const title = String(unwrap(main[MAIN_TITLE]) ?? '').trim();
-    if (s.run.redesignFor !== title) {
-        s.run.redesignFor = title;
-        s.run.redesigns = 0;
-        s.run.redesignsL2 = 0;
-        s.run.redesignAt = 0;
+    // 新的章 → 审查额度重新算（由 chapterId 判定，不看章名 —— 章名会变、也会重名）
+    const chapterId = currentChapterId(live);
+    if (s.run.reviewStrikesFor !== chapterId) {
+        s.run.reviewStrikesFor = chapterId;
+        s.run.reviewStrikes = 0;
+        s.run.epicRewroteFor = '';
     }
 
     // 节流：两次重设计之间至少隔 redesignGap 轮（否则模型连着报两次就把调用全烧在这上面）
@@ -3170,72 +3196,65 @@ async function handleBeatReview({ live = null } = {}) {
     // 复位结论，免得下一轮又照它重设计一次
     await patchMain({ [KEY_REVIEW]: REVIEW_PASS, [KEY_REVIEW_NOTE]: '' }, { live });
 
-    const maxL1 = Math.max(1, Math.round(toNumber(s.redesignMax, REDESIGN_MAX_L1)));
-    const l1 = Math.round(toNumber(s.run.redesigns, 0));
-    const l2 = Math.round(toNumber(s.run.redesignsL2, 0));
+    // ★ 判定交给纯函数（model.js 的 reviewLadder）—— 这条原则必须能被离线测。
+    const verdict = reviewLadder({
+        strikes: s.run.reviewStrikes,
+        epicRewritten: s.run.epicRewroteFor === chapterId,
+    });
     const played = Math.max(0, currentBeat(main) - 1);
     const why = `${state}」${note ? `：${note}` : ''}`;
-
+    s.run.reviewStrikes = verdict.nextStrikes;
     s.run.redesignAt = count;
+    save();
 
-    if (l1 < maxL1) {
-        // ① 级：只重排剩下的拍，已演过的一字不动
-        s.run.redesigns = l1 + 1;
-        save();
-        toast(`正文模型报「${why}——正按当前情况重排剩下的拍（第 ${Math.min(maxL1, l1 + 1)}/${maxL1} 次）。`, 'info');
-        void generateChapter({ quiet: true, regenerate: true, rejected: { state, note }, force: true, keep: played });
-        return true;
-    }
-
-    if (l2 < REDESIGN_MAX_L2) {
-        // ② 级：这一章的设计本身立不住 → **废掉整章重建**（不再保留已演过的拍）
-        s.run.redesignsL2 = l2 + 1;
-        save();
-        toast(`这一章重排 ${maxL1} 次仍然报「${why}——判断为**这一章的设计立不住**，正在**重设计剩下的拍**（已演过的 ${played} 拍保留；第 ${l2 + 1}/${REDESIGN_MAX_L2} 次）。`, 'warning');
-        console.info(`[故事导演] 升级到②级：重设计《${title || '当前章'}》剩下的拍（保留已演的 ${played} 拍；原因：${state}${note ? ' —— ' + note : ''}）。`);
+    if (verdict.action === 'retry') {
+        // ★ **只重新设计还没演的拍** —— 已演的一字不动，篇章也一个字不动。
+        //   第 2 次起把措辞加硬（换一套推进方式），因为「同一个毛病再来一次」说明上一版换汤不换药。
+        const harder = verdict.attempt >= 2;
+        toast(`正文模型报「${why}——正按当前情况重排剩下的拍（第 ${verdict.attempt}/${STRIKES_BEFORE_EPIC} 次，已演的 ${played} 拍不动）。`, harder ? 'warning' : 'info');
+        console.info(`[故事导演] 审查重排（${verdict.reason}）：重设计《${String(unwrap(main[MAIN_TITLE]) ?? '当前章')}》剩下的拍，保留已演的 ${played} 拍。`
+            + (harder ? '第 2 次起要求换一套推进方式。' : ''));
         void generateChapter({
-            // ★ 保留已经演过的拍（keep 走自动）—— 重设计的是**剩下的**那一部分。
-            //   以前这里是 keep: 0（把整章连进度一起废掉）；那会让用户「演了一半被打回第 1 拍」，
-            //   而且刚播下的伏笔、已经付掉的代价一起作废，反而更容易再被判站不住。
-            quiet: true, regenerate: true, force: true,
+            quiet: true, regenerate: true, force: true, keep: played,
             rejected: {
                 state,
                 note,
-                scrap: true,
-                badBeats: beatsOf(main).slice(played),
-                reason: `这一章的**剩余部分**反复立不住（重排 ${maxL1} 次仍未解决）：${note || state}。`
-                    + '请**换一套推进方式**：不要沿用原来剩下的那几拍的地点、人物组合与事件顺序，'
-                    + '换一条在当前处境下真正走得通的路 —— 但这一章要服务的长线目标不能丢。',
+                scrap: harder,
+                badBeats: harder ? beatsOf(main).slice(played) : undefined,
+                reason: harder
+                    ? `这一章的**剩余部分**反复立不住（第 ${verdict.attempt} 次）：${note || state}。`
+                        + '请**换一套推进方式**：不要沿用原来剩下的那几拍的地点、人物组合与事件顺序，'
+                        + '换一条在当前处境下真正走得通的路 —— 但这一章要服务的长线目标不能丢。'
+                    : undefined,
             },
         });
         return true;
     }
 
-    // ③ 级：连重建都不行 → 病在长线方向上。请神谕重设篇章这一段，然后重建这一章。
-    s.run.redesigns = 0;
-    s.run.redesignsL2 = 0;
+    // ★ 第 3 次（同一章累计）仍然不合适 → 才允许**改篇章**：只改还没写的那几章，然后重建这一章。
+    //   ⚠ 同一章最多动一次（见 reviewLadder 的 ②）—— 记在 epicRewroteFor 上。
+    s.run.epicRewroteFor = chapterId;
     save();
-    const past = completedMainTitles(rootOf(live)).length;
-    toast(`这一章重建 ${REDESIGN_MAX_L2} 次仍然报「${why}」——判断为**这一部的方向立不住**，正在请神谕改掉还没写的章，然后重建这一章。`, 'warning');
-    console.info(`[故事导演] 升级到③级：改篇章未写的章并重建《${title || '当前章'}》。`);
+    toast(`同一章第 ${verdict.attempt} 次报「${why}」——判断为**这一部往后几章的方向立不住**，正在请神谕改掉还没写的那几章，然后重排剩下的拍。`, 'warning');
+    console.info(`[故事导演] 升级：${verdict.reason} → 改篇章未写的章（只这一次），再重排《${String(unwrap(main[MAIN_TITLE]) ?? '当前章')}》剩下的拍。`);
     void (async () => {
         const ok = await generateEpic({
             quiet: true, force: true, mode: 'evolve', entry: null,
-            diverged: `这一部篇章往后那几章在实际演出里反复立不住（正文模型连续报「${state}」${note ? `：${note}` : ''}）。`
-                + '请**改掉还没写的那几章**：换一条通往同一个终局、但当前处境下真正走得通的路；'
-                + '如果某几章的设定本身不可行，就换掉那几章（已经写过的章不要动）。',
+            diverged: `这一部篇章往后那几章在实际演出里**同一章连着 ${verdict.attempt} 次**立不住（正文模型报「${state}」${note ? `：${note}` : ''}）。`
+                + '请**只改还没写的那几章**：换一条通往同一个终局、但当前处境下真正走得通的路；'
+                + '如果某几章的设定本身不可行，就换掉那几章。**已经写过的章不要动，标题也不要改**（这一部还叫这个名字）。',
         });
         if (!ok) {
-            // 篇章没改成也不该把故事卡死：照样重建这一章（带着失败原因）
-            toast('篇章没能重设成功 —— 仍然会重建这一章（它只是配料）。', 'warning');
+            // 篇章没改成也不该把故事卡死：照样重排这一章（带着失败原因）
+            toast('篇章没能改成功 —— 仍然会重排这一章剩下的拍（它只是配料）。', 'warning');
         }
         void generateChapter({
             // ★ 同样保留已演过的拍：篇章换了方向，也只是「剩下的怎么走」要重新想。
-            quiet: true, regenerate: true, force: true,
+            quiet: true, regenerate: true, force: true, keep: played,
             rejected: {
                 state, note, scrap: true,
                 badBeats: beatsOf(main).slice(played),
-                reason: '长线这一段的方向已经被判定立不住，篇章刚刚重设过。'
+                reason: '长线往后几章的方向已经被判定立不住，篇章刚刚改过。'
                     + '这一章的**剩余部分**要按**新的长线方向**重新设计，不要沿用原来的设计。',
             },
         });
@@ -3453,17 +3472,12 @@ async function evaluateDirector({ live = null } = {}) {
                     return;
                 }
             }
-            // ② 章已经收尾（没有拍在演）但这一册的章表还没排到这些章 → 先校准，再开新章
-            if (beats.length === 0 && epicStarted(epic) && !epicFinished(epic) && s.evolveEpic
-                && epicChapter(epic) > 0 && !epicChapters(epic)[epicChapter(epic)]) {
-                if (canTryEpic && !blockedByCooldown(s, count, rt)) {
-                    rt.epicTries = tries + 1;
-                    markPending(`epic:${chatKey()}`);
-                    save();
-                    void generateEpic({ quiet: true, force: true, mode: 'evolve', entry: epicChapter(epic) });
-                    return;
-                }
-            }
+            // ② **这里原来还有一条「每开新章前自动校准篇章」** —— 删了（0.25.0）。
+            //   它的条件是 `!epicFinished && !章内容[更新到第几章]`，而 `epicFinished` 就是
+            //   `更新到第几章 >= 章表长度` —— 两个条件**自相矛盾，从来没生效过**。
+            //   更要紧的是：按字面修好它就等于「每换一章改一次大纲」，正是用户报的
+            //   「推了一下剧情篇章大纲就自己变了」。篇章现在只由两件事动：
+            //   审查三连击（见 handleBeatReview）与本人在「篇章」页手动点。
             // ③ 还没定篇章：这是万事的前提，**不该被生成冷却卡住**（卡住就等于整个插件不动）
             //   ⚠ 「聊满 2 轮」算的是 `count - armedAt`（就位基准），不是整个聊天的历史条数 ——
             //     否则切进一个几百楼的老聊天时它立刻成立，一进去就烧一次神谕（用户报的就是这个）。
@@ -4039,6 +4053,10 @@ function renderNowTab() {
     const threads = liveThreads();
     const interludes = interludesState().filter(interludePending);
     const history = completedMainTitles(rootOf());
+    // 审查升级梯的记账（只在真被报过「不合适」时显示，见 handleBeatReview / reviewLadder）
+    const chapterId = currentChapterId();
+    const strikes = settings().run.reviewStrikesFor === chapterId ? Math.round(toNumber(settings().run.reviewStrikes, 0)) : 0;
+    const epicRewrote = settings().run.epicRewroteFor === chapterId;
     const mode = currentMode();
     const ilChapter = interludeChapterOf(rootOf());
     const ilBeats = interludeBeatsOf(ilChapter);
@@ -4113,6 +4131,7 @@ function renderNowTab() {
                 ${statusChip(!!mvu(), mvu() ? 'MVU 就绪' : 'MVU 未加载')}
                 ${statusChip(typeof oracleApi()?.run === 'function', typeof oracleApi()?.run === 'function' ? '神谕可用' : '神谕不可用')}
                 ${statusChip(isGlobalBookEnabled(PLUGIN_WORLD), isGlobalBookEnabled(PLUGIN_WORLD) ? '世界书已挂载' : '世界书未挂载')}
+                ${strikes > 0 ? statusChip(false, `这一章第 ${strikes}/${STRIKES_BEFORE_EPIC} 次被报不合适${epicRewrote ? '（已改过篇章）' : ''}`) : ''}
             </div>
             ${history.length ? `<p class="sd-note">已经走过的章：${esc(history.join(' → '))}</p>` : ''}
             <p class="sd-note sd-pacing">${esc(pacingHint())}</p>
@@ -4301,8 +4320,7 @@ function renderSetTab() {
             <label class="sd-switch"><input name="auto-redesign" type="checkbox"> 拍站不住时重新设计（正文模型报「调整 / 驳回」）</label>
             <p class="sd-sub">审查的升级梯：**重排剩下的拍** → 仍然报错就**废掉整章重建** → 再报错就**重设篇章这一段**。</p>
             <div class="sd-row">
-                <label class="sd-field"><span>「重排剩下的拍」最多试几次（之后废章重建）</span><input name="redesign-max" type="number" min="1" max="5" step="1"></label>
-                <label class="sd-field"><span>两次自动重设计之间至少隔几轮（节流）</span><input name="redesign-gap" type="number" min="0" max="30" step="1"></label>
+                <label class="sd-field"><span>两次自动重排之间至少隔几轮（节流）</span><input name="redesign-gap" type="number" min="0" max="30" step="1"></label>
             </div>
             <div class="sd-row">
                 <label class="sd-field"><span>每多少轮加一条支线</span><input name="thread-every" type="number" min="1" max="200" step="1"></label>
@@ -4347,10 +4365,9 @@ function renderSetTab() {
             </select></label>
             <label class="sd-field"><span>近期对话上限（字符）</span><input name="transcript-limit" type="number" min="2000" max="60000" step="500"></label>
             <label class="sd-switch"><input name="auto-epic" type="checkbox"> <b>自动定篇章</b>（先有一部完整的大故事，再开第一章）</label>
-            <label class="sd-switch"><input name="evolve-epic" type="checkbox"> 每开新章前按「他实际做了什么」重新校准篇章</label>
             <label class="sd-field"><span>一个篇章写几章（1~12；写满这一部就收尾、换新的一部）</span><input name="chapters-per-epic" type="number" min="1" max="12" step="1" value="${esc(String(chaptersPerEpic()))}"></label>
-            <p class="sd-note">章数决定这一部多大：4 章左右最稳（太短撑不起大高潮，太长会松散）。<br>
-            第一项定篇章花一次调用；第二项每开一章多花一次调用。两项都关掉时，主线就退回逐章续写。</p>
+            <p class="sd-note">章数决定这一部多大：4 章左右最稳（太短撑不起大高潮，太长会松散）。定篇章花一次调用。<br>
+            <b>篇章不会自己变</b>：只有正文模型**在同一章里累计三次**报「当前主线不合适」，或者你在「篇章」页手动点，才会改到它。</p>
             <label class="sd-field"><span>世界书档位（影响这本世界书在酒馆里的注入）</span><select name="book-mode">
                 ${Object.entries(BOOK_MODES).map(([key, item]) => `<option value="${key}">${esc(item.label)}</option>`).join('')}
             </select></label>
@@ -4409,7 +4426,6 @@ function renderSetTab() {
     bind('interlude-gap', 'interludeGap', 'value');
     bind('interlude-beats', 'interludeBeats', 'value');
     bind('auto-redesign', 'autoRedesign');
-    bind('redesign-max', 'redesignMax', 'value');
     bind('redesign-gap', 'redesignGap', 'value');
     bind('thread-every', 'threadEvery', 'value');
     bind('interlude-every', 'interludeEvery', 'value');
@@ -4427,7 +4443,6 @@ function renderSetTab() {
     bind('max-interludes', 'maxInterludes', 'value');
     bind('story-transcript', 'storyTranscript');
     bind('auto-epic', 'autoEpic');
-    bind('evolve-epic', 'evolveEpic');
     bind('transcript-limit', 'transcriptLimit', 'value');
     bind('auto-install-book', 'autoInstallBook');
     bind('auto-update-book', 'autoUpdateBook');
@@ -4809,6 +4824,15 @@ function exposeDiagnostics() {
                     这一部写完没有: epicFinished(epicOf(rootOf())),
                     大高潮: epicClimax(epicOf(rootOf())),
                     定篇章已试: Math.round(toNumber(settings().run.epicTries, 0)),
+                    // ★ 审查升级梯的记账（用户报「大纲自己变了」时，先看这三个数）：
+                    //   同一章累计 3 次「不合适」才会去改篇章，而且**同一章最多改一次**。
+                    审查: {
+                        这一章的身份: currentChapterId(),
+                        这一章收到的不合适次数: Math.round(toNumber(settings().run.reviewStrikes, 0)),
+                        这一章已经改过篇章: settings().run.epicRewroteFor === currentChapterId(),
+                        需要几次才改篇章: STRIKES_BEFORE_EPIC,
+                        两次重排至少隔几轮: Math.round(toNumber(settings().redesignGap, 3)),
+                    },
                     AI回复数: aiMessageCount(),
                     生成中: storyGenerating,
                     在跑: [...pendingGenerates],

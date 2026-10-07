@@ -1582,3 +1582,44 @@ export function worldbookUpdateDecision(bundled, installed) {
   if (i === b) return 'up-to-date';
   return 'update';                // 没标记（很旧）或版本不同 → 更新
 }
+
+/**
+ * 同一章里收到几次「当前主线不合适」才允许**动篇章**。
+ *
+ * 这是用户定的原则，原话：
+ *   「如果正文合理性审查，返回当前主线提示词不合适，则重新生成拍；
+ *     若三次在同一章节的主线收到不合适信号，才重整篇章。」
+ */
+export const STRIKES_BEFORE_EPIC = 3;
+
+/**
+ * 审查升级梯的**判定**（纯函数 —— 抽出来是为了能离线把这条原则钉住）。
+ *
+ * 只有两种动作，没有第三种：
+ *   · `retry` —— 重新设计**还没演的**拍（已演的一字不动），**不动篇章**；
+ *   · `epic`  —— 同一章累计到第 3 次仍然不合适 → 才允许**改篇章**（只改还没写的章）+ 重建这一章。
+ *
+ * 几条容易被写坏的规矩（都在这里定死，调用方不许自己再算）：
+ *   ① 计数是**按章累计**的：同一章里攒够 3 次就升级，**不要求连续**
+ *      （以前要求「连续三次」且换一次就清零，结果永远攒不满 → 梯子形同虚设）；
+ *   ② **同一章最多动一次篇章**（`epicRewritten`）：否则「改篇章 → 模型又报一次 → 又改篇章」
+ *      会变成无限改大纲 —— 那正是用户抱怨的「大纲自己变了」；
+ *   ③ 换章 / 用户手动整章重写 = 新的一章 → 调用方把计数清掉（额度重新算）。
+ *
+ * @param {object} opts
+ * @param {number} opts.strikes 这一章**已经**收到过几次「不合适」
+ * @param {boolean} [opts.epicRewritten] 这一章是否已经动过篇章
+ * @returns {{action:'retry'|'epic', attempt:number, nextStrikes:number, reason:string}}
+ */
+export function reviewLadder({ strikes = 0, epicRewritten = false } = {}) {
+  const n = Math.max(0, Math.round(Number(strikes) || 0));
+  // 展示用与累计值都**夹在上限**：同一章动过篇章之后再怎么报，也还是「第 3/3 次」，
+  // 不会出现「第 4/3 次」这种一眼就错的提示。
+  const attempt = Math.min(STRIKES_BEFORE_EPIC, n + 1);
+  const nextStrikes = Math.min(STRIKES_BEFORE_EPIC, n + 1);
+  const reason = `同一章第 ${attempt} 次被判「不合适」`;
+  if (n >= STRIKES_BEFORE_EPIC - 1 && !epicRewritten) {
+    return { action: 'epic', attempt, nextStrikes, reason };
+  }
+  return { action: 'retry', attempt, nextStrikes, reason };
+}
