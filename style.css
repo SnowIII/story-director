@@ -319,3 +319,11 @@ dialog.sd-dialog .sd-dialog-pin {
     white-space: pre-wrap;
     word-break: break-word;
 }
+
+/* 篇章页：章内容旁边的进度提示 */
+.sd-epic-progress {
+    display: block;
+    margin: 2px 0 4px;
+    font-size: 12px;
+    opacity: .75;
+}

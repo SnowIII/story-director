@@ -28,7 +28,8 @@ import {
 import {
     NS, PATH, THREAD_FIELDS, INTERLUDE_FIELDS, MAIN_TITLE, MAIN_ARC, MAIN_SCOPE, MAIN_GOAL, MAIN_BEATS, MAIN_STARTED, MAIN_ENDED, MAIN_CLOSED,
     INTERLUDE, IL, emptyInterlude, interludeChapterOf, interludeActive, interludeBeatsOf, interludeBeat,
-    EPIC, EP, EPIC_STAGES, emptyEpic, epicOf, epicStarted, migrateEpicKeys, epicMovements, epicHooks, epicChapter, renderEpicSection, epicFromBlock, epicAskText, userAskText,
+    EPIC, EP, emptyEpic, epicOf, epicStarted, migrateEpicKeys, epicChapters, epicMovements, epicClimax,
+    epicChapterCount, epicFinished, epicHooks, epicChapter, renderEpicSection, epicFromBlock, epicAskText, userAskText,
     TONES, toneOf, toneOptions, toneDirective,
     KEY_BEAT, KEY_BEAT_DONE, KEY_CHAPTER_DONE, KEY_READY, KEY_REVIEW, KEY_REVIEW_NOTE,
     REVIEW_PASS, REVIEW_STATES, REVIEW_MAX_RETRY,
@@ -249,7 +250,13 @@ const DEFAULT = {
     intensity: 'normal',
     beatTarget: 4,
     /**
-     * 史诗（篇章）：先定一条**围绕 {{user}}** 的长线，章只是它的一拍 —— 主线不平淡的关键。
+     * 一个**篇章**（一部完整的大故事）由几章组成。
+     * 篇章的章表就是这个长度；写满这些章，这一部就收尾、换新的一部。
+     */
+    chaptersPerEpic: 4,
+    /**
+     * 篇章：先定一部**围绕 {{user}}** 的大故事（由若干章组成，每章自己闭环），
+     * 再由主线把每一章细化成拍 —— 主线不平淡的关键。
      * autoEpic=true 时会在开第一章之前自动定篇章；之后每开新章前自动按「他实际做了什么」重新校准。
      */
     autoEpic: true,
@@ -328,10 +335,8 @@ const DEFAULT = {
         threadAt: 0,
         /** 上一次生成插曲时的回复数。 */
         interludeAt: 0,
-        /** 上一次生成 / 校准史诗（篇章）时的回复数。 */
+        /** 上一次生成 / 校准篇章时的回复数。 */
         epicAt: 0,
-        /** 上一次篇章的进程快照（面板显示用）。 */
-        epicStage: '',
         /** 本聊天里「定篇章 / 校准」已经试过几次：超过上限就放行开章，不让它把整个插件卡住。 */
         epicTries: 0,
         /** 连续被驳回的次数。 */
@@ -571,7 +576,7 @@ async function patchEpic(fields, { live = null } = {}) {
         if (!isPlainObject(root[NS])) root[NS] = {};
         if (!isPlainObject(root[NS][EPIC])) root[NS][EPIC] = emptyEpic();
         Object.assign(root[NS][EPIC], fields);
-        for (const key of [EP.movements, EP.hooks]) {
+        for (const key of [EP.chapters, EP.hooks]) {
             if (Array.isArray(fields[key])) root[NS][EPIC][key] = fields[key].slice();
         }
     };
@@ -590,23 +595,42 @@ async function patchEpic(fields, { live = null } = {}) {
 }
 
 /** 当前篇章是否需要（重新）生成：没建过，或者还没校准到最新章节。 */
+/**
+ * 现在需不需要（重新）生成篇章。三种情况：
+ *   · 还没有篇章 → 要（establish）；
+ *   · **这一册写完了**（章表里的章都写过了）→ 要（establish 一部**新的**）；
+ *   · 还没写完、但开着的「每开新章前重新校准」发现实际走过的章数超过了册子记的进度 → 要（evolve）。
+ */
 function needsEpic(live = null) {
     const epic = epicOf(rootOf(live));
     if (!epicStarted(epic)) return true;
+    if (epicFinished(epic)) return true;          // 一册写完 → 换新的一部
     if (!settings().evolveEpic) return false;
-    // 校准进度落后于「已经走过的章 + 当前这一章」，就要重新校准
+    // 校准进度落后于「已经走过的章」，就要重新校准
     const done = completedMainTitles(rootOf(live)).length;
     return epicChapter(epic) < done;
 }
 
+/** 这一册是不是已经写完了（前端/日志用）。 */
+function epicIsFinished(live = null) {
+    return epicFinished(epicOf(rootOf(live)));
+}
+
+/** 一个篇章排几章（用户可在「设定」里改；1~12 之间夹一下，默认 4）。 */
+function chaptersPerEpic() {
+    const s = settings();
+    return Math.max(1, Math.min(12, Math.round(toNumber(s.chaptersPerEpic, 4))));
+}
+
 /** 采用一份篇章。 */
+/** 采用一份篇章。`entry` 传数字才会改「这一册写到第几章」（null = 不动，校准走这条）。 */
 async function applyEpic(epic, { live = null, quiet = false, entry = null } = {}) {
     const fields = { ...epic };
-    if (entry !== null) fields[EP.chapter] = Math.max(0, Math.round(Number(entry) || 0));
+    if (entry !== null && entry !== undefined) fields[EP.chapter] = Math.max(0, Math.round(Number(entry) || 0));
+    else delete fields[EP.chapter];      // 校准：进度由「写完一章就 +1」维护，不要被回复里的旧数字覆盖
     await patchEpic(fields, { live });
     const s = settings();
     s.run.epicAt = aiMessageCount();
-    s.run.epicStage = String(unwrap(fields[EP.stage]) ?? '').trim();
     // 冷却基准**只在生成成功之后**才写：失败不该消耗节流名额（否则后面开章会被挡住）
     markGenerated(s.run, s.run.epicAt);
     s.run.epicTries = 0;                 // 成功即清零：下次还需要校准就重新给机会
@@ -615,9 +639,11 @@ async function applyEpic(epic, { live = null, quiet = false, entry = null } = {}
     syncMainInjection();
     if (!panel?.hidden) render();
     if (!quiet) {
+        const title = String(unwrap(fields[EP.title]) ?? '未命名');
+        const total = epicChapterCount(fields);
         toast(entry !== null && entry > 0
-            ? `篇章已按他实际做的事重新校准（进程：${String(unwrap(fields[EP.stage]) ?? '—')}）。`
-            : `篇章已定：《${String(unwrap(fields[EP.title]) ?? '未命名')}》（进程：${String(unwrap(fields[EP.stage]) ?? '—')}）。`, 'success');
+            ? `篇章《${title}》已按他实际做的事重新校准（共 ${total} 章）。`
+            : `篇章已定：《${title}》（共 ${total} 章，大高潮：${String(unwrap(fields[EP.climax]) ?? '—')}）。`, 'success');
     }
     return true;
 }
@@ -757,27 +783,29 @@ async function ensureNamespace({ notify = false, live = null } = {}) {
         const meta = isPlainObject(ns.章节史.$meta) ? ns.章节史.$meta : {};
         if (meta.extensible !== true) { ns.章节史.$meta = { ...meta, extensible: true }; changed = true; }
     }
-    // 史诗（篇章）：围绕 {{user}} 的那条长线。老存档里没有就补齐。
+    // 篇章：一部完整的大故事（由章表里的若干章组成）。老存档里没有就补齐。
     if (!isPlainObject(ns[EPIC])) { ns[EPIC] = emptyEpic(); changed = true; }
     else {
         const box = ns[EPIC];
-        for (const [key, value] of Object.entries(emptyEpic())) {
-            if (!(key in box)) { box[key] = value; changed = true; }
-        }
-        for (const key of [EP.movements, EP.hooks]) {
-            if (!Array.isArray(box[key])) { box[key] = splitBeats(box[key]).slice(0, 12); changed = true; }
-        }
-        if (!Number.isInteger(toNumber(box[EP.chapter], NaN))) { box[EP.chapter] = 0; changed = true; }
-        // ★ 老存档的**旧键名**要真的改掉，不能只在读取时兼容 ——
-        //   否则变量面板上一直写着「总纲」，而变量快照又把这个名字喂回模型（自己喂自己）。
+        // ① 先把**旧键名**真的改掉（总纲→篇章、走向→章内容、清掉已废弃的当前进程/赌注）。
+        //    ⚠ 必须排在「补空字段」之前：先补出来的空 `章内容: []` 会让迁移误判成"已经有内容"。
+        //    也不能只在读取时兼容 —— 否则变量面板上一直写着旧名字，而变量快照又把它喂回模型（自己喂自己）。
         const migration = migrateEpicKeys(ns);
         if (migration.changed) {
             changed = true;
             const bits = [];
-            if (migration.renamed) bits.push('总纲 → 篇章');
+            if (migration.renamedWhat?.length) bits.push(migration.renamedWhat.join('、'));
             if (migration.dropped.length) bits.push(`清掉已废弃的 ${migration.dropped.join('、')}`);
             if (bits.length) console.info(`[故事导演] 老存档的字段名已迁移：${bits.join('；')}`);
         }
+        // ② 再补缺、再归一化
+        for (const [key, value] of Object.entries(emptyEpic())) {
+            if (!(key in box)) { box[key] = value; changed = true; }
+        }
+        for (const key of [EP.chapters, EP.hooks]) {
+            if (!Array.isArray(box[key])) { box[key] = splitBeats(box[key]).slice(0, 24); changed = true; }
+        }
+        if (!Number.isInteger(toNumber(box[EP.chapter], NaN))) { box[EP.chapter] = 0; changed = true; }
     }
     // 间章：与主线互斥的另一幕（日常）。老存档里没有这个键就补齐。
     if (!isPlainObject(ns[INTERLUDE])) { ns[INTERLUDE] = emptyInterlude(); changed = true; }
@@ -925,6 +953,14 @@ async function rememberChapter(main, { live = null } = {}) {
         history[String(next)] = { ...record };
         const ids = Object.keys(history).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
         while (ids.length > 8) delete history[String(ids.shift())];
+
+        // ★ 这一章写完了 → **篇章进度 +1**（只算主线章；间章走另一个函数，不计入）。
+        //   进度是**这一册自己的**：写满章表长度，这一部就收尾、换新的一部（见 needsEpic）。
+        const epicBox = isPlainObject(target[NS][EPIC]) ? target[NS][EPIC] : null;
+        if (epicBox) {
+            const done = Math.max(0, Math.round(toNumber(epicBox[EP.chapter], 0))) + 1;
+            epicBox[EP.chapter] = done;
+        }
     };
     if (live && isPlainObject(live.stat_data)) { apply(live.stat_data); return true; }
     const api = mvu();
@@ -1369,19 +1405,27 @@ function focusedStateBlock(task) {
     const lines = [];
     const isChapter = task === 'chapter';
 
-    // ── 篇章：给大势 + 还没兑现的伏笔（写章节时这是「该埋什么」的来源）──
+    // ── 篇章：这一册是什么故事、写了几章、**这一章该是什么**、还没兑现的伏笔 ──
     const epic = epicOf(root);
     if (epicStarted(epic)) {
         const title = String(unwrap(epic[EP.title]) ?? '').trim();
-        const stage = String(unwrap(epic[EP.stage]) ?? '').trim();
         const line = String(unwrap(epic[EP.line]) ?? '').trim();
         const ledger = String(unwrap(epic[EP.ledger]) ?? '').trim();
         const hooks = epicHooks(epic);
-        lines.push(`【长线】${title ? `《${title}》` : ''}${stage ? `　进程：${stage}` : ''}`);
+        const chapters = epicChapters(epic);
+        const written = epicChapter(epic);
+        const climax = epicClimax(epic);
+        lines.push(`【篇章】${title ? `《${title}》` : ''}${chapters.length ? `　共 ${chapters.length} 章，已写到第 ${written} 章` : ''}`);
         if (line) lines.push(`在争什么：${line}`);
-        if (!isChapter) {
-            const movements = epicMovements(epic);
-            if (movements.length) lines.push(`几个大阶段：${movements.map((m, i) => `${i + 1}. ${m}`).join('　')}`);
+        if (climax) lines.push(`大高潮：${climax}`);
+        if (chapters.length) {
+            // 写章节时**必须标明「这一章」**：神谕要细化的就是 ▶ 那一条，别去写别的章
+            lines.push(`章内容（一章一段，${isChapter ? '**你要细化的只有 ▶ 那一条**' : '整册的样子'}）：`);
+            for (let i = 0; i < chapters.length; i++) {
+                const mark = i + 1 <= written ? '✔' : (i + 1 === written + 1 ? '▶' : '·');
+                lines.push(`　${mark} 第 ${i + 1} 章：${chapters[i]}`);
+            }
+            if (isChapter && written + 1 > chapters.length) lines.push('　（章表已经写完了 —— 这一册该收尾了。）');
         }
         if (hooks.length) lines.push(`**还没兑现的伏笔**（要埋就得与它们同源，不要另起炉灶）：${hooks.join('；')}`);
         if (ledger) lines.push(`既成事实：${ledger}`);
@@ -1643,12 +1687,13 @@ const BEAT_FORMAT_RULES = [
  * ⚠ **为什么是四块而不是一块**（这一条是补返工）：
  *   一开始图省事，把整块挂到全部 5 个设计提示词上。但「篇章设计师」与「章节设计师」
  *   是**两次独立调用、两份不同提示词**，它们的知识层不一样 ——
- *   篇章只排「3~4 个大阶段」，**根本不排拍**；给它读「一拍是一个场景内的一个转折」就是层级串味，
- *   而且会把它往章纲的方向拉（这正是篇章提示词里花大篇幅在防的事）。
+ *   篇章排的是「这一部由几章组成、每一章是什么」，**根本不排拍**；
+ *   给它读「一拍是一个场景内的一个转折」就是层级串味，还会把它拉进细节里。
  *
  *   所以按层切：
  *     · `DESIGN_BOTH`  —— 两层都成立（呼吸感、人物优先、与其它模块的关系）
- *     · `DESIGN_ARC`   —— **只发篇章**：三条线在整条长线上的分工、伏笔在长线上的接续作用（不提「拍」）
+ *     · `DESIGN_ARC`   —— **只发篇章**：三条线各自的分工、伏笔在大故事里的接续作用
+ *       （0.22.0 起篇章要排章表，所以这里的措辞也改成「一章要能独立成立」而不是「不许写成章纲」）
  *     · `DESIGN_BEATS` —— **发章与支线**：一拍怎么落、伏笔具体怎么埋
  *     · `DESIGN_SIDE`  —— **只发支线**：支线服务主线的四种用法与份量纪律
  */
@@ -1671,26 +1716,35 @@ const DESIGN_BOTH = [
     '',
 ];
 
-/** 长线层：**只发给篇章设计**。这里不许出现「拍」怎么写 —— 那是章节层的事。 */
+/** 篇章层：**只发给篇章设计**。这里不许出现「拍」怎么写 —— 那是章节层的事。 */
 const DESIGN_ARC = [
-    '===== 长线层的设计规则（只给你看，正文模型看不到）=====',
+    '===== 篇章层的设计规则（只给你看，正文模型看不到）=====',
     '',
-    '## 三条线各自承担什么',
-    '你定的是一条**长线**，它外面还有两种并行的小线，各管各的事 —— 你只负责主线这一条：',
-    '- **主线（你写的这条）** —— 承载整部戏的弧线，是唯一一条会跨很多章往前走的线。',
+    '## 这一整套是怎么分工的',
+    '层级是：**篇章 ⊃ 章 = 主线 ⊃ 拍**，四种东西各管各的，不要越位：',
+    '- **篇章（你写的）** —— 一部完整的大故事：在争什么、**由哪几章组成**、大高潮落在哪一章。',
+    '  它由若干**同样完整的小故事**组成，是这一整套里最大的一圈。',
+    '- **章 / 主线** —— 篇章里的一章。**一章本身也是一个闭环的小故事**（有自己的小高潮与落定的结果），',
+    '  再由「主线」把它细化成可以逐拍演出的拍。**细化是章节设计师的事，你不排拍。**',
     '- **支线** —— 与主线并行的小线，存在的意义永远是**给主线供血**：',
     '  给动机（让某个人物愿意）、给线索（让某个秘密先露一点）、给压力（让处境变紧）、给位移（让两个人先熟起来 / 先有嫌隙）；',
-    '  一个支线**只写一个落点**，收得比主线快得多。它由另外一次设计单独产出，你不排它。',
+    '  一条支线**只写一个落点**，收得比主线快得多。它由另外一次设计单独产出，你不排它。',
     '- **插曲** —— 幕间小段：日常、误会、闲话、旧事。**不推进主线**，只负责呼吸感与顺手埋线。',
-    '  它适合放在一段结束之后、大转折**之前**、场景与场景之间的空当；由另外一次设计单独产出，你不排它。',
+    '  它适合放在一章结束之后、大转折**之前**、场景与场景之间的空当；由另外一次设计单独产出，你不排它。',
     '- **间章** —— 与主线互斥的另一种幕（主线收尾后自动安排的日常），插件自己管，你不设计它。',
     '',
-    '## 伏笔在长线上的作用',
-    '你这层要交的「伏笔」是**还没兑现、留着以后响的细节**，它是长线能跨章接下去的绳子：',
+    '## 伏笔在大故事里的作用',
+    '你这层要交的「伏笔」是**还没兑现、留着以后响的细节**，它是这一部能跨章接下去的绳子：',
     '- 交 **3~6 个**，每个都要**具体到可以被复述**：「她袖口沾了一点不属于这里的灰」是伏笔，「气氛有些微妙」不是。',
     '- 它们要**从现在的处境里长出来**（已有的关系、差事、物件、性格），不要为了凑伏笔凭空加新角色 / 新地点 / 新势力 / 新前史。',
-    '- 想清楚每个**大概在哪一段响** —— 一直不兑现的细节会变成噪音。',
-    '- 与「走向」的分工：走向是**世界会怎么变**，伏笔是**让这个变看起来早就埋在眼前**。',
+    '- 想清楚每个**大概在哪一章响** —— 一直不兑现的细节会变成噪音。',
+    '- 与「章内容」的分工：章内容写的是**每一章会怎么变**，伏笔是**让这个变看起来早就埋在眼前**。',
+    '',
+    '## 你排的是「章表」，不是拍',
+    '你交的章表里，**一段 = 一章**。判断标准只有一条：**把这一章单独拿出来看，它是不是一个完整的小故事？**',
+    '- 有起（怎么进这一章）、有它自己的冲突、有**它自己落定的结果**（成了 / 砸了 / 摊牌了 / 东西到手了）。',
+    '- 「这一章推进了一点，但什么也没落定」——那不算一章，那是半章，读者会觉得一直在铺垫。',
+    '- 但**不要**在章表里写「第一拍 / 第二拍」：拍是章节设计师把那一段细化出来的东西。',
     '',
 ];
 
@@ -1764,30 +1818,50 @@ function buildChapterSystemPrompt({ regenerate = false, rejected = null, remaini
 
     if (tone) lines.push('===== 基调（本故事是这一型，章节设计要贴合它）=====', tone, '===== 基调结束 =====', '');
 
-    // ── 篇章：先给「大势」，再给「这一章怎么走」 ──
+    // ── 篇章：这是第几章 / 共几章 / **这一章的章内容**（你要细化的就是它）──
     if (hasEpic) {
         const title = String(unwrap(epic[EP.title]) ?? '').trim();
         const line = String(unwrap(epic[EP.line]) ?? '').trim();
-        const stage = String(unwrap(epic[EP.stage]) ?? '').trim();
         const ledger = String(unwrap(epic[EP.ledger]) ?? '').trim();
-        const movements = epicMovements(epic);
+        const chapters = epicChapters(epic);
+        const written = epicChapter(epic);
+        const slot = written + 1;                       // 这一章是章表里的第几条
+        const mine = chapters[slot - 1] ?? '';
+        const climax = epicClimax(epic);
         const hooks = epicHooks(epic);
+        const isClimaxChapter = climax && new RegExp(`第\\s*${slot}\\s*章`).test(climax);
         lines.push(
-            '这是一部**已经在跑的长线**，你要为它设计下一章：',
-            `${title ? `《${title}》` : ''}${stage ? `　当前进程：${stage}` : ''}`,
-            line ? `篇章：${line}` : '',
+            `你要设计的是**这一部篇章里的第 ${slot} 章**${chapters.length ? `（共 ${chapters.length} 章）` : ''}：`,
+            `${title ? `《${title}》` : ''}${line ? `　在争什么：${line}` : ''}`,
         );
-        if (movements.length) lines.push(`这条长线的几个大阶段（**整部戏的骨架，不是章节表**）：${movements.map((m, i) => `${i + 1}. ${m}`).join('　')}`);
+        if (chapters.length) {
+            lines.push(`这部篇章的**章内容**（一章一段 —— 你只管 ▶ 那一条，别的章不要动）：`);
+            for (let i = 0; i < chapters.length; i++) {
+                const mark = i + 1 <= written ? '✔' : (i + 1 === slot ? '▶' : '·');
+                lines.push(`　${mark} 第 ${i + 1} 章：${chapters[i]}`);
+            }
+        }
+        if (climax) lines.push(`这部篇章的**大高潮**：${climax}`);
         if (hooks.length) lines.push(`还没兑现的伏笔（这一章最多兑现一个，也可以只是继续吊着）：${hooks.join('；')}`);
         if (ledger) lines.push(`既成事实（**不可撤销**）：${ledger}`);
         lines.push(
             '',
-            '⚠ 上面给的是**大势**，不是这一章的剧本 —— **这一章怎么演，由你决定**：',
-            '　· 一章要有**它自己的完整形状**：起（怎么进这一章）→ 承（事情往下走、压力加码）→ 转（这一章的**小高潮**：最要紧的那一下真的发生）→ 合（这一章的收场与余波）。',
-            '　· 上面那些大阶段是**一大块**：这一章只在这块里推进一点，不必走完一个阶段，也**可能一章就把它走完**。',
-            '　· 拍要按上面那个形状**排开**，最后几拍必须落到「合」上 —— 这一章结束时局面要有个明确的落点，不能停在半空。',
+            mine
+                ? `⚠ **上面 ▶ 那一条就是这一章的定位**，你要把它细化成拍（不是另起一章、也不是把整册排一遍）：`
+                : '⚠ 这一册的章表里**没有对应的那一条**（可能刚被换过）—— 那就顺着上一条的收尾，自然接出这一章：',
+            mine ? `　「${mine}」` : '',
+            '⚠ 但**细化不是逐字翻译**：章内容只说"这一章要在整体里完成什么"，具体怎么发生、谁先动、从哪里切入，**由你按当前处境设计**。',
             '',
-            '⚠ **为后文埋的伏笔（这一章要负责埋的）** —— 这是长线能接下去的关键，但**埋法必须自然**：',
+            '⚠ **每一章自己必须是一个闭环的小故事**（这是这一层的铁律）：',
+            '　· 一章要有**它自己的完整形状**：起（怎么进这一章）→ 承（事情往下走、压力加码）→ 转（这一章的**小高潮**：最要紧的那一下真的发生）→ 合（这一章的收场与余波）。',
+            '　· **这一章自己要有结果**：走完它，世界上得有一件事真的落定了（成了/砸了/摊牌了/东西到手了），不能只是"推进了一点"。',
+            '　· 拍要按上面那个形状**排开**，最后几拍必须落到「合」上 —— 这一章结束时局面要有个明确的落点，不能停在半空。',
+            isClimaxChapter
+                ? '　· ★ **这一章就是这一部的大高潮那一章**：全册攒的东西要在这里一起兑现，这一章的小高潮就是这部大故事的最高点。'
+                : (climax ? `　· ⚠ **别在这一章里把大高潮用掉**（那是 ${climax}）—— 该攒的还得攒。` : '　· ⚠ **别在这一章里把整部大故事的高潮用掉** —— 该攒的还得攒。'),
+            '　· 同时它**要为整部大故事服务**：它推进的是这部篇章那个贯通的东西，不是随手一段插曲。',
+            '',
+            '⚠ **为整部大故事埋的伏笔（这一章要负责埋的）** —— 这是册子能接下去的关键，但**埋法必须自然**：',
             '　· 每一章至少要留下**一个**能在后文回收的细节（物件、一句话、一个被谁注意到的小动作、一个没解释的巧合）。',
             '　· **必须「顺手」埋，不能专门为它加戏**：它要长在**当前这个场景本来就会发生的事**里 ——',
             '　　某人来传话时顺带提到的一个名字、送礼时多出来的一件东西、临走前没关上的那扇门。',
@@ -1796,7 +1870,7 @@ function buildChapterSystemPrompt({ regenerate = false, rejected = null, remaini
             '　· 埋下去的细节要**能被复述**（「她袖口沾了不属于这里的灰」），不要写成「气氛有些微妙」。',
             '　· **不要当场解释它**：埋完就走，让它在后文自己响。也不要在一章里堆七八个 —— 一到两个就够。',
             '',
-            '⚠ 新的一章必须让这条长线**真的往前一段**：局势变了、代价付了、或者某个伏笔兑现了。',
+            '⚠ 这一章也必须是**主线**：局势、代价或某个伏笔要真的动一动。',
             '  如果只是想写「他们又赶了一程路 / 又过了一天」，那是**间章**的料，不要拿来当主线的一章。',
             '',
         );
@@ -1932,7 +2006,7 @@ function buildChapterSystemPrompt({ regenerate = false, rejected = null, remaini
         '- **小高潮** = 这一章那件最要紧的事**真的发生了**的那一刻：摊牌、比赛打到关键一局、事情成了或砸了、',
         '  某个一直悬着的东西落下来。「一直铺垫、什么都没落地」不算一章，那只是半章。',
         '- 小高潮之后**必须留一拍收尾**：写它的结果与余波（别人的察觉、关系的位移、接下来要面对什么）。',
-        '- 但**别在这一章里把大高潮用掉**：那是篇章层的事（见上面给的大阶段）—— 该攒的还得攒。',
+        '- 但**别在这一章里把大高潮用掉**：那是篇章层的事（见上面给的「大高潮」）—— 该攒的还得攒。',
         '',
         `- 章目标也要写成**矛盾的走向**、且与 {{user}} 的行为无关：写成「局面从什么样变成什么样」，`,
         '  例如「那位客商原本够不着他 ↔ 现在能单独见到他了」。',
@@ -2038,13 +2112,14 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
     const main = mainOf(root);
     const history = completedMainTitles(root);
     const last = String(unwrap(main[MAIN_TITLE]) ?? '').trim();
+    const perEpic = chaptersPerEpic();
     const lines = [
         '你是「故事导演」的**篇章设计师**，为一个正在进行的角色扮演服务。',
         mode === 'establish'
-            ? '你的唯一任务：定下这个故事**围绕 {{user}} 的那条长线**（篇章）。之后每一章都只是它的一拍。'
-            : '你的唯一任务：**按 {{user}} 实际做了什么，重新校准这条长线**（篇章）。他不是按剧本走的，你要跟着他改。',
+            ? '你的唯一任务：**为这个故事定下一部「篇章」**（一部完整的大故事）—— 它由若干「章」组成，每一章自己也是一个完整的小故事。之后每一章都由主线细化成「拍」。'
+            : '你的唯一任务：**按 {{user}} 实际做了什么，重新校准这一部篇章**（只改**还没写**的那几章）。他不是按剧本走的，你要跟着他改。',
         '规则优先级：用户在本插件里明确提出来的要求（优先满足）> 本提示词里的设计规则 > 角色卡自带设定（只作可选参考）；卡与世界书里已有的设定是**既成事实**，只能沿用、不能改写。',
-        '你只交一份篇章，不写正文、不写台词。',
+        '你交的是一份**篇章**：这一部大故事在争什么、**由几章组成、每一章是什么**、大高潮落在哪一章。不写正文、不写台词。',
         '',
         '两条必须同时守住的原则：',
         '1. **主角是 {{user}}**：这条长线写的是「围绕他发生了什么事、他被卷进什么里面、他身边的人怎么变」。',
@@ -2084,36 +2159,32 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
         '  而不是把线本身替换成一场围猎。',
         '- **大高潮可以来自「做到了」**：赢了比赛、突破了瓶颈、被当众认可 —— 这些与「失去了什么」一样是高潮。',
         '',
-        '⚠ **篇章是「大势」，不是章纲 —— 这是这一层最容易写坏的地方。**',
-        '- **不许把篇章写成「接下来几章分别干什么」**：那是主线的事。你写的是**整部戏的骨架**，',
-        '  粒度比一章大得多：一章可能整章都在同一个阶段里，也可能一章就把一个阶段走完。',
-        '- **你不负责排章节、也不排「起承转合」**：一章内部的起承转合由主线自己设计（你要相信它做得好）。',
-        '  一写「第一段是起、第二段是承」，你就把篇章压成了章纲，这一层就白设了。',
-        '- **要写的是「势」怎么变**：谁和谁的关系到了哪一步、什么东西从背景走到台前、局面朝哪边动了。',
-        '- **大事件不等于长线**：大事件是「发生了什么」，长线是「这一路他要付什么代价、变成什么样」。',
-        '  只堆大事件就会变成大纲流水账 —— 每个阶段都要带着「对他意味着什么」。',
+        '⚠ **这一部由几章组成、每一章是什么 —— 这是你要交的核心（章表）。**',
+        `- **排满 ${perEpic} 章**：一章一段，写清**这一章要完成什么**（发生了什么、局面变成什么样）。`,
+        '- **每一章都必须是「一个能独立成立的小故事」**：它有自己的起因、自己的冲突、**自己落定的结果**。',
+        '  一章走完，世界上得真有一件事落定了（成了 / 砸了 / 摊牌了 / 东西到手了）—— 不是「推进了一点」。',
+        '- **粒度就停在「一章」**：一段只写这一章在整部里要完成什么。**不要**在章表里写「第一拍/第二拍」、',
+        '  也不要写「起承转合」当章名 —— 那是每一章**内部**的形状，由主线细化时安排，不是章表。',
+        '- **章与章之间要接力**：后一章从前面留下的局面里长出来；可以一章铺垫另一章（旧案牵出旧人）。',
+        '- **不要写成「一次比一次更惨」**：登高型的故事（攒起来 → 登上高处 → 在大场面兑现）同样成立。',
         '',
-        '⚠ **但更要紧的是：这是一条「有归宿」的完整弧线，不是一串越来越大的事件。**',
-        '- **先定下那个贯通的矛盾**：这条线从头到尾在争什么？（谁要什么、谁挡着、为什么现在非解决不可）',
-        '  「每章都发生了点事」不等于有矛盾 —— 没有那个贯通的矛盾，阶段就只是一串事件，读者感觉不到「在往哪儿去」。',
-        '  这个矛盾是「篇章」那一句的核心；每个阶段都在它上面加上一层新的压力或代价。',
-        '一条只有「不断升级」的篇章会越写越夸张，最后收不了场（也写不出回报与余味）。所以：',
-        '- **必须写得出归宿**：这几个阶段要能收束到**一个具体的结果**——事情解决了 / 没能解决但付出去了代价 / 他变成了不一样的人。',
-        '  最后一个阶段就该是那个结果，而不是「更大的事又要来了」。',
+        '⚠ **这一部是一个「有归宿」的完整大故事，不是一串越来越大的事件。**',
+        '- **先定下那个贯通的矛盾**：这一部从头到尾在争什么？（谁要什么、谁挡着、为什么现在非解决不可）',
+        '  「每章都发生了点事」不等于有矛盾 —— 没有它，章表就只是一串事件，读者感觉不到「在往哪儿去」。',
+        '  每一章都在这个矛盾上面加一层新的压力或代价。',
+        '- **必须写得出归宿**：章表要能收束到**一个具体的结果** —— 事情解决了 / 没能解决但付出去了代价 / 他变成了不一样的人。',
+        '  **最后一章就该是那个结果**，而不是「更大的事又要来了」。',
+        '- **这一部讲完就该换新的一部**：不要为了「永远写下去」而故意不收束 —— 有始有终才是完整的故事。',
         '- **回报与代价都要落地**：写了「险境」就要写「怎么出来」，写了「阴谋」就要写「揭破之后如何」。',
-        '- **阶段 3~4 个为宜**：少于 3 个撑不起弧线，多于 5 个就是在排章节表了。',
-        '- **允许篇章走完**：这条线讲完之后就该收，到时候你会被请来**定下一条新的长线**。',
-        '  所以**不要为了「永远写下去」而故意不收束** —— 有始有终才是完整的故事。',
         '',
-        '⚠ **两级高潮：你负责「大高潮」落在哪，主线负责「每章一个小高潮」。**',
-        '- **大高潮在篇章层**：这几个阶段要有一个**明显的高点**（这条线最要紧的那一场），',
-        '  它应该落在**靠后的那个阶段**里 —— 不是最后一段的余波，也不是第 2 章就烧掉。',
-        '  在走向里**点明它是哪一场**（例如「武道会决赛那场」「演唱会当晚」），让主线知道要往那里攒。',
-        '- **大高潮之前要有「攒」的过程**：至少有两个阶段是在**往那个高点蓄力**（长本事、攒人望、铺关系、解决挡路的小麻烦）；',
+        '⚠ **两级高潮：你负责「大高潮」落在哪一章、是哪一场；每一章自己还有一个小高潮。**',
+        '- **大高潮在篇章层**：说清它落在**章表里的第几章**、以及**是哪一场**（例如「第 3 章 · 武道会决赛那场」）。',
+        '  它应该落在**靠后的那一章**里 —— 不是最后一章的余波，也不是第 2 章就烧掉；但**不必是最后一章**。',
+        '- **大高潮之前要有「攒」**：前面几章是在**往那一点蓄力**（长本事、攒人望、铺关系、解决挡路的小麻烦）；',
         '  不要一路靠出更大的事把人推着走 —— 那样到了高潮也没有可用的本钱。',
-        '- **大高潮之后留一个收束阶段**：写它的结果与之后的样子（成了什么样、失去了什么、下一步是什么）。',
-        '- **每一章有自己的小高潮**（那一章最要紧的一下真的发生）—— 那是**主线**的事，你不排，',
-        '  但你给的阶段要**留得出**这种空间：别把阶段写成一串「必须连续承受打击」的压迫，那样每章都只能应付、立不起自己的高点。',
+        '- **大高潮之后留一章收束**：写它的结果与之后的样子（成了什么样、失去了什么、下一步是什么）。',
+        '- **每一章有自己的小高潮**（那一章最要紧的一下真的发生）—— 那是**主线细化**时必须保证的；',
+        '  你排的章表要**留得出**这种空间：别把每一章都写成「必须连续承受打击」，那样每章都只能应付、立不起自己的高点。',
         '',
     ];
 
@@ -2127,32 +2198,32 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
     }
 
     if (mode === 'establish') {
-        if (history.length) lines.push(`这个故事已经走过的章：${history.join(' → ')}（新篇章要接得上它们）。`);
-        if (last) lines.push(`当前正在演的章：「${last}」——可以把它当成这条长线的开场，也可以重新定位它。`);
-        if (chapter > 0) lines.push(`这条线从**当前这一章（第 ${chapter} 章）**开始排；走向第 1 段就该是「接下来马上要发生的事」。`);
-        lines.push('请从**现在的处境**出发：读最近对话，看他是谁、他身边有谁、他手里有什么、什么东西正在逼近他。');
+        if (history.length) lines.push(`这个故事已经走过的章：${history.join(' → ')}（新的一部篇章要接得上它们）。`);
+        if (last) lines.push(`当前正在演的章：「${last}」——这一部新篇章可以从它之后开始，也可以把它当成开场。`);
+        if (chapter > 0) lines.push(`这部篇章从**接下来那一章**开始排；**章表第 1 条就该是「马上要发生的事」**。`);
+        lines.push(`请从**现在的处境**出发：读最近对话，看他是谁、他身边有谁、他手里有什么、什么东西正在逼近他。然后排满 ${perEpic} 章。`);
     } else {
         lines.push('本次是**重新校准**，请按下面这些事实改写篇章：');
         if (last) lines.push(`最近一章：「${last}」`);
         if (history.length) lines.push(`走过的章：${history.join(' → ')}`);
         const chapterGoals = completedChapterGoals(rootOf());
-        if (chapterGoals.length) lines.push(`每一章实际达成的目标（**这是长线真正走过的路，以它为准**）：${chapterGoals.join('；')}`);
+        if (chapterGoals.length) lines.push(`每一章实际达成的目标（**这是这一部真正走过的路，以它为准**）：${chapterGoals.join('；')}`);
         if (diverged) lines.push(`⚠ 偏离说明（正文模型的回报）：${diverged}`);
         lines.push(
             '',
             '⚠ **先做一次自检，再改**（这一步不能跳过）：',
-            '- 拿上面「每一章实际达成的目标」回头看：**当前这一段大阶段是不是还走得通？**',
-            '  如果实际剧情已经把这一段架空了（该发生的事发生不了了、该出现的人不在了、代价已经被付掉了），',
-            '  就**重设这一段**，而不是硬把它圆回去。',
-            '- 自检的判据只有一条：**下一章还能从当前处境里自然长出来吗？** 长不出来，就是方向要改。',
+            '- 拿上面「每一章实际达成的目标」回头看：**这张章表往后还走得通吗？**',
+            '  如果实际剧情已经把后面某几章架空了（该发生的事发生不了了、该出现的人不在了、代价已经被付掉了），',
+            '  就**改掉那几章**，而不是硬把它们圆回去。',
+            '- 自检的判据只有一条：**下一章还能从当前处境里自然长出来吗？** 长不出来，就是章表要改。',
             '',
-            '校准的原则（**长线不要丢，路线可以改**）：',
+            '校准的原则（**大故事不丢，路线可以改**）：',
             '- 已经发生的事**不可撤销**：把它们全部并入「既成事实」，后面的一切建立在上面；',
-            '- 他做过的事、他表过的态，就是这条长线现在的走向 —— 不要假装没发生，也不要拉他回去；',
-            '- 如果他的做法让原来的走向不成立了，就**换一条通往同一个终局的路**（保留他在乎的东西与要付的代价，改中间的路径）；',
-            '- 如果他走出了一个完全没想到的方向，就**顺着他的方向重新想这个故事的去处与终局** —— 那可能比原来的更好；',
-            '- 走向只保留**从现在往后还成立的 3~4 个大阶段**；已经走完的不要留，也不要在阶段里排章节；',
-            '- **粒度要守住**：如果你写出来的走向已经细到「下一章该演什么」，那就是写错了层级 —— 那是主线的事。',
+            '- 他做过的事、他表过的态，就是这一部现在的走向 —— 不要假装没发生，也不要拉他回去；',
+            '- 如果他的做法让原来那几章不成立了，就**换一条通往同一个终局的路**（保留他在乎的东西与要付的代价，改中间的路径）；',
+            '- 如果他走出了一个完全没想到的方向，就**顺着他的方向重新想这部大故事的去处与终局** —— 那可能比原来的更好；',
+            '- ★ **只改还没写的那几章**：已经写过的章要**原样保留**（它们已经演掉了），章表的总章数不要变；',
+            '- 大高潮如果落在已经写过的章上，就把它往前挪到**还没写的某一章**（一部大故事的高潮不能已经过去）。',
         );
     }
 
@@ -2161,25 +2232,22 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
         '按下面格式输出，标签原样照写，且**只输出一个区块**：',
         '',
         '<StoryEpic>',
-        '标题: 这条长线的名字（6~14 字，例如「商路上的三封密信」）',
-        '篇章: 两三句话说清这条线是什么、**在争什么**、他在其中的位置、以及为什么这事躲不掉',
-        '走向: 这条长线的**几个大阶段**（整部戏的骨架，3~4 个；**不是章节表、不要写起承转合**）',
-        '1. （一大段：局势处在什么局面；这一段里他在**攒**什么 —— 本事、人望、资源、关系；什么东西在变）',
-        '2. （再一大段：往高点蓄力的过程；阻力与「服务这条线的人」同时出现）',
-        '3. （**大高潮**：点明它是**哪一场** —— 例如「武道会决赛那场」「演唱会当晚」；这一场要让攒的东西全部兑现）',
-        '4. （收束：这一场之后是什么结果、他变成了什么样 —— 不是「更大的事又要来了」）',
-        '（3~4 条，每条是**一大块**，粒度远大于一章；每章只在这几段里推进一点。',
-        '  **大高潮那一段不必是最后一段** —— 高潮之后留一段收束更好）',
+        '标题: 这部篇章的名字（6~14 字，例如「商路上的三封密信」）',
+        '篇章: 两三句话说清这部大故事是什么、**在争什么**、他在其中的位置、以及为什么这事躲不掉',
+        `章内容: 这一部由 ${perEpic} 章组成，一章一段 —— 写清**每一章要完成什么**`,
+        '1. （第 1 章：从现在的处境起手。发生了什么事、局面变成什么样 —— 一章自己就是一个完整的小故事）',
+        '2. （第 2 章：接住上一章留下的局面，往前推一段；这一章自己的小高潮是什么）',
+        '3. （…每一章都这么写。**不要写「起承转合」当标题**，写内容）',
+        `（共 ${perEpic} 条；每一章都要有一个自己落定的结果，不为后面的章留半截）`,
+        '大高潮: 落在第几章、是哪一场（例如「第 3 章 · 武道会决赛那场」；这一场要让前面攒的东西全部兑现）',
         '伏笔: 三到六个还没兑现的细节，用「；」分开（要具体到能被复述）',
         '既成事实: 已经发生、不可撤销的事（用「；」分开；第一次定篇章时写现在的处境）',
-        '当前进程: 启程 / 试炼 / 至暗 / 转折 / 终局（选一个，标记整条线走到哪儿了）',
         '</StoryEpic>',
         '',
-        '⚠ 走向写的是**世界的动作**，不是{{user}}的动作：',
+        '⚠ 章内容写的是**世界的动作**，不是{{user}}的动作：',
         '好例子：「使团的密信被人劫走，他的差事变成了别人的把柄」',
         '坏例子：「他决定暗中调查密信的去向」← 这是替他做决定',
-        '⚠ 走向也**不要写成**「1. 起：… 2. 承：…」这种一章一段的章纲 —— 那是主线的工作。',
-        '⚠ 但也**不要**把 3~4 段全写成「一次比一次更惨的打击」：登高型的故事',
+        '⚠ 也**不要**把每一章都写成「一次比一次更惨的打击」：登高型的故事',
         '  （攒起来 → 登上高处 → 在大场面兑现）同样是对的写法，就看这个角色与当前处境该走哪条路。',
         '',
         ...DESIGN_BOTH,
@@ -2642,8 +2710,10 @@ async function openEpicDialog({ mode = 'establish', entry = 0, diverged = '' } =
     const pinnedEpic = String(s.run.epicPin || '').trim();
     body.innerHTML = `
         <p class="sd-dialog-note">
-            <b>篇章是「大势」不是章纲</b> —— 它只讲整部戏分几个大阶段、在争什么。
-            一章内部怎么起承转合由主线自己设计，所以<b>不用在这里安排章节</b>。
+            <b>篇章 = 一部完整的大故事</b>（有自己的大高潮与终局），由若干「章」组成；
+            <b>每一章自己也是一个完整的小故事</b>，之后再交给主线细化成拍。<br>
+            所以神谕在这里要交的是：<b>在争什么 + 章表（每一章是什么）+ 大高潮落在哪一章</b>。
+            你只需要说清<b>你想要什么样的故事</b>，章节它会自己排。
         </p>
         ${pinnedEpic ? `<p class="sd-dialog-pin">📌 <b>已钉住的要求</b>（每轮都会带上，不会被重生成覆盖）：<br>${esc(pinnedEpic)}</p>` : ''}
         <label class="sd-dialog-field">
@@ -2758,7 +2828,14 @@ async function openChapterDialog({ regenerate = false } = {}) {
     return true;
 }
 
-/** 生成 / 校准史诗（篇章）。entry = 这一份篇章算「校准到第几章」。 */
+/**
+ * 生成 / 校准篇章。
+ *
+ * ⚠ `entry` 的语义在 0.22.0 变了：以前是「这份篇章校准到总第几章」（进度是全局的），
+ *   现在**进度是这一册自己的**（`史诗.更新到第几章` = 这一册写到第几章了）：
+ *     · `establish`（定一部**新的**）→ 进度**归零**，章表第 1 条就是"接下来马上要发生的事"；
+ *     · `evolve`（按玩家实际做的校准）→ **进度不动**，只改还没写的那几章。
+ */
 async function generateEpic({ quiet = true, userText = '', force = false, mode = 'establish', diverged = '', entry = 0 } = {}) {
     if (!mvu()?.getMvuData) {
         if (!quiet) toast('MVU 未加载：先确认酒馆助手与 MVU 装好了、这个聊天有变量。', 'warning');
@@ -2767,8 +2844,10 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
     const key = `epic:${chatKey()}`;
     if (!beginGenerate()) return false;
     if (!force && isBackingOff(key)) return false;
-    if (quiet) toast(mode === 'establish' ? '正在请故事神谕定下这条长线（篇章）…' : '正在按他实际做的事重新校准篇章…');
+    if (quiet) toast(mode === 'establish' ? '正在请故事神谕定下一部篇章（一部完整的大故事）…' : '正在按他实际做的事重新校准篇章…');
     const origin = chatKey();
+    // establish = 换新的一部 → 进度归零；evolve = 校准 → 不动进度
+    const progress = mode === 'establish' ? 0 : null;
     try {
         const raw = await askOracle({
             task: 'epic',
@@ -2776,7 +2855,7 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
                 mode,
                 diverged,
                 tone: toneDirective(settings().tone),
-                chapter: Math.max(0, Math.round(toNumber(entry, 0))) + 1,
+                chapter: mode === 'establish' ? 0 : Math.max(0, Math.round(toNumber(entry, 0))),
             }),
             quiet,
             userText,
@@ -2788,14 +2867,14 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
             return false;
         }
         const blocks = parseBlocks(raw, 'StoryEpic');
-        const epic = blocks.length ? epicFromBlock(blocks[blocks.length - 1], { chapter: entry }) : null;
+        const epic = blocks.length ? epicFromBlock(blocks[blocks.length - 1], { chapter: progress }) : null;
         if (!epic || !epicStarted(epic)) {
             console.info('[故事导演] 神谕没有返回可用的 <StoryEpic> 区块，原始回复：\n' + raw);
             toast('没解析到 <StoryEpic> 区块，原始回复已打印到控制台。', 'warning');
             markFailed(key);
             return false;
         }
-        await applyEpic(epic, { quiet: false, entry });
+        await applyEpic(epic, { quiet: false, entry: progress });
         return true;
     } catch (error) {
         console.debug('[故事导演] 生成史诗失败', error);
@@ -3043,14 +3122,14 @@ async function handleBeatReview({ live = null } = {}) {
     s.run.redesignsL2 = 0;
     save();
     const past = completedMainTitles(rootOf(live)).length;
-    toast(`这一章重建 ${REDESIGN_MAX_L2} 次仍然报「${why}——判断为**长线这一段的方向立不住**，正在请神谕重设篇章这一段，然后重建这一章。`, 'warning');
-    console.info(`[故事导演] 升级到③级：重设篇章这一段并重建《${title || '当前章'}》。`);
+    toast(`这一章重建 ${REDESIGN_MAX_L2} 次仍然报「${why}」——判断为**这一部的方向立不住**，正在请神谕改掉还没写的章，然后重建这一章。`, 'warning');
+    console.info(`[故事导演] 升级到③级：改篇章未写的章并重建《${title || '当前章'}》。`);
     void (async () => {
         const ok = await generateEpic({
-            quiet: true, force: true, mode: 'evolve', entry: past,
-            diverged: `当前这一段走向在实际演出里反复立不住（正文模型连续报「${state}」${note ? `：${note}` : ''}）。`
-                + '请**重设这一段大阶段**：换一条通往同一终局、但当前处境下真正走得通的路；'
-                + '如果这个阶段的设定本身就不可行，就换一个阶段。',
+            quiet: true, force: true, mode: 'evolve', entry: null,
+            diverged: `这一部篇章往后那几章在实际演出里反复立不住（正文模型连续报「${state}」${note ? `：${note}` : ''}）。`
+                + '请**改掉还没写的那几章**：换一条通往同一个终局、但当前处境下真正走得通的路；'
+                + '如果某几章的设定本身不可行，就换掉那几章（已经写过的章不要动）。',
         });
         if (!ok) {
             // 篇章没改成也不该把故事卡死：照样重建这一章（带着失败原因）
@@ -3247,21 +3326,36 @@ async function evaluateDirector({ live = null } = {}) {
         const EPIC_GIVE_UP = 3;
         if (s.autoDirector && s.autoEpic && typeof oracleApi()?.run === 'function') {
             const epic = epicOf(rootOf(live));
-            const past = completedMainTitles(rootOf(live)).length;
             const pendingEpic = isPending(`epic:${chatKey()}`);
             const tries = Math.round(toNumber(rt.epicTries, 0));
             const canTryEpic = !pendingEpic && tries < EPIC_GIVE_UP;
-            // 章已经收尾（没有拍在演）但篇章还没校准到这些章 → 先校准，再开新章
-            if (beats.length === 0 && epicStarted(epic) && s.evolveEpic && epicChapter(epic) < past) {
+
+            // ① **这一册写完了**（章表里的章都写过了）→ 换一部新的篇章。
+            //    ⚠ 这是新模型的关键一环：篇章是**有始有终**的一册，不是无限延长的一条线。
+            //      所以只在「上一章已经收尾、场子空着」时才换，换完就当一部全新的开始。
+            if (beats.length === 0 && epicFinished(epic) && rt.closedChapter) {
+                if (canTryEpic) {
+                    rt.epicTries = tries + 1;
+                    markPending(`epic:${chatKey()}`);
+                    save();
+                    toast(`《${String(unwrap(epic[EP.title]) ?? '这一部')}》这一部已经写完 ${epicChapter(epic)} 章 —— 正在请故事神谕定下一部篇章。`, 'info');
+                    // 换新的一部：进度归零（entry 由 generateEpic 按 establish 处理）
+                    void generateEpic({ quiet: true, force: true, mode: 'establish', entry: 0 });
+                    return;
+                }
+            }
+            // ② 章已经收尾（没有拍在演）但这一册的章表还没排到这些章 → 先校准，再开新章
+            if (beats.length === 0 && epicStarted(epic) && !epicFinished(epic) && s.evolveEpic
+                && epicChapter(epic) > 0 && !epicChapters(epic)[epicChapter(epic)]) {
                 if (canTryEpic && !blockedByCooldown(s, count, rt)) {
                     rt.epicTries = tries + 1;
                     markPending(`epic:${chatKey()}`);
                     save();
-                    void generateEpic({ quiet: true, force: true, mode: 'evolve', entry: past });
+                    void generateEpic({ quiet: true, force: true, mode: 'evolve', entry: epicChapter(epic) });
                     return;
                 }
             }
-            // 还没定篇章：这是万事的前提，**不该被生成冷却卡住**（卡住就等于整个插件不动）
+            // ③ 还没定篇章：这是万事的前提，**不该被生成冷却卡住**（卡住就等于整个插件不动）
             if (!epicStarted(epic) && canTryEpic && count >= 2) {
                 rt.epicTries = tries + 1;
                 markPending(`epic:${chatKey()}`);
@@ -4012,6 +4106,11 @@ function renderMainTab() {
         save();
         render();
     });
+    host.querySelector('[name="chapters-per-epic"]')?.addEventListener('change', (event) => {
+        settings().chaptersPerEpic = Math.max(1, Math.min(12, Math.round(toNumber(event.target.value, 4))));
+        save();
+        render();
+    });
 }
 
 function renderSideTab() {
@@ -4140,9 +4239,11 @@ function renderSetTab() {
                 ${Object.entries(ORACLE_WORLDINFO_MODES).map(([key, item]) => `<option value="${key}">${esc(item.label)}</option>`).join('')}
             </select></label>
             <label class="sd-field"><span>近期对话上限（字符）</span><input name="transcript-limit" type="number" min="2000" max="60000" step="500"></label>
-            <label class="sd-switch"><input name="auto-epic" type="checkbox"> <b>自动定篇章</b>（先有一条围绕 {{user}} 的长线，再开第一章）</label>
+            <label class="sd-switch"><input name="auto-epic" type="checkbox"> <b>自动定篇章</b>（先有一部完整的大故事，再开第一章）</label>
             <label class="sd-switch"><input name="evolve-epic" type="checkbox"> 每开新章前按「他实际做了什么」重新校准篇章</label>
-            <p class="sd-note">篇章是主线不平淡的关键：有它，每一章才是「一部史诗的一拍」，而不是走到哪算哪。
+            <label class="sd-field"><span>一个篇章写几章（1~12；写满这一部就收尾、换新的一部）</span><input name="chapters-per-epic" type="number" min="1" max="12" step="1" value="${esc(String(chaptersPerEpic()))}"></label>
+            <p class="sd-note">篇章是主线不平淡的关键：<b>一部完整的篇章 = 若干各自完整的小章</b>，每一章再由主线细化成拍。
+            章数决定这一部多大：4 章左右最稳（太短撑不起大高潮，太长会松散）。<br>
             第一项定篇章花一次调用；第二项每开一章多花一次调用（但能跟住你的偏离——你随时可能不按剧本走）。两项都关掉时，主线就退回逐章续写。</p>
             <label class="sd-field"><span>世界书档位（影响这本世界书在酒馆里的注入）</span><select name="book-mode">
                 ${Object.entries(BOOK_MODES).map(([key, item]) => `<option value="${key}">${esc(item.label)}</option>`).join('')}
@@ -4465,7 +4566,10 @@ async function forceOpenStory() {
 }
 
 /**
- * 把老存档的旧字段名（`史诗.总纲`）改掉 —— **两个存放位置都过一遍**。
+ * 把老存档的旧字段名改掉 —— **两个存放位置都过一遍**。
+ *   · `史诗.总纲`   → `史诗.篇章`    （0.21.1）
+ *   · `史诗.走向`   → `史诗.章内容`  （0.22.0：阶段思维 → 章表）
+ *   · 清掉已废弃的 `史诗.当前进程` / `史诗.赌注`
  *
  * MVU 的 `getMvuData/replaceMvuData` 支持 `type: 'message'`（当前楼层）与 `type: 'chat'`（聊天级）。
  * 我们平时只写 message，但**前端那个变量查看器读的是哪一份不好保证** ——
@@ -4542,7 +4646,10 @@ function exposeDiagnostics() {
                     // ⚠ 这两个键改动名之后**不能再叫同一个名字**（同名会互相覆盖）：
                     //   史诗的**名字** vs 史诗**校准到第几章**，分开写清。
                     篇章名: epicStarted(epicOf(rootOf())) ? String(unwrap(epicOf(rootOf())[EP.title]) ?? '') : '',
-                    篇章校准到第几章: epicChapter(epicOf(rootOf())),
+                    这一部共几章: epicChapterCount(epicOf(rootOf())),
+                    这一部已写几章: epicChapter(epicOf(rootOf())),
+                    这一部写完没有: epicFinished(epicOf(rootOf())),
+                    大高潮: epicClimax(epicOf(rootOf())),
                     定篇章已试: Math.round(toNumber(settings().run.epicTries, 0)),
                     AI回复数: aiMessageCount(),
                     生成中: storyGenerating,
@@ -4678,40 +4785,41 @@ function renderEpicTab() {
     const s = settings();
     const epic = epicOf(rootOf());
     const started = epicStarted(epic);
-    const movements = epicMovements(epic);
+    const chapters = epicChapters(epic);
     const hooks = epicHooks(epic);
-    const past = completedMainTitles(rootOf()).length;
-    const upTo = epicChapter(epic);
+    const climax = epicClimax(epic);
+    const written = epicChapter(epic);
+    const total = chapters.length;
+    const done = epicFinished(epic);
 
     host.innerHTML = `
         <div class="sd-card ${started ? 'sd-card-main' : ''}">
             <div class="sd-card-head">
-                <span class="sd-card-title">篇章（围绕 {{user}} 的长线）</span>
-                <span class="sd-chip">${started ? `校准到第 ${upTo} 章` : '还没有篇章'}</span>
+                <span class="sd-card-title">篇章（一部完整的大故事）</span>
+                <span class="sd-chip">${started ? (done ? `✔ 这一部 ${total} 章已写完` : `已写 ${written} / 共 ${total} 章`) : '还没有篇章'}</span>
             </div>
-            <label class="sd-field"><span>基调（决定这条长线是什么型的故事；由你选，不由模型判断）</span><select name="tone">
+            <label class="sd-field"><span>基调（决定这部大故事是什么型的故事；由你选，不由模型判断）</span><select name="tone">
                 ${toneOptions().map((item) => `<option value="${esc(item.value)}" ${toneOf(s.tone) === item.value ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}
             </select></label>
-            <p class="sd-note">这条长线写的是「围绕他会发生什么」，<b>不写他会怎么做</b>：他中途走出剧本是常态，
-            插件会在开新章之前按他实际做的事重新校准。<br>
-            <b>它是「大势」不是章纲</b> —— 只讲整部戏分几个大阶段、现在走到哪；<b>一章内部怎么起承转合由主线自己设计</b>。<br>
-            基调会作为**最高优先级的创作方针**同时给到篇章与每一章的设计：选「冒险」就允许远行、险境、突围；
+            <p class="sd-note"><b>篇章</b>是一部完整的大故事：它说清<b>在争什么</b>、<b>由哪几章组成</b>、<b>大高潮落在哪一章</b>；
+            每一章自己也是一个完整的小故事，再交给<b>主线</b>细化成拍。<br>
+            写的东西都是「围绕他会发生什么」，<b>不写他会怎么做</b> —— 他中途走出剧本是常态，
+            插件会在开新章之前按他实际做的事<b>改掉还没写的那几章</b>。<br>
+            基调会作为**最高优先级的创作方针**给到篇章与每一章：选「冒险」就允许远行、险境、突围；
             选「日常」就明确不要大事件，张力来自关系的小位移。换基调之后点一次「重新定篇章（换一部）」才会按新基调重写。</p>
             ${started ? `
                 <label class="sd-field"><span>标题</span><input name="epic-title" value="${esc(String(unwrap(epic[EP.title]) ?? ''))}"></label>
                 <label class="sd-field"><span>篇章（两三句，说清在争什么）</span><textarea name="epic-line" rows="3">${esc(String(unwrap(epic[EP.line]) ?? ''))}</textarea></label>
-                <label class="sd-field"><span>大阶段（一行一段，整部戏的骨架 —— <b>不是章节表</b>，别写起承转合）</span><textarea name="epic-movements" rows="6">${esc(movements.map((text, i) => `${i + 1}. ${text}`).join('\n'))}</textarea></label>
+                <label class="sd-field"><span>章内容（<b>一章一行</b>：这一章要完成什么。✔ = 已写、▶ = 正在写、· = 还没写）</span>${total ? `<span class="sd-epic-progress">${done ? '这一部已经写完 —— 点「重新定篇章（换一部）」开新的一部' : `下一章是第 ${written + 1} 章`}</span>` : ''}<textarea name="epic-chapters" rows="${Math.max(4, total + 1)}">${esc(chapters.map((text, i) => `${i + 1}. ${text}`).join('\n'))}</textarea></label>
+                <label class="sd-field"><span>大高潮（落在第几章、是哪一场）</span><input name="epic-climax" value="${esc(climax)}" placeholder="例如：第 3 章 · 武道会决赛那场"></label>
                 <label class="sd-field"><span>伏笔（用「；」分开）</span><textarea name="epic-hooks" rows="2">${esc(hooks.join('；'))}</textarea></label>
                 <label class="sd-field"><span>既成事实（不可撤销）</span><textarea name="epic-ledger" rows="2">${esc(String(unwrap(epic[EP.ledger]) ?? ''))}</textarea></label>
-                <label class="sd-field"><span>当前进程</span><select name="epic-stage">
-                    ${['', ...EPIC_STAGES].map((name) => `<option value="${esc(name)}" ${String(unwrap(epic[EP.stage]) ?? '') === name ? 'selected' : ''}>${esc(name || '（未定）')}</option>`).join('')}
-                </select></label>
                 <div class="sd-row">
                     <button type="button" class="sd-btn sd-save-epic">保存篇章</button>
                     <button type="button" class="sd-btn sd-evolve-epic">按现在的情况重新校准</button>
                     <button type="button" class="sd-btn sd-rebuild-epic">重新定篇章（换一部）</button>
                 </div>
-                ${past > upTo ? `<p class="sd-note">⚠ 已经走过 ${past} 章，篇章只校准到第 ${upTo} 章 —— 建议点一次「重新校准」。</p>` : ''}` : `
+                ${done ? '<p class="sd-note">✔ 这一部的章表已经全部写完 —— 下一章开始时会自动请神谕<b>定下一部篇章</b>（也可以现在点「重新定篇章」）。</p>' : ''}` : `
                 <div class="sd-row">
                     <button type="button" class="sd-btn sd-rebuild-epic">现在定一部篇章</button>
                 </div>
@@ -4728,10 +4836,10 @@ function renderEpicTab() {
     });
     host.querySelector('.sd-save-epic')?.addEventListener('click', () => { void saveEpicFromForm(); });
     host.querySelector('.sd-evolve-epic')?.addEventListener('click', () => {
-        void openEpicDialog({ mode: 'evolve', entry: past });
+        void openEpicDialog({ mode: 'evolve', entry: written });
     });
     host.querySelector('.sd-rebuild-epic')?.addEventListener('click', () => {
-        void openEpicDialog({ mode: 'establish', entry: past });
+        void openEpicDialog({ mode: 'establish', entry: 0 });
     });
 }
 
@@ -4739,21 +4847,21 @@ function renderEpicTab() {
 async function saveEpicFromForm() {
     const host = panel?.querySelector('.sd-epic-tab');
     if (!host) return;
-    const movements = splitBeats(host.querySelector('[name="epic-movements"]')?.value || '');
+    const chapters = splitBeats(host.querySelector('[name="epic-chapters"]')?.value || '');
     const hooks = String(host.querySelector('[name="epic-hooks"]')?.value || '')
         .split(/[；;\n]/).map((text) => text.trim()).filter(Boolean);
     await patchEpic({
         [EP.title]: String(host.querySelector('[name="epic-title"]')?.value || '').trim(),
         [EP.line]: String(host.querySelector('[name="epic-line"]')?.value || '').trim(),
-        [EP.movements]: movements,
+        [EP.chapters]: chapters,
+        [EP.climax]: String(host.querySelector('[name="epic-climax"]')?.value || '').trim(),
         [EP.hooks]: hooks,
         [EP.ledger]: String(host.querySelector('[name="epic-ledger"]')?.value || '').trim(),
-        [EP.stage]: String(host.querySelector('[name="epic-stage"]')?.value || '').trim(),
         [EP.updated]: new Date().toISOString(),
     });
     syncMainInjection();
     render();
-    toast('篇章已保存。', 'success');
+    toast(`篇章已保存（章表 ${chapters.length} 章）。`, 'success');
 }
 
 // 阶段十四：悬浮窗

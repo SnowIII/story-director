@@ -94,27 +94,36 @@ export const EP = {
   /** 老存档里这个字段叫「总纲」——读取时兼容，避免升级后看起来像丢了总纲。 */
   lineLegacy: '总纲',
   /**
-   * 这条长线的**宏观阶段**（整部戏的骨架，不是章节计划）。
+   * ★ **章表**：这个篇章由几章组成、每一章讲什么（一段 = 一章的内容）。
    *
-   * ⚠ 这一层刻意**不写「下一章做什么」**：篇章只回答「整部戏分几个大阶段、现在走到哪」，
-   * 具体一章怎么起承转合由**主线自己**设计。
-   * 历史上这里存的是「4~5 段 = 未来 4~5 章」的章纲，那会把篇章压得和章一样细 —— 该用法已废弃；
-   * 字段名保留只为兼容老存档（面板与注入都按"阶段"读它）。
+   * 这是篇章那一层的核心。语义变更史（要记住，别再绕回去）：
+   *   · 曾是「4~5 段 = 未来 4~5 章的章纲」→ 被判定为「太细」而废弃；
+   *   · 改成「3~4 个大阶段（整部戏的骨架）」，还要求「不许写成章纲」；
+   *   · **现在改回章表**：因为一个篇章就是「许多同样完整的小故事组成的大轴」——
+   *     它当然要说清这一册里每一章是什么。神谕按这张表逐章细化成「拍」。
+   * ⚠ 长度 = 这一册一共几章（面板与运行时都按 `章内容.length` 算，不另存一个「共几章」）。
+   * 老存档里这个字段叫「走向」（而且经常被写成四段起承转合）——读取时兼容并迁移过来。
    */
-  movements: '走向',
+  chapters: '章内容',
+  chaptersLegacy: '走向',
+  /**
+   * 这部大故事的**大高潮**落在哪一章、是哪一场（闭环的顶点）。
+   * 例：「第 3 章 · 武道会决赛那场」。章表负责"每章是什么"，这一条负责"哪一章是顶点"。
+   */
+  climax: '大高潮',
   hooks: '伏笔',
   ledger: '既成事实',
-  stage: '当前进程',
+  /** 已经写到章表里的第几章（进度）。前端显示成「已写 N / 共 M 章」。 */
   chapter: '更新到第几章',
   updated: '更新',
 };
-/**
- * 这条长线的进程（整部戏的骨架，**不是**一章的内部结构）。
- *
- * 一章内部的「起承转合」是**章节层**的事（见世界书《推动剧情的引擎》与章提示词）；
- * 这里只标记整条长线走到哪儿了 —— 两者粒度差一个数量级，不要混。
+/*
+ * ⚠ 「当前进程」（启程 / 试炼 / 至暗 / 转折 / 终局）**已删除**（0.22.0）。
+ *   它把一部篇章当成「正在走某条旅程的第几站」，与这个模型直接冲突：
+ *   篇章不是一条在推进的线，它是**许多同样完整的小故事组成的大轴** ——
+ *   进度只该有「写了几章 / 一共几章」，不需要阶段标签。
+ *   老存档里的这个键会被 `migrateEpicKeys()` 清掉（它只是枚举标签，没有信息量）。
  */
-export const EPIC_STAGES = ['启程', '试炼', '至暗', '转折', '终局'];
 
 /**
  * 基调（tone）：由**用户在下拉里选**，不由模型判断。
@@ -169,10 +178,10 @@ export function emptyEpic() {
   return {
     [EP.title]: '',
     [EP.line]: '',
-    [EP.movements]: [],
+    [EP.chapters]: [],
+    [EP.climax]: '',
     [EP.hooks]: [],
     [EP.ledger]: '',
-    [EP.stage]: '',
     [EP.chapter]: 0,
     [EP.updated]: '',
   };
@@ -183,12 +192,17 @@ export function epicOf(root) {
   const box = ns && isPlainObject(ns[EPIC]) ? ns[EPIC] : null;
   if (!box) return emptyEpic();
   const merged = { ...emptyEpic(), ...box };
-  // ⚠ 老存档里这一条叫「总纲」；新的是「篇章」。
-  //   读取时把老键搬过来（**不**回写 MVU，避免每次心跳都动变量）。
-  //   —— 真正把键名换掉的是 migrateEpicKeys()（在 ensureNamespace 里跑一次）。
+  // ⚠ 老存档里这几条字段名不一样，读取时搬过来（**不**回写 MVU，避免每次心跳都动变量）；
+  //   真正把键名换掉的是 migrateEpicKeys()（在 ensureNamespace 里跑一次）。
+  //     · 「总纲」   → 「篇章」    （更早的改名）
+  //     · 「走向」   → 「章内容」  （阶段思维 → 章表）
   if (!String(merged[EP.line] ?? '').trim()) {
     const legacy = String(unwrap(box[EP.lineLegacy]) ?? '').trim();
     if (legacy) merged[EP.line] = legacy;
+  }
+  if (!epicChapters(box).length) {
+    const legacy = epicChapters({ [EP.chapters]: box?.[EP.chaptersLegacy] });
+    if (legacy.length) merged[EP.chapters] = legacy;
   }
   return merged;
 }
@@ -213,20 +227,38 @@ export function migrateEpicKeys(ns) {
   const out = { changed: false, renamed: false, dropped: [] };
   const box = isPlainObject(ns?.[EPIC]) ? ns[EPIC] : null;
   if (!box) return out;
+  const note = (what) => { out.renamed = true; out.renamedWhat.push(what); };
+  out.renamedWhat = [];
 
+  // ① 「总纲」→「篇章」
   if (Object.prototype.hasOwnProperty.call(box, EP.lineLegacy)) {
     const legacy = unwrap(box[EP.lineLegacy]);
-    const legacyText = String(legacy ?? '').trim();
-    if (legacyText && !String(unwrap(box[EP.line]) ?? '').trim()) {
+    if (String(legacy ?? '').trim() && !String(unwrap(box[EP.line]) ?? '').trim()) {
       box[EP.line] = legacy;          // 原样搬（保住类型）
-      out.renamed = true;
+      note('总纲 → 篇章');
     }
     delete box[EP.lineLegacy];
     out.changed = true;
   }
 
-  // 「赌注」是已经砍掉的一层（0.14 起不再有），老存档里可能还挂着这个空键。
-  for (const dead of ['赌注']) {
+  // ② 「走向」（原本是"3~4 个大阶段"，实际常被写成四段起承转合）→「章内容」（章表）
+  if (Object.prototype.hasOwnProperty.call(box, EP.chaptersLegacy)) {
+    const legacy = unwrap(box[EP.chaptersLegacy]);
+    const hasLegacy = Array.isArray(legacy) ? legacy.length > 0 : String(legacy ?? '').trim() !== '';
+    // ⚠ 这里必须看**新键本身**是不是空的，不能用 epicChapters()（它会回退读老键，
+    //   于是永远"看起来有内容"，迁移就永远不搬 —— 踩过）。
+    const rawNew = unwrap(box[EP.chapters]);
+    const hasNew = Array.isArray(rawNew) ? rawNew.length > 0 : String(rawNew ?? '').trim() !== '';
+    if (hasLegacy && !hasNew) {
+      box[EP.chapters] = legacy;      // 原样搬：四段阶段 == 四章的内容，语义正好对上
+      note('走向 → 章内容');
+    }
+    delete box[EP.chaptersLegacy];
+    out.changed = true;
+  }
+
+  // ③ 清掉已经废弃的键：「赌注」（早已砍掉的一层）、「当前进程」（阶段思维，无信息量）
+  for (const dead of ['赌注', '当前进程']) {
     if (Object.prototype.hasOwnProperty.call(box, dead)) {
       delete box[dead];
       out.dropped.push(dead);
@@ -262,20 +294,45 @@ export function epicAskText(raw) {
 }
 
 /**
- * 这条长线的**宏观阶段**能排到哪一步。
+ * ★ **章表**：这个篇章由几章组成、每一章讲什么。
  *
- * 每个阶段是「整部戏的一大段」，**不是一章**：一章可能整章都在同一阶段里，
- * 也可能一章就把一个阶段走完。排在后面的是**远期许诺**，只用来判断「势」朝哪边去，不要提前兑现。
+ * 一段 = 一章的内容。长度就是「这一册一共几章」——不另存一个「共几章」，
+ * 免得设置改了、字段和实际条数打架。
+ *
+ * ⚠ 兼容老键「走向」：老存档里那些「1. 起：… 2. 承：…」四段，**正好就等于四章的内容**，
+ *   读取时按它读（真正改名的是 migrateEpicKeys()）。
+ *   但**不要**再把新写的内容当"阶段"用：它是章表，不是一条正在推进的线。
  */
-export function epicMovements(epic) {
-  const raw = unwrap(epic?.[EP.movements]);
-  if (Array.isArray(raw)) {
-    return raw
+export function epicChapters(epic) {
+  const raw = unwrap(epic?.[EP.chapters]);
+  const pick = (value) => (Array.isArray(value)
+    ? value
       .map((item) => (isPlainObject(item) ? String(unwrap(item.value ?? item.内容 ?? item.text ?? '')) : String(unwrap(item) ?? '')))
       .map((text) => text.trim())
-      .filter(Boolean);
-  }
-  return splitBeats(raw);
+      .filter(Boolean)
+    : splitBeats(value));
+  const mine = pick(raw);
+  if (mine.length) return mine;
+  return pick(unwrap(epic?.[EP.chaptersLegacy]));
+}
+
+/** 老名字，保留给还在用的调用方（语义已改成"章表"）。 */
+export const epicMovements = epicChapters;
+
+/** 这部大故事的大高潮落在哪一章 / 是哪一场（空串 = 还没定）。 */
+export function epicClimax(epic) {
+  return String(unwrap(epic?.[EP.climax]) ?? '').trim();
+}
+
+/** 这个篇章一共几章（= 章表条数）。 */
+export function epicChapterCount(epic) {
+  return epicChapters(epic).length;
+}
+
+/** 这个篇章写完了吗（章表排满了）。没有章表时不算写完。 */
+export function epicFinished(epic) {
+  const total = epicChapterCount(epic);
+  return total > 0 && epicChapter(epic) >= total;
 }
 
 export function epicHooks(epic) {
@@ -286,34 +343,42 @@ export function epicHooks(epic) {
   return splitBeats(raw);
 }
 
-/** 篇章更新到第几章了（用来判断要不要在开新章前重新校准）。 */
+/** 这个篇章已经写到章表里的第几章（用来判断要不要在开新章前重新校准、以及这一册写完没有）。 */
 export function epicChapter(epic) {
   return Math.max(0, Math.round(toNumber(epic?.[EP.chapter], 0)));
 }
 
+/** 同义名（新代码用这个说法读起来更顺）。 */
+export const epicWritten = epicChapter;
+
 /**
- * 把篇章渲染成给**导演层（面板 / 诊断）**看的一节：大势 + 走到哪个大阶段了。
+ * 把篇章渲染成给**导演层（面板 / 诊断）**看的一节：这是一部什么故事、章表、进度。
  *
  * ⚠ **不要把它注入正文** —— 篇章不进正文注入（见 buildInjection 里的注释）：
  *   叙事者一眼看完整条长线的走向与结局，就会急着把剧情往前赶、伏笔还没铺就被兑现。
  *   这一节只是给人看的；叙事者那边只有「这一章」。
  */
-export function renderEpicSection(epic, { movementCap = 10, banUserAction = true } = {}) {
+export function renderEpicSection(epic, { chapterCap = 12, banUserAction = true } = {}) {
   const lines = [];
   if (!epicStarted(epic)) return { lines, started: false };
   const title = String(unwrap(epic[EP.title]) ?? '').trim();
   const line = String(unwrap(epic[EP.line]) ?? '').trim();
-  const stage = String(unwrap(epic[EP.stage]) ?? '').trim();
+  const climax = epicClimax(epic);
   const ledger = String(unwrap(epic[EP.ledger]) ?? '').trim();
-  const movements = epicMovements(epic).slice(0, Math.max(1, movementCap));
+  const chapters = epicChapters(epic).slice(0, Math.max(1, chapterCap));
   const hooks = epicHooks(epic).slice(0, 6);
+  const written = epicWritten(epic);
 
-  lines.push('【长线大势 · 导演层视图】');
-  if (title || stage) lines.push(`${title ? `《${title}》` : ''}${stage ? `　当前进程：${stage}` : ''}`);
+  lines.push('【篇章 · 导演层视图】');
+  if (title) lines.push(`《${title}》`);
   if (line) lines.push(`在争什么：${line}`);
-  if (movements.length) {
-    lines.push('几个大阶段（**整部戏的骨架，不是章节表**）：');
-    for (let i = 0; i < movements.length; i++) lines.push(`　${i + 1}. ${movements[i]}`);
+  if (climax) lines.push(`大高潮：${climax}`);
+  if (chapters.length) {
+    lines.push(`章内容（共 ${epicChapterCount(epic)} 章，已写到第 ${written} 章）：`);
+    for (let i = 0; i < chapters.length; i++) {
+      const mark = i + 1 < written ? '✔' : (i + 1 === written + 1 ? '▶' : '·');
+      lines.push(`　${mark} 第 ${i + 1} 章：${chapters[i]}`);
+    }
   }
   if (hooks.length) lines.push(`埋着的伏笔：${hooks.join('；')}`);
   if (ledger) lines.push(`既成事实：${ledger}`);
@@ -323,7 +388,8 @@ export function renderEpicSection(epic, { movementCap = 10, banUserAction = true
 /** 面板上的「采用」按钮要用的东西：把 <StoryEpic> 区块变成可落盘的对象。 */
 export function epicFromBlock(raw, { chapter = 0 } = {}) {
   const attrs = parseAttributes(raw);
-  const movements = splitBeats(attrOf(attrs, '走向', 'movements', '线') || '');
+  // 章表：新标签「章内容」优先，老标签「走向」也认（模型偶尔还按老格式吐）
+  const chapters = splitBeats(attrOf(attrs, '章内容', '章节表', '章', 'chapters', '走向', 'movements') || '');
   const hooks = (attrOf(attrs, '伏笔', 'hooks') || '')
     .split(/[；;\n]/)
     .map((text) => text.trim())
@@ -332,10 +398,10 @@ export function epicFromBlock(raw, { chapter = 0 } = {}) {
     ...emptyEpic(),
     [EP.title]: sanitize(attrOf(attrs, '标题', 'title'), 60),
     [EP.line]: sanitize(attrOf(attrs, '篇章', '总纲', '纲', 'line'), 400),
-    [EP.movements]: movements.map((text) => sanitize(text, 300)).slice(0, 12),
+    [EP.chapters]: chapters.map((text) => sanitize(text, 400)).slice(0, 24),
+    [EP.climax]: sanitize(attrOf(attrs, '大高潮', '高潮', 'climax'), 120),
     [EP.hooks]: hooks.map((text) => sanitize(text, 200)).slice(0, 8),
     [EP.ledger]: sanitize(attrOf(attrs, '既成事实', '事实', 'ledger'), 600),
-    [EP.stage]: sanitize(attrOf(attrs, '当前进程', '进程', 'stage'), 40),
     [EP.chapter]: Math.max(0, Math.round(Number(chapter) || 0)),
     [EP.updated]: new Date().toISOString(),
   };
