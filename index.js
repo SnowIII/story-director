@@ -30,6 +30,7 @@ import {
     INTERLUDE, IL, emptyInterlude, interludeChapterOf, interludeActive, interludeBeatsOf, interludeBeat,
     EPIC, EP, emptyEpic, epicOf, epicStarted, migrateEpicKeys, epicChapters, epicMovements, epicClimax,
     epicChapterCount, epicFinished, epicHooks, epicChapter, renderEpicSection, epicFromBlock, epicAskText, userAskText,
+    critiqueText,
     TONES, toneOf, toneOptions, toneDirective,
     KEY_BEAT, KEY_BEAT_DONE, KEY_CHAPTER_DONE, KEY_READY, KEY_REVIEW, KEY_REVIEW_NOTE,
     REVIEW_PASS, REVIEW_STATES, REVIEW_MAX_RETRY,
@@ -2339,6 +2340,9 @@ async function buildUserPrompt(task, userText = '', taskOpts = {}) {
     const pinned = pinnedAskText(task);
     if (pinned) blocks.push(`=== 用户钉住的要求（**每一轮都要满足**，与其它规则冲突时以它为准）===\n${pinned}`);
     if (ask) blocks.push(`=== 用户的额外要求（优先满足）===\n${ask}`);
+    // ★ 朱批（用户对上一版的不满）放在用户输入的**最后**：最靠近尾注，模型最容易照它动。
+    //   它由弹窗的「对上一版的朱批」那一栏经 taskOpts 传进来（只影响这一次重生成）。
+    if (taskOpts.critique) blocks.push(String(taskOpts.critique));
     const anti = antiRepeatBlock(task);
     if (anti) blocks.push(anti);
     const tail = {
@@ -2706,6 +2710,9 @@ async function openEpicDialog({ mode = 'establish', entry = 0, diverged = '' } =
     const body = document.createElement('div');
     body.className = 'sd-epic-form';
     const pinnedEpic = String(s.run.epicPin || '').trim();
+    // ★ 朱批只在「确实有上一版可批」时出现：没有旧章表时这一栏没有意义，
+    //   空摆一栏反而让人以为非填不可。
+    const canCritique = epicStarted(epicOf(rootOf())) && epicChapterCount(epicOf(rootOf())) > 0;
     body.innerHTML = `
         <p class="sd-dialog-note">
             <b>篇章 = 一部完整的大故事</b>（有自己的大高潮与终局），由若干「章」组成；
@@ -2718,6 +2725,10 @@ async function openEpicDialog({ mode = 'establish', entry = 0, diverged = '' } =
             <span>你对这条篇章的要求 / 倾向<b>（留空 = 让它自己按角色卡与当前剧情判断）</b></span>
             <textarea data-field="ask" rows="6" placeholder="例如：&#10;· 我想要一条关于「旧账被人翻出来」的线，别搞世界危机&#10;· 主角身边的人至少有一个会背叛，但不要太早&#10;· 结局别是简单的胜利，留一点没解决的东西&#10;· 少写打斗，多写人情与试探">${esc(pinnedEpic)}</textarea>
         </label>
+        ${canCritique ? `<label class="sd-dialog-field">
+            <span>朱批 —— 上一版章表<b>哪里不行</b><b>（只这一次生效；不写 = 没批过）</b></span>
+            <textarea data-field="critique" rows="3" placeholder="例如：&#10;· 跟上一版几乎一样，只换了说法&#10;· 太像世界危机了，我要的是人情账&#10;· 大高潮落得太早，后面几章撑不住"></textarea>
+        </label>` : ''}
         <div class="sd-dialog-row">
             <label class="sd-dialog-field"><span>基调（这条线是什么型的故事）</span>
                 <select data-field="tone">
@@ -2726,7 +2737,8 @@ async function openEpicDialog({ mode = 'establish', entry = 0, diverged = '' } =
             </label>
         </div>
         <p class="sd-dialog-hint">当前基调：${esc(currentTone)}　·　${rebuilding ? '本次是<b>重新定篇章</b>（换一部）' : '本次是<b>按现在的情况重新校准</b>（长线不丢，路线可改）'}<br>
-        💡 <b>「记住它」</b>= 以后每次重生成（包括审查打回、自动换章）都会带上这些要求，不会被覆盖。</p>
+        💡 <b>「记住它」</b>= 以后每次重生成（包括审查打回、自动换章）都会带上这些要求，不会被覆盖。<br>
+        ✍️ <b>朱批只批这一版</b>：想让某条要求往后一直生效，就写在上面「要求」里再按「记住它」。</p>
     `;
 
     const picked = await storyDialog({
@@ -2746,6 +2758,8 @@ async function openEpicDialog({ mode = 'establish', entry = 0, diverged = '' } =
     if (!picked.go) return false;
 
     const ask = String(picked.ask || '').trim() || String(picked.fields?.ask || '').trim();
+    // ★ 朱批：只批这一次，**不进钉住**（它是「上一版哪里不行」，不是长期要求）。
+    const critique = String(picked.fields?.critique || '').trim();
     // 弹窗里改过基调就顺手存下来（提示词会按新基调重写）。
     // ⚠ 只有「按这些要求生成 / 记住它」那条路才会带 fields；「留空」那条没有 —— 所以这里必须用 fields 判断，
     //   不能直接拿 fields?.tone 去算：toneOf(undefined) 会兜底成 'auto'，那会把用户原有的基调悄悄改掉。
@@ -2761,7 +2775,7 @@ async function openEpicDialog({ mode = 'establish', entry = 0, diverged = '' } =
     }
 
     const userText = userAskText(ask, 'epic');
-    void generateEpic({ quiet: false, force: true, mode, entry, diverged, userText });
+    void generateEpic({ quiet: false, force: true, mode, entry, diverged, userText, critique: critiqueText(critique, 'epic') });
     return true;
 }
 
@@ -2773,6 +2787,8 @@ async function openChapterDialog({ regenerate = false } = {}) {
     const s = settings();
     syncChapterPin();                               // 章名变了就先把上一章的钉清掉
     const pinnedChapter = String(s.run.chapterPin || '').trim();
+    // ★ 朱批只在「这一章已经有上一版拍列表」时出现（regenerate = 整章推倒重写，一定有）。
+    const canCritique = regenerate || beatsOf(mainState()).length > 0;
     const body = document.createElement('div');
     body.className = 'sd-chapter-form';
     body.innerHTML = `
@@ -2785,11 +2801,16 @@ async function openChapterDialog({ regenerate = false } = {}) {
             <span>你对这一章的要求 / 倾向<b>（留空 = 让它自己按当前处境判断）</b></span>
             <textarea data-field="ask" rows="6" placeholder="例如：&#10;· 这一章我想让她先发现自己被跟踪，别直接摊牌&#10;· 少写打斗，多写试探和眼神&#10;· 结尾留个钩子，但别把主线谜底揭开&#10;· 让那个配角这次站在她这边">${esc(pinnedChapter)}</textarea>
         </label>
+        ${canCritique ? `<label class="sd-dialog-field">
+            <span>朱批 —— 上一版拍列表<b>哪里不行</b><b>（只这一次生效；不写 = 没批过）</b></span>
+            <textarea data-field="critique" rows="3" placeholder="例如：&#10;· 跟上一版几乎一样，只换了地点和人名&#10;· 第 2 拍就摊牌了，太快，我要慢慢试&#10;· 全是打斗，我要的是人情和试探"></textarea>
+        </label>` : ''}
         <label class="sd-dialog-field"><span>这一章几拍（共 3~6 拍）</span>
             <input data-field="beats" type="number" min="3" max="6" step="1" value="${esc(String(settings().beatTarget))}">
         </label>
         <p class="sd-dialog-hint">${regenerate ? '本次是<b>重新生成本章</b>（整章推倒重写）' : '本次是<b>设计下一章</b>'}　·　只想改后面几拍就用「主线」页的「只重排剩下的拍」。<br>
-        💡 <b>「记住它」</b>= 以后每次重生成（包括正文模型把这一章打回、重排剩下的拍）都会带上这些要求，不会被覆盖。换章后自动失效。</p>
+        💡 <b>「记住它」</b>= 以后每次重生成（包括正文模型把这一章打回、重排剩下的拍）都会带上这些要求，不会被覆盖。换章后自动失效。<br>
+        ✍️ <b>朱批只批这一版</b>：想让某条要求往后一直生效，就写在上面「要求」里再按「记住它」。</p>
     `;
 
     const picked = await storyDialog({
@@ -2809,6 +2830,8 @@ async function openChapterDialog({ regenerate = false } = {}) {
     if (!picked.go) return false;
 
     const ask = String(picked.ask || '').trim() || String(picked.fields?.ask || '').trim();
+    // ★ 朱批：只批这一次，**不进钉住**。
+    const critique = String(picked.fields?.critique || '').trim();
     // 拍数顺手存下来（只有带 fields 的那两条路）
     if (picked.fields && picked.fields.beats !== undefined) {
         const beats = Math.max(BEAT_MIN, Math.min(BEAT_MAX, Math.round(toNumber(picked.fields.beats, settings().beatTarget))));
@@ -2822,7 +2845,7 @@ async function openChapterDialog({ regenerate = false } = {}) {
 
     // ★「重新生成本章」= 用户明确说要推倒重写 → 允许拍号回到 1（restart）。
     //   其它所有路径（审查重排 / 重设计 / 采用 / 自动）都走自动保留，不会把进度打回去。
-    void generateChapter({ quiet: false, regenerate, restart: regenerate, force: true, userText: userAskText(ask, 'chapter') });
+    void generateChapter({ quiet: false, regenerate, restart: regenerate, force: true, userText: userAskText(ask, 'chapter'), critique: critiqueText(critique, 'chapter') });
     return true;
 }
 
@@ -2834,7 +2857,7 @@ async function openChapterDialog({ regenerate = false } = {}) {
  *     · `establish`（定一部**新的**）→ 进度**归零**，章表第 1 条就是"接下来马上要发生的事"；
  *     · `evolve`（按玩家实际做的校准）→ **进度不动**，只改还没写的那几章。
  */
-async function generateEpic({ quiet = true, userText = '', force = false, mode = 'establish', diverged = '', entry = 0 } = {}) {
+async function generateEpic({ quiet = true, userText = '', force = false, mode = 'establish', diverged = '', entry = 0, critique = '' } = {}) {
     if (!mvu()?.getMvuData) {
         if (!quiet) toast('MVU 未加载：先确认酒馆助手与 MVU 装好了、这个聊天有变量。', 'warning');
         return false;
@@ -2856,7 +2879,7 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
     try {
         const raw = await askOracle({
             task: 'epic',
-            taskOpts: { replacingEpic: mode === 'establish' },
+            taskOpts: { replacingEpic: mode === 'establish', critique },
             ephemeralSystem: buildEpicSystemPrompt({
                 mode,
                 diverged,
@@ -2898,7 +2921,7 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
 /**
  * 生成新的一章主线（面板按钮 / 自动开章 / 重排剩余拍共用）。keep>0 时保留前 keep 拍不动。
  */
-async function generateChapter({ quiet = true, regenerate = false, rejected = null, userText = '', force = false, keep = undefined, restart = false } = {}) {
+async function generateChapter({ quiet = true, regenerate = false, rejected = null, userText = '', force = false, keep = undefined, restart = false, critique = '' } = {}) {
     // ★ 先把 keep 归一成**明确的数字**，后面所有判断与落盘都用它。
     //   undefined = 自动：保住这一章已经演过的拍，新拍接在后面（默认行为，防「重生成把进度打回第 1 拍」）；
     //   0 / restart: true = 整章重来；
@@ -2933,6 +2956,8 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
             remaining: remainingBeatBudget(keep, settings().beatTarget),
             quiet,
             userText,
+            // ★ 朱批只影响这一次重生成（不进钉住、不落盘）。
+            taskOpts: { critique },
         });
         if (raw === null) { markFailed(key); return false; }
         if (origin && chatKey() !== origin) {
