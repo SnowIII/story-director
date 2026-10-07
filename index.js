@@ -167,6 +167,8 @@ const TOKEN_PULL = [
     `${INTERLUDE}.${IL.done}`,
     `${INTERLUDE}.${IL.ready}`,
 ];
+// ⚠ `当前拍` **只推不拉**：换拍节奏归插件（受 minReplies 控制）。模型自己把拍号加一
+//   就等于绕过刹车 —— 用户报的「推得太快」有一半是这条路（见 CHANGELOG 0.26.1）。
 const TOKEN_PUSH = [
     ...TOKEN_PULL,
     `${MAIN_SECTION}.${KEY_BEAT}`,
@@ -270,8 +272,12 @@ const DEFAULT = {
     autoCooldown: 3,
     chapterGap: 4,
     threadWarmup: 3,
-    /** 一拍至少演多少轮才允许换拍（防连跳）。 */
-    minReplies: 1,
+    /**
+     * 一拍至少演多少轮才允许换拍（防连跳）。
+     * ★ 0.26.1：默认从 1 提到 **2** —— 1 等于没有刹车（一拍一轮，读者会觉得「推得太快」）。
+     *   想更慢就调到 3~4；这是**唯一的换拍刹车**，模型自己改拍号已经不算数（见 TOKEN_PULL 的注释）。
+     */
+    minReplies: 2,
     /** 两次「重排剩下的拍」之间至少隔几轮（防连着重生成，烧 token 也把剧情搅乱）。 */
     redesignGap: 3,
 
@@ -4582,7 +4588,7 @@ function renderSetTab() {
             <div class="sd-row">
                 <label class="sd-field"><span>每多少轮加一条支线</span><input name="thread-every" type="number" min="1" max="200" step="1"></label>
                 <label class="sd-field"><span>每多少轮加一条插曲</span><input name="interlude-every" type="number" min="1" max="200" step="1"></label>
-                <label class="sd-field"><span>换拍最小间隔（轮）</span><input name="min-replies" type="number" min="0" max="20" step="1"></label>
+                <label class="sd-field"><span>一拍至少演几轮才允许换拍（<b>想慢就调大</b>；1 = 不刹车）</span><input name="min-replies" type="number" min="0" max="20" step="1"></label>
             </div>
             <p class="sd-sub">下面这三项是「不要一直生成」的总闸门：</p>
             <div class="sd-row">
@@ -5005,7 +5011,22 @@ async function forceOpenStory() {
  */
 async function migrateLegacyKeysBothScopes({ notify = false } = {}) {
     const api = mvu();
-    const report = { story: null, message: null, chat: null, changed: false };
+    const report = { story: null, message: null, chat: null, pace: null, changed: false };
+    // ③′ 换拍刹车：0.26.1 之前默认 `minReplies = 1`（一拍一轮 = 没有刹车）。老存档里存着那个 1，
+    //    光改默认值影响不到他们 —— 所以一次性提到 2（只做一次，之后用户自己调回 1 也不会再被改）。
+    {
+        const s = settings();
+        if (!s.paceFixed) {
+            s.paceFixed = true;
+            if (Math.round(toNumber(s.minReplies, 1)) <= 1) {
+                s.minReplies = 2;
+                report.pace = { from: 1, to: 2 };
+                report.changed = true;
+                console.info('[故事导演] 换拍刹车已调到「一拍至少演 2 轮」（想更慢就去设定页调大）。');
+            }
+            save();
+        }
+    }
     // ① 插件侧的计划（真正在用的那一份）
     try {
         const r = migrateEpicKeys(storyNs());
