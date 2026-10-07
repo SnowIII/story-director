@@ -2745,6 +2745,19 @@ async function generateInterludeChapter({ quiet = true, userText = '', force = f
 }
 
 /**
+ * 两个生成弹窗**共用**的尾部提示 —— 避免同一句话在两处一字不差地抄一遍。
+ *
+ * 弹窗是一次只出现一个的，所以它们各自必须自解释；但「这句话本身」只该有一个出处：
+ *   · `pinHint(scope)` —— 「记住它」= 钉住这次填的要求，之后**插件自己触发**的重生成也不会丢；
+ *     括号里那句是各自的情形（篇章跟到换一部、章节换章就失效），所以由调用方给；
+ *   · `CRITIQUE_HINT` —— 朱批是**一次性的**，想长期生效就写进「要求」再按「记住它」。
+ */
+function pinHint(scope) {
+    return `💡 <b>「记住它」</b>= 以后每次重生成（${scope}）都会带上这些要求，不会被覆盖。`;
+}
+const CRITIQUE_HINT = '✍️ <b>朱批只批这一版</b>：想让某条要求往后一直生效，就写在上面「要求」里再按「记住它」。';
+
+/**
  * 「手动定篇章」弹窗：让用户先说说她想要什么样的篇章，留空就走默认。
  *
  * 返回 true = 已经发起生成；false = 用户取消了。
@@ -2784,8 +2797,8 @@ async function openEpicDialog({ mode = 'establish', entry = 0, diverged = '' } =
             </label>
         </div>
         <p class="sd-dialog-hint">当前基调：${esc(currentTone)}　·　${rebuilding ? '本次是<b>重新定篇章</b>（换一部）' : '本次是<b>按现在的情况重新校准</b>（长线不丢，路线可改）'}<br>
-        💡 <b>「记住它」</b>= 以后每次重生成（包括审查打回、自动换章）都会带上这些要求，不会被覆盖。<br>
-        ✍️ <b>朱批只批这一版</b>：想让某条要求往后一直生效，就写在上面「要求」里再按「记住它」。</p>
+        ${pinHint('包括审查打回、自动换章')}<br>
+        ${CRITIQUE_HINT}</p>
     `;
 
     const picked = await storyDialog({
@@ -2856,8 +2869,8 @@ async function openChapterDialog({ regenerate = false } = {}) {
             <input data-field="beats" type="number" min="3" max="6" step="1" value="${esc(String(settings().beatTarget))}">
         </label>
         <p class="sd-dialog-hint">${regenerate ? '本次是<b>重新生成本章</b>（整章推倒重写）' : '本次是<b>设计下一章</b>'}　·　只想改后面几拍就用「主线」页的「只重排剩下的拍」。<br>
-        💡 <b>「记住它」</b>= 以后每次重生成（包括正文模型把这一章打回、重排剩下的拍）都会带上这些要求，不会被覆盖。换章后自动失效。<br>
-        ✍️ <b>朱批只批这一版</b>：想让某条要求往后一直生效，就写在上面「要求」里再按「记住它」。</p>
+        ${pinHint('包括正文模型把这一章打回、重排剩下的拍')}换章后自动失效。<br>
+        ${CRITIQUE_HINT}</p>
     `;
 
     const picked = await storyDialog({
@@ -4059,25 +4072,22 @@ function renderNowTab() {
                     return `<li class="sd-beat ${index + 1 === ilBeat ? 'is-now' : ''}">${esc(`${mark} ${index + 1}. ${text}`)}</li>`;
                 }).join('')
                 : '<li class="sd-empty">这段间章还没有日常画面。</li>'}</ul>
-            <p class="sd-note">间章**不要求跑完**：这些只是日常素材，谁都可以跳过。你在正文里写到合适的地方，模型会报「可回主线」，插件随即接着开主线的新一章。</p>
             <div class="sd-row">
-                <button type="button" class="sd-btn sd-regen-interlude">换一段间章</button>
-                <button type="button" class="sd-btn sd-end-interlude">现在回主线</button>
-                <button type="button" class="sd-btn sd-next-ilbeat">手动推进一个画面</button>
+                <button type="button" class="sd-btn sd-regen-interlude" title="换一批日常素材（当前这段作废）">换一段间章</button>
+                <button type="button" class="sd-btn sd-end-interlude" title="现在收掉间章，接着开主线的新一章">现在回主线</button>
+                <button type="button" class="sd-btn sd-next-ilbeat" title="模型忘了写「这个画面演过了」时，手动推进一个">手动推进一个画面</button>
             </div>` : `
             ${arc ? `<p class="sd-sub">${esc(arc)}</p>` : ''}
             ${goal ? `<p class="sd-line"><b>章目标</b>${esc(goal)}</p>` : ''}
             ${scope ? `<p class="sd-line sd-dim"><b>范围</b>${esc(scope)}</p>` : ''}
             <ul class="sd-beats">${beatRows}</ul>
             <div class="sd-row">
-                <button type="button" class="sd-btn sd-generate-chapter">${title ? '重新生成本章' : '设计下一章'}</button>
-                <button type="button" class="sd-btn sd-force-open">立刻开篇</button>
-                <button type="button" class="sd-btn sd-next-beat">手动推进一拍</button>
-                <button type="button" class="sd-btn sd-finish-chapter">本章收尾</button>
-                <button type="button" class="sd-btn sd-start-interlude">开一段间章</button>
-            </div>
-            <p class="sd-note">「重新生成本章」会按**当前处境**重写整章的拍；只想改后面几拍就用「主线」页的「只重排剩下的拍」。「手动推进一拍」用于正文模型忘了写回报时的手动纠偏。<br>
-            主线收尾后，**间隙会自动交给「间章」**（演日常、顺手埋伏笔），而不是让场子空着等新章 —— 你可以随时手动「开一段间章」。</p>`}
+                <button type="button" class="sd-btn sd-generate-chapter" title="${title ? '按当前处境重写整章的拍（拍号会回到第 1 拍）' : '按当前处境设计下一章的拍列表'}">${title ? '重新生成本章' : '设计下一章'}</button>
+                <button type="button" class="sd-btn sd-force-open" title="跳过等待，现在就定篇章 + 开第一章">立刻开篇</button>
+                <button type="button" class="sd-btn sd-next-beat" title="正文模型忘了写「本拍已落」时，手动把它推进一拍">手动推进一拍</button>
+                <button type="button" class="sd-btn sd-finish-chapter" title="这一章演够了：标成收尾，之后自动换章或进间章">本章收尾</button>
+                <button type="button" class="sd-btn sd-start-interlude" title="主线收尾后的间隙演一段日常（不要求跑完）">开一段间章</button>
+            </div>`}
         </div>
         <div class="sd-card">
             <div class="sd-card-head"><span class="sd-card-title">支线</span><span class="sd-chip">${threads.length} 条在演</span></div>
@@ -4172,10 +4182,10 @@ function renderMainTab() {
             <label class="sd-field"><span>拍（一行一拍，<code>1. …</code> 起头）</span><textarea name="main-beats" rows="8">${esc(beats.map((text, index) => `${index + 1}. ${text}`).join('\n'))}</textarea></label>
             <div class="sd-row">
                 <button type="button" class="sd-btn sd-save-main">保存这一章</button>
-                <button type="button" class="sd-btn sd-generate-chapter">重新生成本章</button>
-                <button type="button" class="sd-btn sd-regen-rest">只重排剩下的拍</button>
+                <button type="button" class="sd-btn sd-generate-chapter" title="按当前处境重写整章的拍 —— 拍号会回到第 1 拍">重新生成本章</button>
+                <button type="button" class="sd-btn sd-regen-rest" title="不动已经演过的拍，只把第 ${currentBeat(main)} 拍起的剩余内容重新设计">只重排剩下的拍</button>
             </div>
-            <p class="sd-note">「只重排剩下的拍」不会动已经演过的部分：它把第 ${currentBeat(main)} 拍起的剩余内容交给神谕重新设计（因为它报了这一拍在当前场景里站不住时最有用）。</p>
+            <p class="sd-note">⚠ <b>重新生成本章</b>会把拍号退回第 1 拍（整章重演）；只想改后面几拍就用<b>只重排剩下的拍</b>。</p>
         </div>
         <div class="sd-card">
             <div class="sd-card-head"><span class="sd-card-title">节奏</span></div>
@@ -4309,8 +4319,9 @@ function renderSetTab() {
                 <label class="sd-field"><span>开间章前再等几轮（余波）</span><input name="interlude-gap" type="number" min="0" max="30" step="1"></label>
                 <label class="sd-field"><span>一段间章最多几个日常画面</span><input name="interlude-beats" type="number" min="1" max="6" step="1"></label>
             </div>
-            <p class="sd-note">「自动导演」关掉后，插件不再自己调模型，但注入与变量回报照常工作——你可以只在需要时点按钮。<b>每次自动生成都是一次真实的模型调用</b>，节奏调太密会费 token。<br>
-            一轮 = 一条 AI 回复；挂机不影响节奏（不看墙钟）。「任意两次生成的最小间隔」跨线生效：支线与插曲不会在同一轮里一起冒出来。想知道下一次什么时候能生成，看「当前」页的导演状态卡片。</p>
+            <p class="sd-note"><b>总开关</b>关掉后，插件不再自己调模型，但注入与变量回报照常 —— 你可以只在需要时点按钮。
+            每次自动生成都是一次真实的模型调用，节奏调太密会费 token。<br>
+            一轮 = 一条 AI 回复（不看墙钟）；「任意两次生成的最小间隔」跨线生效。下一次什么时候能生成，看「当前」页的导演状态。</p>
         </div>
         <div class="sd-card">
             <div class="sd-card-head"><span class="sd-card-title">注入</span></div>
@@ -4338,9 +4349,8 @@ function renderSetTab() {
             <label class="sd-switch"><input name="auto-epic" type="checkbox"> <b>自动定篇章</b>（先有一部完整的大故事，再开第一章）</label>
             <label class="sd-switch"><input name="evolve-epic" type="checkbox"> 每开新章前按「他实际做了什么」重新校准篇章</label>
             <label class="sd-field"><span>一个篇章写几章（1~12；写满这一部就收尾、换新的一部）</span><input name="chapters-per-epic" type="number" min="1" max="12" step="1" value="${esc(String(chaptersPerEpic()))}"></label>
-            <p class="sd-note">篇章是主线不平淡的关键：<b>一部完整的篇章 = 若干各自完整的小章</b>，每一章再由主线细化成拍。
-            章数决定这一部多大：4 章左右最稳（太短撑不起大高潮，太长会松散）。<br>
-            第一项定篇章花一次调用；第二项每开一章多花一次调用（但能跟住你的偏离——你随时可能不按剧本走）。两项都关掉时，主线就退回逐章续写。</p>
+            <p class="sd-note">章数决定这一部多大：4 章左右最稳（太短撑不起大高潮，太长会松散）。<br>
+            第一项定篇章花一次调用；第二项每开一章多花一次调用。两项都关掉时，主线就退回逐章续写。</p>
             <label class="sd-field"><span>世界书档位（影响这本世界书在酒馆里的注入）</span><select name="book-mode">
                 ${Object.entries(BOOK_MODES).map(([key, item]) => `<option value="${key}">${esc(item.label)}</option>`).join('')}
             </select></label>
@@ -4949,12 +4959,8 @@ function renderEpicTab() {
             <label class="sd-field"><span>基调（决定这部大故事是什么型的故事；由你选，不由模型判断）</span><select name="tone">
                 ${toneOptions().map((item) => `<option value="${esc(item.value)}" ${toneOf(s.tone) === item.value ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}
             </select></label>
-            <p class="sd-note"><b>篇章</b>是一部完整的大故事：它说清<b>在争什么</b>、<b>由哪几章组成</b>、<b>大高潮落在哪一章</b>；
-            每一章自己也是一个完整的小故事，再交给<b>主线</b>细化成拍。<br>
-            写的东西都是「围绕他会发生什么」，<b>不写他会怎么做</b> —— 他中途走出剧本是常态，
-            插件会在开新章之前按他实际做的事<b>改掉还没写的那几章</b>。<br>
-            基调会作为**最高优先级的创作方针**给到篇章与每一章：选「冒险」就允许远行、险境、突围；
-            选「日常」就明确不要大事件，张力来自关系的小位移。换基调之后点一次「重新定篇章（换一部）」才会按新基调重写。</p>
+            <p class="sd-note"><b>基调</b>是给篇章与每一章的最高优先级创作方针；换完要点一次「重新定篇章（换一部）」才生效。
+            这里的<b>章表 / 大高潮 / 伏笔</b>都可以手改 —— 每行一章，<b>✔ 已写 · ▶ 正在写 · · 还没写</b>。</p>
             ${started ? `
                 <label class="sd-field"><span>标题</span><input name="epic-title" value="${esc(String(unwrap(epic[EP.title]) ?? ''))}"></label>
                 <label class="sd-field"><span>篇章（两三句，说清在争什么）</span><textarea name="epic-line" rows="3">${esc(String(unwrap(epic[EP.line]) ?? ''))}</textarea></label>
