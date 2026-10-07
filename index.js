@@ -4157,6 +4157,9 @@ function renderSetTab() {
                 <button type="button" class="sd-btn sd-mount-book">挂载到全局世界书</button>
                 <button type="button" class="sd-btn sd-refresh-book">刷新列表</button>
             </div>
+            <p class="sd-note"><b>老存档的字段名</b>：0.21.1 之前长线那一句在变量里叫「总纲」，现在叫「篇章」。
+            插件会自动迁移（两个存放位置都过一遍）；要是变量面板上还写着「总纲」，点一下右下角这个按钮。</p>
+            <div class="sd-row"><button type="button" class="sd-btn sd-migrate-keys">把老字段名「总纲」改成「篇章」</button></div>
             <div class="sd-card" style="margin-top:8px">
                 <div class="sd-card-head"><span class="sd-card-title">故事神谕兼容性</span></div>
                 <p class="sd-note sd-oracle-compat"></p>
@@ -4239,6 +4242,9 @@ function renderSetTab() {
         setGlobalBook(PLUGIN_WORLD, true);
         toast('已把世界书「' + PLUGIN_WORLD + '」挂到全局世界书。', 'success');
         render();
+    });
+    host.querySelector('.sd-migrate-keys')?.addEventListener('click', () => {
+        void migrateLegacyKeysBothScopes({ notify: true });
     });
     const compatNode = host.querySelector('.sd-oracle-compat');
     if (compatNode) {
@@ -4459,8 +4465,56 @@ async function forceOpenStory() {
 }
 
 /**
+ * 把老存档的旧字段名（`史诗.总纲`）改掉 —— **两个存放位置都过一遍**。
+ *
+ * MVU 的 `getMvuData/replaceMvuData` 支持 `type: 'message'`（当前楼层）与 `type: 'chat'`（聊天级）。
+ * 我们平时只写 message，但**前端那个变量查看器读的是哪一份不好保证** ——
+ * 用户报的正是「代码改了、前端上还写着总纲」。所以迁移时两处都查：
+ * 哪一处没有、或者已经是新名字，就跳过（纯函数本身幂等），不会写着玩。
+ *
+ * @returns {Promise<{message: object|null, chat: object|null, changed: boolean}>}
+ */
+async function migrateLegacyKeysBothScopes({ notify = false } = {}) {
+    const api = mvu();
+    const report = { message: null, chat: null, changed: false };
+    if (typeof api?.getMvuData !== 'function' || typeof api?.replaceMvuData !== 'function') {
+        if (notify) toast('MVU 没加载，改不了字段名。', 'warning');
+        return report;
+    }
+    for (const [label, opts] of [['message', { type: 'message', message_id: 'latest' }], ['chat', { type: 'chat' }]]) {
+        try {
+            const d = api.getMvuData(opts);
+            const ns = d?.stat_data?.[NS];
+            if (!isPlainObject(ns)) continue;
+            const r = migrateEpicKeys(ns);
+            if (!r.changed) { report[label] = r; continue; }
+            await api.replaceMvuData(d, opts);
+            report[label] = r;
+            report.changed = true;
+        } catch (error) {
+            console.debug(`[故事导演] 迁移「${label}」作用域的字段名失败`, error);
+        }
+    }
+    if (report.changed) {
+        syncMainInjection();
+        if (panel && !panel.hidden) render();
+    }
+    if (notify) {
+        const done = Object.entries(report)
+            .filter(([k, v]) => k !== 'changed' && v?.changed)
+            .map(([k, v]) => `${k === 'message' ? '当前楼层' : '聊天级'}${v.renamed ? '（总纲 → 篇章）' : '（清掉旧键）'}`);
+        toast(done.length
+            ? `老字段名已迁移：${done.join('；')}。刷新变量面板就能看到。`
+            : '没有需要迁移的旧字段 —— 两处都已经是「篇章」了。', done.length ? 'success' : 'info');
+        console.info('[故事导演] 字段名迁移结果', report);
+    }
+    return report;
+}
+
+/**
  * 排查用入口：`window.__storyDirector.why()` 会告诉你**现在为什么还没有开篇 / 卡在哪**。
  * 只读，不改任何状态 —— 面版里的说明与它是同一份逻辑。
+ * `migrate()` 是唯一的写操作：把老存档的 `总纲` 改成 `篇章`（两个存放位置都过一遍）。
  */
 function exposeDiagnostics() {
     try {
@@ -4469,6 +4523,11 @@ function exposeDiagnostics() {
             why: () => firstChapterBlocker(),
             oracle: () => oracleCompatReport(),
             forceOpen: () => forceOpenStory(),   // 排查用：立刻走一遍「定篇章 + 开章」全路径
+            migrate: () => migrateLegacyKeysBothScopes({ notify: true }),   // 老存档字段名迁移（见 0.21.1/0.21.2）
+            epicKeys: () => {
+                const box = epicOf(rootOf()) ?? {};
+                return { 内存里读到的键: Object.keys(box), 说明: '「篇章」是新名字；「总纲」是旧名字（只读兼容用，不该再出现在变量里）' };
+            },
             state: () => {
                 const main = mainState();
                 const chapter = interludeChapterOf(rootOf());
@@ -4861,6 +4920,8 @@ function init() {
             });
         }
         await ensureNamespace();
+        // ★ 老存档的旧字段名（`史诗.总纲`）改掉 —— 两个存放位置都过一遍（见 0.21.1 的事故说明）。
+        void migrateLegacyKeysBothScopes();
         syncMainInjection();
         if (!panel.hidden) render();
         void evaluateDirector();
