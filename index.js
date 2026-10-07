@@ -287,6 +287,21 @@ const DEFAULT = {
     run: {
         chatId: '',
         /**
+         * ★ **就位基准**：插件开始管这个聊天时的 AI 回复数。
+         *
+         * 为什么非要有它（0.24.0 的真事故）：所有「聊满 N 轮才动手」的判断原来都直接拿
+         * `aiMessageCount()` 去比 —— 那是**整个聊天的历史**。于是切进任何一个老聊天
+         * （几百楼），「聊满 2 轮」立刻成立 → 先烧一次神谕定篇章，再烧一次开第一章。
+         * 用户报的正是这个：「一切到别的聊天先生了个总纲，造成不必要的浪费」。
+         *
+         * 现在一律算 `count - armedAt`：**从插件接管这个聊天的那一刻起**才数轮数。
+         * 什么时候（重新）就位 —— `armedAt = 当时的回复数`：
+         *   · 插件第一次见到这个聊天（切片新建，见 ensureChatSlice）；
+         *   · 老存档 / 老切片还没播过基准（见 evaluateDirector）；
+         *   · 用户把总开关从关拨到开（见 toggleMaster）。
+         */
+        armedAt: null,
+        /**
          * 当前是哪种「幕」：'main' = 主线章，'interlude' = 间章。
          * ⚠ 真正的判据是 MVU 里的 `间章.进行中`（见 currentMode()，切换聊天天然正确）；
          * 这里这份只是给人看的 / 老存档兼容，不参与判断。
@@ -414,6 +429,33 @@ function aiMessageCount() {
     } catch { return 0; }
 }
 
+/** 这份切片还没播过就位基准？（老存档 / 老版本留下的切片） */
+function needsArming(rt = settings().run) {
+    const at = rt?.armedAt;
+    return at === null || at === undefined || at === '' || !Number.isFinite(Number(at));
+}
+
+/**
+ * ★ 「这个聊天从插件接管算起，聊了几轮」（见 `run.armedAt`）。
+ *
+ * 所有**自动开篇类**的判断都必须用它，不许直接拿 `aiMessageCount()` ——
+ * 后者是整个聊天的历史，切进一个几百楼的老聊天时「聊满 2 轮」会立刻成立，
+ * 于是白烧一次定篇章 + 一次开章。
+ *
+ * 还没播过基准（老存档）→ 回 0：等于「刚刚就位」，先别动手；
+ * evaluateDirector 会顺手把基准补上，所以最多只多等一两轮。
+ */
+function roundsSinceArmed(rt = settings().run) {
+    if (needsArming(rt)) return 0;
+    return Math.max(0, aiMessageCount() - Math.round(Number(rt.armedAt)));
+}
+
+/** 播下 / 重播「就位基准」—— 等于宣布「从现在起重新数轮数」（见 `run.armedAt`）。 */
+function armNow(rt = settings().run) {
+    if (!isPlainObject(rt)) return;
+    rt.armedAt = aiMessageCount();
+}
+
 /**
  * 每份「随聊天走」的插件状态：运行游标 + 章节史（跨刷新不丢、绝不串台）。
  * 模型侧的剧情状态住在 MVU 里，这里只放插件自己的记账。
@@ -441,7 +483,12 @@ function ensureChatSlice(s) {
     if (s.chatSliceKey === key) return false;
     if (!isPlainObject(s.chats)) s.chats = {};
     if (s.chatSliceKey) s.chats[s.chatSliceKey] = sliceFromSettings(s);
-    if (!isPlainObject(s.chats[key])) s.chats[key] = JSON.parse(JSON.stringify({ run: DEFAULT.run, chapters: {} }));
+    if (!isPlainObject(s.chats[key])) {
+        s.chats[key] = JSON.parse(JSON.stringify({ run: DEFAULT.run, chapters: {} }));
+        // ★ 第一次见到这个聊天 → 立刻播下「就位基准」（见 run.armedAt）：
+        //   所有「聊满 N 轮才动手」都从这一刻算起，而不是拿整个聊天的历史条数。
+        armNow(s.chats[key].run);
+    }
     applySliceToSettings(s, s.chats[key]);
     s.chatSliceKey = key;
     // 只留最近 24 份，免得设置文件无限膨胀
@@ -3075,7 +3122,10 @@ function mainStarted(live = null) {
  */
 async function handleBeatReview({ live = null } = {}) {
     const s = settings();
-    if (!s.autoRedesign) return false;
+    // ★ 总开关关着 = 「只手动生成与采用」（见 DEFAULT.autoDirector 的说明）——
+    //   审查上的重排 / 废章重建同样是**插件自己调模型**，必须一起停。
+    //   ⚠ 以前这里只看 autoRedesign，总闸关了它照样在重排 —— 做总开关时顺手审计出来的漏网之鱼。
+    if (!s.autoDirector || !s.autoRedesign) return false;
     const main = mainState(live);
     const state = reviewStateOf(main);
     if (state === REVIEW_PASS) {
@@ -3188,18 +3238,24 @@ function firstChapterBlocker({ live = null } = {}) {
     const s = settings();
     const rt = s.run;
     const count = aiMessageCount();
+    const rounds = roundsSinceArmed(rt);
     if (!s.enabled) return { key: 'plugin-off', text: '插件已停用（扩展列表里重新启用）' };
     if (!mvu()) return { key: 'no-mvu', text: 'MVU 没加载：先确认酒馆助手与 MVU 装好了' };
     if (!namespaceOf(rootOf(live))) return { key: 'no-namespace', text: '这个聊天还没有 MVU 变量：先和角色聊一句' };
-    if (!s.autoDirector) return { key: 'director-off', text: '「自动导演总闸」是关着的 —— 去「设定」页打开，或点下面的「设计下一章」' };
+    if (!s.autoDirector) return { key: 'director-off', text: '「总开关」是关着的 —— 点面板顶上的 ⏻ 打开，或点下面的「设计下一章」手动开' };
     if (typeof oracleApi()?.run !== 'function') {
         return { key: 'no-oracle', text: '读不到「故事神谕」的模型连接 —— 确认故事神谕已安装并启用（版本要 1.21 以上，且它的 Hook API 没被关掉）' };
     }
-    if (s.autoEpic && !epicStarted(epicOf(rootOf(live))) && Math.round(toNumber(rt.epicTries, 0)) < 3 && count >= 2) {
+    if (s.autoEpic && !epicStarted(epicOf(rootOf(live))) && Math.round(toNumber(rt.epicTries, 0)) < 3 && rounds >= 2) {
         return { key: 'epic-pending', text: '正在定篇章（定篇章完成或失败 3 次之后就会开第一章）' };
     }
     if (!s.autoChapter) return { key: 'chapter-off', text: '「自动换章」是关着的 —— 打开它，或点下面的「设计下一章」' };
-    if (count < 3) return { key: 'too-few-rounds', text: `这个聊天才 ${count} 轮 AI 回复，聊满 3 轮才会自动开第一章` };
+    if (rounds < 3) {
+        return {
+            key: 'too-few-rounds',
+            text: `这个聊天从插件接管算起才 ${rounds} 轮 AI 回复，聊满 3 轮才会自动开第一章（在此之前不会调模型花钱）`,
+        };
+    }
     const opened = Math.round(toNumber(rt.chapterOpenedAt, 0));
     if (opened && count - opened < 3) return { key: 'epic-gap', text: `再聊 ${3 - (count - opened)} 轮就会开第一章` };
     if (blockedByCooldown(s, count, rt)) return { key: 'cooldown', text: '生成冷却中：再等一两轮就会自己开第一章' };
@@ -3247,8 +3303,17 @@ async function evaluateDirector({ live = null } = {}) {
         if (s.run.chatId !== key) {
             s.run = JSON.parse(JSON.stringify(DEFAULT.run));
             s.run.chatId = key;
+            // ★ 顺手把引用接回去：`applySliceToSettings` 是**同一个对象**（不是克隆），
+            //   上面这行克隆会把切片与前台的联系打断 —— 不接回去，本次会话推进的游标
+            //   （beatAt / threadAt / armedAt …）就只活在前台，一刷新被旧切片盖掉。
+            if (isPlainObject(s.chats)) s.chats[key] = { run: s.run, chapters: s.chapters };
             save();
         }
+
+        // ★ 就位基准（见 run.armedAt）：老存档 / 老版本留下的切片还没播过，就**现在**播 ——
+        //   等于「从这一刻起开始数轮数」，所以升级后不会因为历史几百楼而立刻开篇。
+        //   ⚠ 只在**没播过**时播：每轮都重播的话，`count - armedAt` 永远是 0，插件就再也不动手了。
+        if (needsArming(s.run)) { armNow(s.run); save(); }
 
         // ★ 回退聊天（重新生成 / 删楼 / 换 swipe）会让回复数变少，把「按回复数记账」的游标修回来。
         //   必须放在**任何冷却判断之前** —— 否则冷却会因为差值为负而永久卡死。
@@ -3387,7 +3452,9 @@ async function evaluateDirector({ live = null } = {}) {
                 }
             }
             // ③ 还没定篇章：这是万事的前提，**不该被生成冷却卡住**（卡住就等于整个插件不动）
-            if (!epicStarted(epic) && canTryEpic && count >= 2) {
+            //   ⚠ 「聊满 2 轮」算的是 `count - armedAt`（就位基准），不是整个聊天的历史条数 ——
+            //     否则切进一个几百楼的老聊天时它立刻成立，一进去就烧一次神谕（用户报的就是这个）。
+            if (!epicStarted(epic) && canTryEpic && roundsSinceArmed(rt) >= 2) {
                 rt.epicTries = tries + 1;
                 markPending(`epic:${chatKey()}`);
                 save();
@@ -3906,7 +3973,7 @@ function busyChip() {
  */
 function pacingHint() {
     const s = settings();
-    if (!s.autoDirector) return '自动导演已暂停：不会自己调模型，注入与手动按钮照常。';
+    if (!s.autoDirector) return '总开关是关着的（面板顶上那个 ⏻）：不会自己调模型；注入与手动按钮照常。';
     const rt = s.run;
     const count = aiMessageCount();
     const cooldown = Math.max(0, Math.round(toNumber(s.autoCooldown, 3)));
@@ -3919,7 +3986,10 @@ function pacingHint() {
     const main = mainState();
     const beats = beatsOf(main);
     if (!beats.length) {
-        bits.push(count < 3 ? `再聊 ${3 - count} 轮开第一章` : '下一次心跳就开第一章');
+        // ★ 这里的「几轮」也要从就位基准算起 —— 用全聊天历史会让提示说「下一次心跳就开第一章」，
+        //   而实际上插件刚接管这个聊天、还想再看两轮。
+        const rounds = roundsSinceArmed(rt);
+        bits.push(rounds < 3 ? `从接管算起再聊 ${3 - rounds} 轮开第一章` : '下一次心跳就开第一章');
     } else if (currentMode() === 'interlude') {
         bits.push('现在在间章：演到你满意就收（模型会报「可回主线」），主线随时可以接上');
     } else if (currentBeat(main) > beats.length && truthy(main[KEY_CHAPTER_DONE])) {
@@ -4029,7 +4099,7 @@ function renderNowTab() {
             <div class="sd-card-head"><span class="sd-card-title">导演状态</span></div>
             <div class="sd-chips">
                 ${busyChip()}
-                ${statusChip(!!s.autoDirector, s.autoDirector ? '自动推进' : '已暂停')}
+                ${statusChip(!!s.autoDirector, s.autoDirector ? '总开关：开' : '总开关：关')}
                 ${statusChip(!!mvu(), mvu() ? 'MVU 就绪' : 'MVU 未加载')}
                 ${statusChip(typeof oracleApi()?.run === 'function', typeof oracleApi()?.run === 'function' ? '神谕可用' : '神谕不可用')}
                 ${statusChip(isGlobalBookEnabled(PLUGIN_WORLD), isGlobalBookEnabled(PLUGIN_WORLD) ? '世界书已挂载' : '世界书未挂载')}
@@ -4037,7 +4107,7 @@ function renderNowTab() {
             ${history.length ? `<p class="sd-note">已经走过的章：${esc(history.join(' → '))}</p>` : ''}
             <p class="sd-note sd-pacing">${esc(pacingHint())}</p>
             <div class="sd-row">
-                <button type="button" class="sd-btn sd-toggle-director">${s.autoDirector ? '暂停自动导演' : '继续自动导演'}</button>
+                <button type="button" class="sd-btn sd-toggle-director">${s.autoDirector ? '关掉总开关' : '打开总开关'}</button>
                 <button type="button" class="sd-btn sd-clear-story">清空这个故事</button>
             </div>
         </div>
@@ -4068,12 +4138,7 @@ function renderNowTab() {
     });
     host.querySelector('.sd-manage-thread')?.addEventListener('click', () => { settings().tab = 'side'; save(); render(); });
     host.querySelector('.sd-manage-interlude')?.addEventListener('click', () => { settings().tab = 'side'; save(); render(); });
-    host.querySelector('.sd-toggle-director')?.addEventListener('click', () => {
-        settings().autoDirector = !settings().autoDirector;
-        save();
-        syncMainInjection();
-        render();
-    });
+    host.querySelector('.sd-toggle-director')?.addEventListener('click', () => { toggleMaster(); });
     host.querySelector('.sd-clear-story')?.addEventListener('click', () => { void clearStory(); });
     host.querySelector('.sd-start-interlude')?.addEventListener('click', () => {
         void generateInterludeChapter({ quiet: false, force: true });
@@ -4217,7 +4282,7 @@ function renderSetTab() {
     host.innerHTML = `
         <div class="sd-card">
             <div class="sd-card-head"><span class="sd-card-title">自动化</span></div>
-            <label class="sd-switch"><input name="auto-director" type="checkbox"> 自动导演总闸（关掉＝只手动生成与采用）</label>
+            <label class="sd-switch"><input name="auto-director" type="checkbox"> <b>总开关</b>（面板顶上的 ⏻，关掉＝只手动生成与采用，插件不再自己调模型）</label>
             <label class="sd-switch"><input name="auto-beat" type="checkbox"> 自动换拍（当前拍落了就进入下一拍）</label>
             <label class="sd-switch"><input name="auto-chapter" type="checkbox"> 自动换章（章目标达成后请神谕开下一章）</label>
             <label class="sd-switch"><input name="auto-thread" type="checkbox"> 自动续支线</label>
@@ -4316,8 +4381,12 @@ function renderSetTab() {
             if (kind === 'check') s[key] = node.checked;
             else if (node.type === 'number') s[key] = Number(node.value);
             else s[key] = node.value;
+            // ★ 总开关拨到「开」＝**重新就位**（见 run.armedAt）：否则在一个已经聊了几百轮的聊天里
+            //   打开它，第一轮心跳就会立刻烧一次生成。设定页这个勾与面板顶上的 ⏻ 是同一个字段。
+            if (key === 'autoDirector' && s.autoDirector) armNow(s.run);
             save();
             syncMainInjection();
+            if (key === 'autoDirector') renderPower();
             if (key === 'bubbleSize' || key === 'bubbleIcon') applyBubbleLook();
         });
     };
@@ -4437,8 +4506,56 @@ function renderTabs() {
     if (s.tab === 'set') renderSetTab();
 }
 
+/**
+ * ★ **总开关**（0.24.0）：一键让插件停止「自己调模型」。
+ *
+ * 为什么要有它：插件是**全局**的 —— 切到别的聊天它照样会按自己的判断动手。用户报的
+ * 「一切到别的聊天先生了个总纲，造成不必要的浪费」就是这么来的。
+ * 「设定」页里其实一直有「自动导演」这个总闸，但它藏在最深处，面板上连个一眼可见的入口都没有，
+ * 等发现烧钱了再去翻设置已经晚了。
+ *
+ * 语义（与 `DEFAULT.autoDirector` 一致）：**关 = 只手动生成与采用**，
+ * 插件不自己定篇章 / 开章 / 换拍 / 补支线 / 补插曲 / 审查重排；
+ * **注入照常**（那不需要调模型，关掉反而会让正文模型失去引导）。
+ *
+ * ⚠ 与它配套的是「就位基准」（`run.armedAt`）：从关拨到开时会**重新就位** ——
+ *   否则在一个已经聊了几百楼的聊天里打开它，第一轮心跳就会立刻烧一次生成。
+ */
+function toggleMaster(force) {
+    const s = settings();
+    const want = force === undefined ? !s.autoDirector : !!force;
+    if (!!s.autoDirector === want) return;
+    s.autoDirector = want;
+    if (want) armNow(s.run);
+    save();
+    syncMainInjection();
+    render();
+    toast(want
+        ? '总开关已打开：插件会自己推进剧情（定篇章 / 开章 / 换拍 / 支线 / 插曲）。'
+        : '总开关已关闭：不再自己调模型（不再花钱）；注入与手动按钮照常。', want ? 'success' : 'info');
+}
+
+/** 画总开关那一条（在面板最上面，切到哪个页都看得见）。 */
+function renderPower() {
+    const host = panel?.querySelector('.sd-powerbar');
+    if (!host) return;
+    const on = !!settings().autoDirector;
+    host.classList.toggle('is-off', !on);
+    host.innerHTML = `
+        <button type="button" class="sd-power" aria-pressed="${on ? 'true' : 'false'}"
+            title="${on ? '点一下 = 关掉总开关：插件不再自己调模型' : '点一下 = 打开总开关：插件会自己推进剧情'}">
+            <span class="sd-power-dot">⏻</span>
+            <span class="sd-power-label">总开关 · ${on ? '开' : '关'}</span>
+        </button>
+        <span class="sd-power-hint">${on
+            ? '它正在自己推进：定篇章 / 开章 / 换拍 / 支线 / 插曲。不想让它烧，就点左边关掉。'
+            : '已关：不会自己调模型（不花钱）。注入与手动按钮照常 —— 点左边重新打开。'}</span>`;
+    host.querySelector('.sd-power')?.addEventListener('click', () => { toggleMaster(); });
+}
+
 function render() {
     if (!panel) return;
+    renderPower();
     renderTabs();
 }
 
@@ -4992,6 +5109,7 @@ function makePanel() {
             <button type="button" class="sd-close" title="关闭">✕</button>
         </div>
         <div class="sd-body">
+            <div class="sd-powerbar"></div>
             <section class="sd-page sd-now-tab" data-tab="now"></section>
             <section class="sd-page sd-epic-tab" data-tab="epic" hidden></section>
             <section class="sd-page sd-main-tab" data-tab="main" hidden></section>
