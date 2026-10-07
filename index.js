@@ -36,7 +36,7 @@ import {
     REVIEW_PASS, REVIEW_STATES, REVIEW_MAX_RETRY,
     STATUS_PENDING, STATUS_ACTIVE, STATUS_DONE, STATUS_SKIPPED, STATUS_STALLED,
     isPlainObject, unwrap, unwrapDeep, display, toNumber, truthy,
-    reviewLadder, STRIKES_BEFORE_EPIC,
+    reviewLadder, STRIKES_BEFORE_EPIC, nsHasState,
     capText, splitBeats, beatsOf, parseBlocks,
     emptyMain, mainOf, listOf, currentBeat, reviewStateOf, reviewNoteOf,
     isLiveThread, threadLanded, interludePending, interludeAfter,
@@ -538,8 +538,56 @@ async function resolveMvu() {
     return mvuApi;
 }
 
+/**
+ * ★ 读变量：优先**当前楼层**，但当前楼层里还没有我们的东西时**退回聊天级**。
+ *
+ * 为什么要有这个退路（0.25.1 修的真事故）：MVU 把变量分两处存 —— 当前楼层与聊天级。
+ * 有的卡只会让「当前楼层」这一份继承我们写的东西（那种卡上一切正常），有的卡不会：
+ * 新的一楼从聊天级的基准重新起一份变量，而基准里没有我们写的篇章 / 主线 ——
+ * 于是插件在用户每发一条之后都读到「还没有篇章」，就**再定一部**。
+ * 用户看到的就是「刚生成好一个篇章，推进一步又重新生成了」。
+ * 读出退路 + `writeMvu` 的两处同写，合起来才真正稳住状态。
+ */
 function mvuData() {
-    try { return mvu()?.getMvuData?.({ type: 'message', message_id: 'latest' }) || null; } catch { return null; }
+    const api = mvu();
+    if (!api?.getMvuData) return null;
+    let here = null;
+    try { here = api.getMvuData({ type: 'message', message_id: 'latest' }) || null; } catch { /* ignore */ }
+    if (nsHasState(here?.stat_data?.[NS])) return here;
+    let whole = null;
+    try { whole = api.getMvuData({ type: 'chat' }) || null; } catch { /* ignore */ }
+    if (nsHasState(whole?.stat_data?.[NS])) {
+        console.debug('[故事导演] 当前楼层的变量还是空的 —— 退回聊天级那份（见 mvuData 的说明）。');
+        return whole;
+    }
+    return here || whole;
+}
+
+/**
+ * ★ 写变量：**两个存放位置都写**（当前楼层 + 聊天级）。
+ *
+ * 只写当前楼层时，状态能不能活到下一楼全看 MVU 会不会把这一楼合并回聊天级 ——
+ * 有的卡不会（见 `mvuData` 的说明）。两处同写之后，下一楼从哪一份起都读得到。
+ * `d` 就是 `mvuData()` 给的那份（含 `stat_data`），两份必须放进**同一个命名空间对象**。
+ */
+async function writeMvu(d) {
+    const api = mvu();
+    if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
+    let ok = false;
+    try {
+        await api.replaceMvuData(d, { type: 'message', message_id: 'latest' });
+        ok = true;
+    } catch (error) { console.debug('[故事导演] 写入当前楼层失败', error); }
+    try {
+        const whole = api.getMvuData ? api.getMvuData({ type: 'chat' }) : null;
+        if (isPlainObject(whole)) {
+            if (!isPlainObject(whole.stat_data)) whole.stat_data = {};
+            whole.stat_data[NS] = d.stat_data[NS];
+            await api.replaceMvuData(whole, { type: 'chat' });
+            ok = true;
+        }
+    } catch (error) { console.debug('[故事导演] 写入聊天级失败', error); }
+    return ok;
 }
 
 /** 取 stat_data（live 优先：MVU 事件回调里那份还没落盘的活变量）。 */
@@ -619,7 +667,7 @@ async function patchInterlude(fields, { live = null } = {}) {
     if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
     apply(d.stat_data);
     try {
-        await api.replaceMvuData(d, { type: 'message', message_id: 'latest' });
+        await writeMvu(d);
         return true;
     } catch (error) {
         console.debug('[故事导演] 写入间章失败', error);
@@ -650,7 +698,7 @@ async function patchEpic(fields, { live = null } = {}) {
     if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
     apply(d.stat_data);
     try {
-        await api.replaceMvuData(d, { type: 'message', message_id: 'latest' });
+        await writeMvu(d);
         return true;
     } catch (error) {
         console.debug('[故事导演] 写入史诗失败', error);
@@ -767,12 +815,54 @@ function reconcileFromLatestMessage(live) {
     return false;
 }
 
+/** 键顺序无关的序列化（用来判断两份命名空间是否真的一样）。 */
+function stableJson(value) {
+    return JSON.stringify(value, (key, item) => (isPlainObject(item)
+        ? Object.fromEntries(Object.keys(item).sort().map((k) => [k, item[k]]))
+        : item));
+}
+
+/**
+ * ★ 把「手上这一份」变量**对齐到聊天级**（内容不一样才写）。
+ *
+ * 为什么要对齐（0.25.1 修的真事故）：有的卡不会把当前楼层的变量更新合并回聊天级基准，
+ * 而插件原来只写当前楼层 —— 聊天级基准一直是空的。于是下一楼从基准起一份空变量，
+ * 插件又「读不到篇章」→ 再定一部 → 再丢…… 用户看到的就是
+ * 「刚生成好一个篇章，推进一步又重新生成了」。
+ *
+ * `writeMvu` 负责让每次写入都落两处；这个函数负责在**读**的时候把已经偏掉的对齐回来
+ * （老聊天只要开一次插件就修好了）。两边一样时不写。
+ */
+async function syncNsToChat(live = null) {
+    const api = mvu();
+    if (!api?.getMvuData || !api?.replaceMvuData) return false;
+    try {
+        const source = (live && isPlainObject(live.stat_data)) ? live.stat_data : mvuData()?.stat_data;
+        const ns = source?.[NS];
+        if (!isPlainObject(ns)) return false;
+        const whole = api.getMvuData({ type: 'chat' });
+        if (!isPlainObject(whole)) return false;
+        if (stableJson(whole.stat_data?.[NS]) === stableJson(ns)) return false;
+        if (!isPlainObject(whole.stat_data)) whole.stat_data = {};
+        whole.stat_data[NS] = ns;
+        await api.replaceMvuData(whole, { type: 'chat' });
+        console.debug('[故事导演] 聊天级变量已对齐（有的卡不会自己把楼层更新合并回去）。');
+        return true;
+    } catch (error) {
+        console.debug('[故事导演] 对齐聊天级变量失败', error);
+        return false;
+    }
+}
+
 /**
  * 命名空间自愈：我们的世界书自带 InitVar，但老聊天只会初始化一次，所以插件自己也保证结构存在。
  * `live` 传 MVU 事件回调里那份还没落盘的活变量 —— 直接改它就与 MVU 自己那次回写同源。
  */
 async function ensureNamespace({ notify = false, live = null } = {}) {
     const api = mvu();
+    // ★ 顺手把聊天级那一份对齐（见 syncNsToChat）：老聊天开一次插件就修好，
+    //   否则「当前楼层有、聊天级空」的聊天会一直重复定篇章。
+    void syncNsToChat(live);
     const d = live && isPlainObject(live.stat_data) ? live : mvuData();
     if (!isPlainObject(d?.stat_data)) {
         if (notify) toast('当前聊天还没有 MVU 变量，先和角色聊一句再试。', 'warning');
@@ -872,7 +962,7 @@ async function ensureNamespace({ notify = false, live = null } = {}) {
     if (!changed) return true;
     if (live) { render(); return true; }   // 活变量由 MVU 自己回写
     try {
-        await api.replaceMvuData(d, { type: 'message', message_id: 'latest' });
+        await writeMvu(d);
     } catch (error) {
         console.debug('[故事导演] 写入命名空间失败', error);
         if (notify) toast('写入 MVU 失败，详见控制台。', 'error');
@@ -902,7 +992,7 @@ async function patchMain(fields, { live = null } = {}) {
     if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
     apply(d.stat_data);
     try {
-        await api.replaceMvuData(d, { type: 'message', message_id: 'latest' });
+        await writeMvu(d);
         return true;
     } catch (error) {
         console.debug('[故事导演] 写入主线失败', error);
@@ -924,7 +1014,7 @@ async function patchEntry(kind, id, fields, { live = null } = {}) {
     if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
     apply(d.stat_data);
     try {
-        await api.replaceMvuData(d, { type: 'message', message_id: 'latest' });
+        await writeMvu(d);
         return true;
     } catch (error) {
         console.debug(`[故事导演] 写入 ${kind}.${id} 失败`, error);
@@ -943,7 +1033,7 @@ async function dropEntry(kind, id, { live = null } = {}) {
     const d = mvuData();
     if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
     apply(d.stat_data);
-    try { await api.replaceMvuData(d, { type: 'message', message_id: 'latest' }); return true; }
+    try { await writeMvu(d); return true; }
     catch (error) { console.debug(`[故事导演] 删除 ${kind}.${id} 失败`, error); return false; }
 }
 
@@ -1009,7 +1099,7 @@ async function rememberChapter(main, { live = null } = {}) {
     const d = mvuData();
     if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
     apply(d.stat_data);
-    try { await api.replaceMvuData(d, { type: 'message', message_id: 'latest' }); return true; }
+    try { await writeMvu(d); return true; }
     catch (error) { console.debug('[故事导演] 记录章节史失败', error); return false; }
 }
 
@@ -3713,7 +3803,7 @@ async function rememberInterlude(chapter, { live = null } = {}) {
     const d = mvuData();
     if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
     apply(d.stat_data);
-    try { await api.replaceMvuData(d, { type: 'message', message_id: 'latest' }); return true; }
+    try { await writeMvu(d); return true; }
     catch (error) { console.debug('[故事导演] 记录间章失败', error); return false; }
 }
 
@@ -4689,7 +4779,7 @@ async function clearStory() {
         d.stat_data[NS].支线 = {};
         d.stat_data[NS].插曲 = {};
         d.stat_data[NS].章节史 = {};
-        try { await api.replaceMvuData(d, { type: 'message', message_id: 'latest' }); } catch { /* ignore */ }
+        try { await writeMvu(d); } catch { /* ignore */ }
     }
     const s = settings();
     s.chapters = {};

@@ -1584,6 +1584,34 @@ export function worldbookUpdateDecision(bundled, installed) {
 }
 
 /**
+ * ★ **这份命名空间里到底有没有我们的东西** —— 用来在两份变量树之间挑出「真实的那一份」。
+ *
+ * 为什么需要（0.25.1 修的真事故）：MVU 有**两个存放位置** —— 当前楼层（message）与聊天级（chat）。
+ * 插件原来只写当前楼层，于是「状态的续命」全靠 MVU 把这一楼的更新合并回聊天级。
+ * 有的卡会合并，有的**不会** —— 那种卡上，每一楼都从聊天级基准重新起一份变量，
+ * 而基准里没有我们写的东西：用户发一条 → 插件读到「还没有篇章」→ 花一次神谕定一部
+ * → 写进这一楼 → 下一条又没了 → 再定一部……表现就是「刚生成好一个篇章，推进一步又重新生成了」。
+ *
+ * 判据：篇章有名字 / 有章表，或者主线有章名 / 有拍，或者章节史里有章。
+ * ⚠ 只看**我们自己的**键，不看别的扩展往 stat_data 里放的东西 —— 否则每份树都算「有内容」。
+ */
+export function nsHasState(ns) {
+  if (!isPlainObject(ns)) return false;
+  const epic = isPlainObject(ns[EPIC]) ? ns[EPIC] : null;
+  if (epic) {
+    if (String(unwrap(epic[EP.title]) ?? '').trim()) return true;
+    if (epicChapters(epic).length) return true;
+  }
+  const main = isPlainObject(ns['主线']) ? ns['主线'] : null;
+  if (main) {
+    if (String(unwrap(main[MAIN_TITLE]) ?? '').trim()) return true;
+    if (beatsOf(main).length) return true;
+  }
+  const history = isPlainObject(ns['章节史']) ? ns['章节史'] : null;
+  return !!history && Object.keys(history).some((key) => /^\d+$/.test(key));
+}
+
+/**
  * 同一章里收到几次「当前主线不合适」才允许**动篇章**。
  *
  * 这是用户定的原则，原话：
