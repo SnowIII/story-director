@@ -222,6 +222,9 @@
 #story-director-panel .sd-item-head { display: flex; align-items: baseline; gap: 8px; }
 
 #story-director-panel .sd-fold > summary { cursor: pointer; font-weight: 600; opacity: 0.85; }
+/* 会剧透的内容默认折起来（大高潮这类）—— 想看的自己点开，别在打开的瞬间被砸一脸 */
+#story-director-panel .sd-spoiler > summary { font-weight: 500; font-size: 11.5px; opacity: 0.62; }
+#story-director-panel .sd-spoiler[open] > summary { opacity: 0.85; }
 #story-director-panel .sd-fold-body { margin-top: 7px; }
 #story-director-panel .sd-log { margin-top: 6px; }
 #story-director-panel .sd-log > summary { cursor: pointer; font-size: 11.5px; opacity: 0.72; }

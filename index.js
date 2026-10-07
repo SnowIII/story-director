@@ -769,9 +769,10 @@ async function applyEpic(epic, { live = null, quiet = false, entry = null } = {}
     if (!quiet) {
         const title = String(unwrap(fields[EP.title]) ?? '未命名');
         const total = epicChapterCount(fields);
+        // ⚠ 提示里**不许带大高潮**（用户提的：那是剧透）。想知道/想改就去「篇章」页点开看。
         toast(entry !== null && entry > 0
             ? `篇章《${title}》已按他实际做的事重新校准（共 ${total} 章）。`
-            : `篇章已定：《${title}》（共 ${total} 章，大高潮：${String(unwrap(fields[EP.climax]) ?? '—')}）。`, 'success');
+            : `篇章已定：《${title}》（共 ${total} 章）。`, 'success');
     }
     return true;
 }
@@ -5148,7 +5149,10 @@ function renderEpicTab() {
                 <label class="sd-field"><span>标题</span><input name="epic-title" value="${esc(String(unwrap(epic[EP.title]) ?? ''))}"></label>
                 <label class="sd-field"><span>篇章（两三句，说清在争什么）</span><textarea name="epic-line" rows="3">${esc(String(unwrap(epic[EP.line]) ?? ''))}</textarea></label>
                 <label class="sd-field"><span>章内容（<b>一章一行</b>：这一章要完成什么。✔ = 已写、▶ = 正在写、· = 还没写）</span>${total ? `<span class="sd-epic-progress">${done ? '这一部已经写完 —— 点「重新定篇章（换一部）」开新的一部' : `下一章是第 ${written + 1} 章`}</span>` : ''}<textarea name="epic-chapters" rows="${Math.max(4, total + 1)}">${esc(chapters.map((text, i) => `${i + 1}. ${text}`).join('\n'))}</textarea></label>
-                <label class="sd-field"><span>大高潮（落在第几章、是哪一场）</span><input name="epic-climax" value="${esc(climax)}" placeholder="例如：第 3 章 · 武道会决赛那场"></label>
+                <details class="sd-fold sd-spoiler">
+                    <summary>大高潮（${climax ? '已定' : '还没定'}）· 点开看内容<b>（会剧透）</b></summary>
+                    <label class="sd-field"><span>落在第几章、是哪一场</span><input name="epic-climax" value="${esc(climax)}" placeholder="例如：第 3 章 · 武道会决赛那场"></label>
+                </details>
                 <label class="sd-field"><span>伏笔（用「；」分开）</span><textarea name="epic-hooks" rows="2">${esc(hooks.join('；'))}</textarea></label>
                 <label class="sd-field"><span>既成事实（不可撤销）</span><textarea name="epic-ledger" rows="2">${esc(String(unwrap(epic[EP.ledger]) ?? ''))}</textarea></label>
                 <div class="sd-row">
