@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.27.12';
+const VERSION = '0.27.13';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -3131,15 +3131,24 @@ function abortGenerate() {
 
 
 /**
- * 生成失败的退避表：key → 失败时间戳。
+ * 生成失败的退避表：key → { at, ms }。
  * ⚠ 以前是个「只加不减」的 Set —— 一次偶发失败（网络抖一下 / 神谕吐不出格式）就把那一路生成
  * **永久**关掉，而且悄无声息。这正是「主线一直不生成」的主因。
  * 现在改成有时间窗的退避：窗口内不重试（省调用），窗口一过自动放行。
+ *
+ * ★ 0.27.13：**上游报错（容量耗尽 / 限流）退避更久** —— 那种错几十秒内好不了，
+ *   而我们每次重试都是一个 100 KB 量级的大请求（真事故：一次 `upstream_capacity_exhausted`
+ *   之后每隔 90 秒重烧一次，全是白烧）。
  */
 const failedKeys = new Map();
 const GENERATE_RETRY_BACKOFF = 90 * 1000;
-function markFailed(key) { failedKeys.set(key, Date.now()); }
+const PROVIDER_RETRY_BACKOFF = 5 * 60 * 1000;
+function markFailed(key, ms = GENERATE_RETRY_BACKOFF) { failedKeys.set(key, { at: Date.now(), ms }); }
 function clearFailed(key) { failedKeys.delete(key); }
+/** 失败时按「是不是上游的锅」挑退避窗口。 */
+function markFailedFromError(key, error) {
+    markFailed(key, error?.providerError ? PROVIDER_RETRY_BACKOFF : GENERATE_RETRY_BACKOFF);
+}
 /** 正在生成中的标记（异步期间不再重复排队）。与失败退避分开存，语义不混。 */
 const pendingGenerates = new Set();
 const isPending = (key) => pendingGenerates.has(key);
@@ -3147,9 +3156,10 @@ const markPending = (key) => pendingGenerates.add(key);
 const clearPending = (key) => pendingGenerates.delete(key);
 
 function isBackingOff(key) {
-  const at = failedKeys.get(key);
-  if (!at) return false;
-  if (Date.now() - at > GENERATE_RETRY_BACKOFF) { clearFailed(key); return false; }
+  const hit = failedKeys.get(key);
+  if (!hit) return false;
+  const ms = Math.max(0, Math.round(toNumber(hit.ms, GENERATE_RETRY_BACKOFF)));
+  if (Date.now() - Math.round(toNumber(hit.at, 0)) > ms) { clearFailed(key); return false; }
   return true;
 }
 
@@ -3220,7 +3230,47 @@ async function askOracle({ task = 'chapter', userText = '', regenerate = false, 
         console.info('[故事导演] 这次生成的结果已作废（用户中断 / 期间被新的一次生成取代）。');
         return ORACLE_CANCELLED;
     }
-    return String(result ?? '');
+    // ★ 0.27.13：**上游把错误塞在 200 的流里**（真事故：`upstream_capacity_exhausted`）。
+    //   以前这会一路走到「没解析到 <StoryXxx> 区块」—— 排查方向全错。现在直接说清是谁的锅。
+    const text = String(result ?? '');
+    const providerErr = providerErrorOf(text);
+    if (providerErr) {
+        const short = providerErr.replace(/\s+/g, ' ').slice(0, 120);
+        console.warn(`[故事导演] 神谕**上游**报错（不是格式问题）：${providerErr}\n原始返回：${text.slice(0, 800)}`);
+        const error = new Error(`上游报错 —— ${short}（这不是格式问题；稍后重试，或先换个模型 / 中转）`);
+        error.providerError = true;
+        throw error;
+    }
+    if (!text.trim()) {
+        console.warn('[故事导演] 神谕返回了空内容（多半是上游报错 / 被截断）。');
+        const error = new Error('神谕这次返回了**空内容**（多半是上游报错或被截断）—— 稍后重试，或先换个模型 / 中转');
+        error.providerError = true;
+        throw error;
+    }
+    return text;
+}
+
+/**
+ * ★ 0.27.13：从返回体里认出**上游报错**。
+ *
+ * 为什么要它（查过一次真事故）：「一直生成失败」—— 但 LLM 调用日志里 `ok: true`、
+ * HTTP 200，**错误是塞在 SSE 流里的**：
+ *   `{"error":{"message":"...upstream... exhausted its capacity...","code":"upstream_capacity_exhausted"}}`
+ * 我们只是把它当字符串收下，然后报成「没解析到 <StoryChapters> 区块」——
+ * 于是排查方向全错（看着像插件格式问题，其实是中转的上游挂了）。
+ *
+ * 判据很保守：**只有当文本里没有正经 `<StoryXxx>` 区块时**才去看 `error` 字段，
+ * 免得模型正文里碰巧提到 "error" 就被误判。
+ *
+ * @returns {string} 上游的错误说明（没有就空串）
+ */
+function providerErrorOf(text) {
+    const s = String(text ?? '');
+    if (/<Story[A-Za-z]+>/.test(s)) return '';        // 有正经区块 → 不是报错
+    const msg = s.match(/"error"[\s\S]{0,600}?"message"\s*:\s*"([^"]{4,300})"/);
+    if (msg) return msg[1];
+    const code = s.match(/"error"[\s\S]{0,300}?"code"\s*:\s*"([A-Za-z_][A-Za-z0-9_]{3,60})"/);
+    return code ? code[1] : '';
 }
 
 /**
@@ -3391,7 +3441,7 @@ async function generateInterludeChapter({ quiet = true, userText = '', force = f
     } catch (error) {
         console.debug('[故事导演] 生成间章失败', error);
         toast(`生成失败：${error?.message || error}`, 'error');
-        markFailed(key);
+        markFailedFromError(key, error);
         return false;
     } finally {
         endGenerate();
@@ -3655,7 +3705,7 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
     } catch (error) {
         console.debug('[故事导演] 生成史诗失败', error);
         toast(`生成失败：${error?.message || error}`, 'error');
-        markFailed(key);
+        markFailedFromError(key, error);
         return false;
     } finally {
         endGenerate();
@@ -3726,7 +3776,7 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
     } catch (error) {
         console.debug('[故事导演] 生成主线失败', error);
         toast(`生成失败：${error?.message || error}`, 'error');
-        markFailed(key);
+        markFailedFromError(key, error);
         return false;
     } finally {
         endGenerate();
@@ -3761,7 +3811,7 @@ async function generateThread({ quiet = true, userText = '', force = false } = {
     } catch (error) {
         console.debug('[故事导演] 生成支线失败', error);
         toast(`生成失败：${error?.message || error}`, 'error');
-        markFailed(key);
+        markFailedFromError(key, error);
         return false;
     } finally {
         endGenerate();
@@ -3795,7 +3845,7 @@ async function generateInterlude({ quiet = true, userText = '', force = false } 
     } catch (error) {
         console.debug('[故事导演] 生成插曲失败', error);
         toast(`生成失败：${error?.message || error}`, 'error');
-        markFailed(key);
+        markFailedFromError(key, error);
         return false;
     } finally {
         endGenerate();
@@ -5895,7 +5945,12 @@ function exposeDiagnostics() {
                     AI回复数: aiMessageCount(),
                     生成中: storyGenerating,
                     在跑: [...pendingGenerates],
-                    退避中: [...failedKeys.keys()],
+                    退避中: [...failedKeys.entries()].map(([k, v]) => ({
+                        谁: k,
+                        还剩秒: Math.max(0, Math.round((Math.round(toNumber(v?.ms, 0)) - (Date.now() - Math.round(toNumber(v?.at, 0)))) / 1000)),
+                        窗口秒: Math.round(toNumber(v?.ms, 0) / 1000),
+                        上游的锅: Math.round(toNumber(v?.ms, 0)) >= PROVIDER_RETRY_BACKOFF,
+                    })),
                     档位: { 自动导演: settings().autoDirector, 自动定篇章: settings().autoEpic, 自动换章: settings().autoChapter, 基调: settings().tone },
                 };
             },
