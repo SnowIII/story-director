@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.27.8';
+const VERSION = '0.27.9';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -439,12 +439,23 @@ const DEFAULT = {
         /** 本聊天里「定篇章 / 校准」已经试过几次：超过上限就放行开章，不让它把整个插件卡住。 */
         epicTries: 0,
         /**
-         * 已经作废的篇章（换新的一部时把旧的记进来，只留最近 3 部）。
-         * 用途：换新的一部时把「上一部讲过的章表」当**要避开的东西**喂给神谕 ——
+         * 已经很旧的篇章名单 —— 一个数组，两种条目，**用途完全不同**：
+         *   · `why: 'finished'`  —— **演义完了**。这是**归档**：长期保留，在「篇章」页可见
+         *     （用户提的「只归档正常演绎完的」）；
+         *   · `why: 'replaced'`  —— 被换掉/废弃的（重新生成、手动换一部）。
+         *     **不进归档**，而且只在「防重复」里短命留几轮就自动删掉
+         *     （用户提的「如果是重新生成的废弃篇章，不要入归档，甚至在一段时间内也应该自动删掉」）。
+         *
+         * 两者都会作为**要避开的东西**喂给神谕去定新的一部 ——
          * 补一次真事故：重新生成章纲出来的四章和上一版几乎一字不差。
-         * @type {Array<{title: string, chapters: string[]}>}
+         * @type {Array<{title: string, chapters: string[], why: string, at: string, atCount: number}>}
          */
         retiredEpics: [],
+        /**
+         * 废弃篇章（`why: 'replaced'`）在名单里**留几轮**就自动删掉。
+         * 默认 5：够下一次「定新的一部」时起防重复作用，又不至于长期占着名额与注入。
+         */
+        discardedEpicKeepRounds: 5,
         /**
          * ★ **当前这一章的身份**：真开出一章时播下（= 开章那一轮的回复数），重排剩下的拍**不动它**。
          *
@@ -2059,17 +2070,19 @@ function antiRepeatBlock(task = '') {
 }
 
 /**
- * 把一部**已经结束**的篇章记进归档名单。
+ * 把一部**已经结束**的篇章记进名单。
  *
  * 两个调用时机，语义不同（`why`）：
- *   · `finished` —— 章表写满了（这一部**演义完了**）。0.27.8：**在最后一章收尾的那一刻就归档**，
+ *   · `finished` —— 章表写满了（这一部**演义完了**）。**在最后一章收尾的那一刻就记**，
  *     不再等到「新的一部生成成功」才记 —— 否则新篇章生成失败几次，这一部就永远赖在注入里。
- *   · `replaced` —— 被手动/自动换掉（还没写完就不演了）。
+ *     **这是归档**：长期保留，「篇章」页可见。
+ *   · `replaced` —— 被换掉 / 废弃的（重新生成章纲、手动换一部）。
+ *     **不进归档**，只作为「要避开的东西」短命留几轮（见 pruneDiscardedEpics）。
  *
- * 归档之后：① 它只作为「**要避开的东西**」进防重复块；② 在「篇章」页的归档区可见；
+ * 归档之后：① 它作为「**要避开的东西**」进防重复块；② 在「篇章」页的归档区可见（仅 finished）；
  * ③ 不再作为「这一册的章内容」参与提示词组装（见 focusedStateBlock）。
  *
- * 幂等：同一部（标题 + 章表都一样）只记一次，重试不会把它堆成好几条。只留最近 5 部。
+ * 幂等：同一部（标题 + 章表都一样）只记一次，重试不会把它堆成好几条。只留最近 6 条。
  */
 function rememberRetiredEpic(epic, { why = 'replaced' } = {}) {
     const s = settings();
@@ -2081,16 +2094,58 @@ function rememberRetiredEpic(epic, { why = 'replaced' } = {}) {
         ledger: String(unwrap(epic?.[EP.ledger]) ?? '').trim(),
         hooks: epicHooks(epic).slice(0, 12),
         written: epicChapter(epic),
-        why,
+        why: why === 'finished' ? 'finished' : 'replaced',
         at: new Date().toISOString(),
+        // 废弃条目的寿命按**轮数**算（不看墙钟，与其它节奏同源）；归档的不看它。
+        atCount: aiMessageCount(),
     };
     if (!entry.chapters.length) return false;
     const list = Array.isArray(s.run.retiredEpics) ? s.run.retiredEpics : [];
     const same = (a) => JSON.stringify(a?.chapters) === JSON.stringify(entry.chapters) && String(a?.title ?? '') === entry.title;
-    if (list.some(same)) return false;
-    s.run.retiredEpics = [...list, entry].slice(-5);
+    const existing = list.find(same);
+    // ⚠ 已经记过、但这次是「演义完了」而上次是「被换掉」→ **升级成归档**（保留原时间）。
+    if (existing) {
+        if (entry.why === 'finished' && existing.why !== 'finished') {
+            existing.why = 'finished';
+            save();
+            console.info(`[故事导演] 篇章《${entry.title || '未命名'}》由「被换掉」升级为「演义完了」—— 已并入归档。`);
+            return true;
+        }
+        return false;
+    }
+    s.run.retiredEpics = [...list, entry].slice(-6);
     save();
-    console.info(`[故事导演] 已归档篇章《${entry.title || '未命名'}》（${why === 'finished' ? '演义完了' : '被换掉'}，共 ${chapters.length} 章）。`);
+    console.info(`[故事导演] ${entry.why === 'finished' ? '已归档' : '记下废弃的'}篇章《${entry.title || '未命名'}》`
+        + `（${entry.why === 'finished' ? '演义完了' : '被换掉'}，共 ${chapters.length} 章）。`);
+    return true;
+}
+
+/**
+ * ★ 只归档正常演绎完的（用户提的）—— 废弃的那些**不进归档**，
+ * 而且在「防重复」名单里留 `discardedEpicKeepRounds` 轮就自动删掉。
+ *
+ * 为什么要自动删：废弃条目只是「给下一次定新篇章提个醒，别写成一个样」，
+ * 提醒过了就没用了；长期留着既占名额、又白白多喂一段旧章表给神谕。
+ * 老存档里的条目没有 `atCount`（分不清年龄）→ 当作已经过期，直接清掉。
+ *
+ * @returns {boolean} 有没有真的删掉东西（删了才需要存盘）
+ */
+function pruneDiscardedEpics() {
+    const s = settings();
+    const list = Array.isArray(s.run.retiredEpics) ? s.run.retiredEpics : [];
+    if (!list.length) return false;
+    const keep = Math.max(0, Math.round(toNumber(s.discardedEpicKeepRounds, 5)));
+    const count = aiMessageCount();
+    const kept = list.filter((item) => {
+        if (item?.why === 'finished') return true;                 // 归档：永久保留
+        const at = Math.round(toNumber(item?.atCount, NaN));
+        if (!Number.isFinite(at)) return false;                    // 老存档：分不清年龄 → 清掉
+        return count - at < keep;
+    });
+    if (kept.length === list.length) return false;
+    const gone = list.length - kept.length;
+    s.run.retiredEpics = kept;
+    console.info(`[故事导演] 清掉 ${gone} 条过期的废弃篇章记录（只留 ${keep} 轮；归档的不动）。`);
     return true;
 }
 
@@ -2107,12 +2162,18 @@ function archiveFinishedEpic(live = null) {
     return rememberRetiredEpic(epic, { why: 'finished' });
 }
 
-/** 这一部是不是已经归档过了（归档了就不再当「这一册的章内容」发下去）。 */
+/**
+ * 这一部**是不是已经演义完了并被归档**（归档了就不再当「这一册的章内容」发下去）。
+ * ⚠ 只认 `finished`：被换掉/废弃的那些**不算归档**（用户提的「不要入归档」），
+ *   它们本来也不会是「当前这一部」，所以这里严格一点更不容易误导。
+ */
 function epicIsArchived(epic) {
     const list = Array.isArray(settings().run.retiredEpics) ? settings().run.retiredEpics : [];
     const title = String(unwrap(epic?.[EP.title]) ?? '').trim();
     const chapters = epicChapters(epic);
-    return list.some((item) => String(item?.title ?? '') === title && JSON.stringify(item?.chapters) === JSON.stringify(chapters.slice(0, 24)));
+    return list.some((item) => item?.why === 'finished'
+        && String(item?.title ?? '') === title
+        && JSON.stringify(item?.chapters) === JSON.stringify(chapters.slice(0, 24)));
 }
 
 /**
@@ -3448,12 +3509,16 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
     const origin = chatKey();
     // establish = 换新的一部 → 进度归零；evolve = 校准 → 不动进度
     const progress = mode === 'establish' ? 0 : null;
-    // ★ 换新的一部之前，先把**旧的这一部**记进「上一部」名单：
+    // ★ 换新的一部之前，先把**旧的这一部**记进名单：
     //   ① 它会被当成「要避开的东西」进防重复块（不然新的一部就是它的换皮）；
     //   ② 同时告诉上下文构造器：**别再拿旧章表当"这一册的章内容"发下去**。
+    //   ⚠ 理由（why）由**实际状态**决定，不看是谁调用的：
+    //     章表写满 = 演义完了 → **归档**；没演完就被换掉 → 只当防重复提醒（几轮后自动清掉）。
     if (mode === 'establish') {
         const outgoing = epicOf(rootOf());
-        if (epicStarted(outgoing)) rememberRetiredEpic(outgoing);
+        if (epicStarted(outgoing)) {
+            rememberRetiredEpic(outgoing, { why: epicFinished(outgoing) ? 'finished' : 'replaced' });
+        }
     }
     try {
         const raw = await askOracle({
@@ -3940,6 +4005,8 @@ async function evaluateDirector({ live = null } = {}) {
         // ★ 回退聊天（重新生成 / 删楼 / 换 swipe）会让回复数变少，把「按回复数记账」的游标修回来。
         //   必须放在**任何冷却判断之前** —— 否则冷却会因为差值为负而永久卡死。
         if (repairRunCursors(s.run, aiMessageCount())) save();
+        // ★ 0.27.9：废弃篇章的记录只留几轮就清掉（归档的不动）。放在这里 = 每轮顺手过一遍，很便宜。
+        if (pruneDiscardedEpics()) save();
         // ★ 回退一层（删楼）时，把这一拍的进度也退回去 —— 见 syncBeatBackOnRollback。
         if (syncBeatBackOnRollback(aiMessageCount())) save();
 
@@ -5095,6 +5162,7 @@ function renderSetTab() {
             <label class="sd-switch"><input name="auto-epic" type="checkbox"> <b>自动定篇章</b>（先有一部完整的大故事，再开第一章）</label>
             <label class="sd-switch"><input name="audit-epic" type="checkbox"> <b>每章演完后检查一次篇章</b>（趁间章做，只判断、默认不改；一部一次/章）</label>
             <label class="sd-field"><span>一个篇章写几章（1~12；写满这一部就收尾、换新的一部）</span><input name="chapters-per-epic" type="number" min="1" max="12" step="1" value="${esc(String(chaptersPerEpic()))}"></label>
+            <label class="sd-field" title="废弃篇章=没演完就被换掉的（重新生成章纲、手动换一部）。它们只作为「下一次别写成一样」的提醒留在防重复名单里，过上面这几轮就自动清掉。只有**演义完了**（章表写满）的篇章才会长期归档，在「篇章」页可见。"><span>废弃篇章的防重复记录留几轮（默认 5）</span><input name="discarded-epic-rounds" type="number" min="0" max="30" step="1"></label>
             <p class="sd-note">章数决定这一部多大：4 章左右最稳（太短撑不起大高潮，太长会松散）。定篇章花一次调用。<br>
             <b>篇章不会自己变</b>：只有正文模型**在同一章里累计三次**报「当前主线不合适」，或者你在「篇章」页手动点，才会改到它。</p>
             <label class="sd-field"><span>世界书档位（影响这本世界书在酒馆里的注入）</span><select name="book-mode">
@@ -5175,6 +5243,7 @@ function renderSetTab() {
     bind('max-interludes', 'maxInterludes', 'value');
     bind('story-transcript', 'storyTranscript');
     bind('auto-epic', 'autoEpic');
+    bind('discarded-epic-rounds', 'discardedEpicKeepRounds', 'value');
     bind('audit-epic', 'auditEpic');
     bind('transcript-limit', 'transcriptLimit', 'value');
     bind('auto-install-book', 'autoInstallBook');
@@ -5657,6 +5726,15 @@ function exposeDiagnostics() {
             generating: () => ({ 生成中: storyGenerating, 在生成什么: genLabel, 已等秒数: genStartedAt ? Math.round((Date.now() - genStartedAt) / 1000) : 0, 已收字数: genChars, 支持中断: typeof genCtl?.abort === 'function' }),
             // ★ 0.27.7：总开关（面板 ⏻ 与设定页那个勾是同一个）。排查「世界书为什么被摘了」用它。
             master: (want) => setMaster(!!want),
+            // ★ 0.27.9：走一遍「重新定篇章（换一部）」那条真实路径（面板按钮调的就是它）。
+            //   排查 / 回归用：能看出「旧的这一部是被归档了，还是只当废弃提醒」。
+            rebuildEpic: () => generateEpic({ quiet: false, force: true, mode: 'establish', entry: 0 }),
+            epics: () => ({
+                当前这一部: String(unwrap((settings().story?.[EPIC] || {})[EP.title]) ?? ''),
+                演义完了: epicFinished(epicOf(rootOf())),
+                名单: (Array.isArray(settings().run.retiredEpics) ? settings().run.retiredEpics : [])
+                    .map((x) => ({ 标题: x?.title, 理由: x?.why, 条数: Array.isArray(x?.chapters) ? x.chapters.length : 0, 记于第几轮: x?.atCount })),
+            }),
             book: () => ({
                 已全局挂载: isGlobalBookEnabled(PLUGIN_WORLD),
                 是我们随总开关摘的: !!settings().bookMountedBySwitch,
@@ -5825,19 +5903,22 @@ async function saveInterludeFromForm() {
 /**
  * 「已完结的篇章（归档）」折叠块 —— 0.27.8（用户提的：归档的篇章「仅在特定页面显示」）。
  *
+ * ⚠ 只列 `why === 'finished'` 的（用户提的「只归档正常演绎完的」）：
+ *   被换掉 / 重新生成的废弃篇章**不进这里**，它们只在防重复名单里短命留几轮。
+ *
  * 归档的篇章**不再参与提示词注入**（见 focusedStateBlock / antiRepeatBlock），
  * 想看它演过什么、大高潮落在哪、留下了哪些既成事实，就在这里看。
  * ⚠ 大高潮默认折起来并标「会剧透」——与「篇章」页其它地方同一条纪律。
  */
 function archivedEpicSection() {
-    const list = Array.isArray(settings().run.retiredEpics) ? settings().run.retiredEpics : [];
+    const all = Array.isArray(settings().run.retiredEpics) ? settings().run.retiredEpics : [];
+    const list = all.filter((item) => item?.why === 'finished');
     if (!list.length) return '';
     const items = list.slice().reverse().map((item) => {
         const title = String(item?.title ?? '').trim() || '（未命名）';
         const chapters = Array.isArray(item?.chapters) ? item.chapters : [];
         const hooks = Array.isArray(item?.hooks) ? item.hooks : [];
-        const why = item?.why === 'finished' ? '演义完了' : '被换掉';
-        const when = (() => {
+        const why = item?.why === 'finished' ? '演义完了' : '被换掉';        const when = (() => {
             const t = Date.parse(String(item?.at ?? ''));
             return Number.isFinite(t) ? new Date(t).toLocaleDateString() : '';
         })();
