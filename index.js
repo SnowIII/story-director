@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.27.9';
+const VERSION = '0.27.10';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -179,6 +179,10 @@ const TOKEN_PUSH = [
     `${MAIN_SECTION}.${KEY_BEAT}`,
     `${MAIN_SECTION}.${MAIN_CLOSED}`,
     `${INTERLUDE}.${IL.active}`,
+    // ★ 0.27.10：间章的**画面号也要推**。这一条漏了整整一版 ——
+    //   于是「插件推的数字」在变量里根本不存在，模型看到的永远是它自己写的那份，
+    //   而插件又从不读它 → 面板永远停在第 1 个画面（用户报的正是这个）。
+    `${INTERLUDE}.${IL.beat}`,
 ];
 
 /** 按 `a.b.c` 取值 / 写值（token 清单用点号路径，短且好读）。 */
@@ -802,6 +806,37 @@ function pullTokens(live = null) {
 }
 
 /**
+ * ★ 0.27.10：把**间章的「当前画面」号**从变量里收回来（用户报的「明明演到后面了、面板还停在第 1 个」）。
+ *
+ * 为什么不像主线那样「只推不拉」：主线有换拍刹车，必须由插件独占；
+ * 间章是「演够了就收」，没有刹车语义，模型顺手写个号码是常态，收了才跟得上。
+ *
+ * 但**一次最多让它推一格**，而且不超过收尾哨兵（素材数 + 1）——
+ * 模型顺手写个 5 不能把中间几个画面悄悄跳过去（用户要的就是「一个一个来」）。
+ *
+ * ⚠ **必须在任何写 MVU 之前调用**（见 evaluateDirector 里的位置）：
+ *   否则 pushTokens 会先把插件里的旧号码写回去，把模型刚写的值覆盖掉。
+ */
+function adoptInterludeBeatFromMvu() {
+    const ns = mvuData()?.stat_data?.[NS];
+    if (!isPlainObject(ns)) return false;
+    const story = storyNs();
+    const box = interludeChapterOf({ [NS]: story });
+    // 不在间章时段就别动它：主线时段模型写 `间章.*` 一律忽略（见 syncInterludeWrites）。
+    if (!truthy(box[IL.active])) return false;
+    const mine = interludeBeat(box);
+    const total = interludeBeatsOf(box).length;
+    const asked = Math.round(toNumber(getPath(ns, `${INTERLUDE}.${IL.beat}`), NaN));
+    if (!Number.isFinite(asked)) return false;
+    const cap = total > 0 ? total + 1 : mine + 1;
+    const want = Math.max(mine, Math.min(asked, mine + 1, cap));
+    if (want === mine) return false;
+    setPath(story, `${INTERLUDE}.${IL.beat}`, want);
+    console.info(`[故事导演] 间章画面号从变量收回来：${mine} → ${want}（模型想写 ${asked}，一次只进一格）。`);
+    return true;
+}
+
+/**
  * 把剧情状态里的 token 写进 MVU（模型下一轮看得到第几拍，也看得到被复位过的标记）。
  *
  * ⚠ **一样就不写**。这不是省事：我们写 MVU 会让 MVU 发一次「变量更新完」，
@@ -1136,6 +1171,11 @@ async function ensureNamespace({ notify = false, live = null } = {}) {
     //   否则我们会先把手里的旧进度推回去，把「快照里那个更早的进度」覆盖掉，就再也退不回来了
     //   （真踩过：先 pushTokens 再检查，快照已经被我们改成新值）。
     syncBeatBackOnRollback(aiMessageCount());
+    // ★ 0.27.10：间章的**画面号**也要收 —— 同样必须在**任何写 MVU 之前**。
+    //   踩过的坑：这一读原来放在 pullTokens 里，而 pushTokens 排在它前面 ——
+    //   我们自己先把插件里的旧号码（1）推回 MVU、把模型刚写的号码盖掉，再去读就只能读到 1
+    //   （与上面那个「回退快照被自己覆盖」是同一类错误）。
+    adoptInterludeBeatFromMvu();
     if (!live && !api?.replaceMvuData && !api?.getMvuData) {
         if (notify) toast('MVU 未加载，无法初始化变量。', 'warning');
         return false;
@@ -5756,6 +5796,10 @@ function exposeDiagnostics() {
                     可进下一章: truthy(main[KEY_READY]),
                     已收尾: truthy(main[MAIN_CLOSED]),
                     间章进行中: truthy(chapter[IL.active]),
+                    // ★ 0.27.10：面板上那个「当前画面 N / M」的数字就是从这两个来的
+                    //   （排查「明明演到后面了、面板还停在第 1 个」用它）。
+                    间章画面: interludeBeat(chapter),
+                    间章素材数: interludeBeatsOf(chapter).length,
                     // ⚠ 这两个键改动名之后**不能再叫同一个名字**（同名会互相覆盖）：
                     //   史诗的**名字** vs 史诗**校准到第几章**，分开写清。
                     篇章名: epicStarted(epicOf(rootOf())) ? String(unwrap(epicOf(rootOf())[EP.title]) ?? '') : '',

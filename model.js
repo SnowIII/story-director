@@ -1060,7 +1060,7 @@ export function renderInterludeChapterSection(chapter, { maxBeats = 6, banUserAc
     + '**不要跳到别处、不要切到与主角团无关的陌生人视角**（远方的教授、边境的军需官那种是设定集，不是间章）。');
   lines.push('⚠ **这一轮要带一点与主线有关的信息**：上一章那件事的余波（谁被牵动、谁在议论、风声怎么传开）、'
     + '一个与主线有关的决定 / 消息 / 察觉，或者下一章会用到的一根线。可以含蓄，但不能与主线无关。');
-  lines.push('⚠ 间章**不要求跑完**：下面这些拍只是素材与顺序建议。你觉得日常已经演够了、或者主线那边该接上了，**随时可以收尾回主线**。');
+  lines.push('⚠ 间章**不要求跑完**：每一个画面都是独立的，你觉得日常演够了、或者主线那边该接上了，**随时可以收尾回主线**。');
   lines.push('⚠ 间章**不推进主线**：不升级冲突、不给关键转折、不让新角色登场。埋下的那根线**不要当场兑现**、不要点破。');
   if (title) lines.push(`${title}${scene ? `　（${scene}）` : ''}`);
 
@@ -1068,14 +1068,14 @@ export function renderInterludeChapterSection(chapter, { maxBeats = 6, banUserAc
     lines.push('这一段间章还没有拍列表：按上面的要求自然演日常即可，觉得够了就写 `' + IL.ready + '`。');
   } else {
     if (current > total) {
-      lines.push(`素材里列的 ${total} 个日常画面都已经演过了：接着写日常的余韵，或者在合适的地方收尾回主线。`);
+      lines.push(`素材里的 ${total} 个日常画面都已经演完了：接着写日常的余韵，或者在合适的地方收尾回主线。`);
     } else {
-      lines.push(`可用的日常画面（共 ${total} 个，**不要求全演**、也可以只挑其中几个）：`);
-      for (let i = 0; i < total; i++) {
-        const mark = i + 1 < current ? '✔' : (i + 1 === current ? '▶' : '·');
-        lines.push(`${mark} ${i + 1}. ${beats[i]}`);
-      }
-      lines.push(`本轮可以做 ${current}（✔ 的已经演过；· 的只是备选，跳过没关系）。`);
+      // ★ 0.27.10（用户报的）：**只给当前这一个画面**，后面的不注入。
+      //   以前把整份素材连后面的画面一起列出来，模型会自己往后跳（「怎么还是按后面画面走的」），
+      //   而且面板上明明还在第 1 个。既然一次只演一个，注入就只该给一个 —— 与主线的 ▶ 纪律一致。
+      lines.push(`本轮演第 ${current} 个画面（共 ${total} 个素材）：`);
+      lines.push(`　▶ ${current}. ${beats[current - 1]}`);
+      lines.push(`**后面还没轮到的画面不要抢演**（那是后面几轮的事）；这一个演完就照下面写回报。`);
     }
   }
 
@@ -1085,8 +1085,12 @@ export function renderInterludeChapterSection(chapter, { maxBeats = 6, banUserAc
   }
   lines.push(
     '落拍回报（写进变量；**只在这一拍真的写进正文之后写**）：',
-    `　· 第 ${Math.max(1, Math.min(current, total || current))} 个日常画面真的演到了 → \`_.set('${PATH.interlude}.${IL.beat}', ${Math.max(1, Math.min(current, total || current)) + 1})\``,
-    `　· 日常演够了、可以回主线了（**随时可以**，不必等拍演完）→ \`_.set('${PATH.interlude}.${IL.ready}', true)\``,
+    // ⚠ 这里给的是 `本拍已落`，**不是**「自己把 当前拍 加一」：
+    //   画面号由插件推进（和主线一样），插件会把它写进变量给你看。模型自己改号码会让两边对不上
+    //   —— 用户报的「明明演到后面了、面板还停在第 1 个」就是这条（0.27.10）。
+    `　· 第 ${Math.max(1, Math.min(current, total || current))} 个画面真的演到了 → \`_.set('${PATH.interlude}.${IL.beatDone}', true)\``,
+    `　　（**不要**自己去改 \`${IL.beat}\`：插件会推进它，你只要回答「这一个演到了没」）`,
+    `　· 日常演够了、可以回主线了（**随时可以**，不必等画面演完）→ \`_.set('${PATH.interlude}.${IL.ready}', true)\``,
     `　· 顺手中了一根线、想记一笔 → \`_.set('${PATH.interlude}.${IL.note}', '一句话')\``,
     `　· 插件读到 \`${IL.ready}\` 就会请故事神谕**接着开主线的新一章**，所以：写到合适的地方就收，不要为了把日常拖长而硬凑。`,
   );
