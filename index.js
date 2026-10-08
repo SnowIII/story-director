@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.27.6';
+const VERSION = '0.27.7';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -353,6 +353,19 @@ const DEFAULT = {
      */
     autoUpdateBook: true,
     autoMountBook: true,
+    /**
+     * ★ 总开关关掉时，**顺手把自带世界书从全局挂载里摘掉**（0.27.7，用户提的）。
+     *
+     * 为什么：关掉总开关的意思是「别再影响我的聊天了」—— 但世界书是**酒馆**在注入，
+     * 不归插件管：插件停了，那本契约还在每一轮往上下文里塞「你会收到幕后演出计划」。
+     * 于是关掉之后聊天反而更别扭（模型在等一个永远不来的计划）。
+     *
+     * `bookMountedBySwitch` 记的是**「是这次关开关把它摘掉的」** ——
+     * 只有这一种情况才在开回来时自动挂回去：你本来就没挂，或者你自己摘的，都不动它。
+     */
+    bookUnmountOnOff: true,
+    /** 内部记账：上次关总开关时，是我们把世界书摘下来的吗？（见 bookUnmountOnOff） */
+    bookMountedBySwitch: false,
 
     /** 运行游标（每个聊天一份切片，随聊天切换）。 */
     run: {
@@ -5012,6 +5025,10 @@ function renderSetTab() {
             <p class="sd-note">规则与变量契约都在自带世界书里，我们改了它就会升版本号 —— 开着这项就不用每次手点「安装／重装」。
             更新前会把酒馆里那份**原样备份**成「${esc(PLUGIN_WORLD)}（更新前备份 …）」，你可以随时对照或删掉。</p>
             <label class="sd-switch"><input name="auto-mount-book" type="checkbox"> 安装后挂到全局世界书</label>
+            <label class="sd-switch"><input name="book-unmount-on-off" type="checkbox"> <b>关总开关时顺手摘掉全局挂载</b>（开回来时自动挂回去）</label>
+            <p class="sd-note">世界书是**酒馆**在注入的，不归插件管：总开关关掉后，那本契约还会每轮塞「你会收到幕后演出计划」，
+            模型于是在等一份不会来的计划。开着这项就在关掉时一并摘掉 —— 只摘**我们挂的那一次**，
+            你本来没挂、或你自己摘的，开回来时不会擅自挂上。</p>
             <div class="sd-row">
                 <button type="button" class="sd-btn sd-install-book">安装／重装自带世界书</button>
                 <button type="button" class="sd-btn sd-mount-book">挂载到全局世界书</button>
@@ -5041,15 +5058,14 @@ function renderSetTab() {
         if (kind === 'check') node.checked = !!s[key];
         else node.value = s[key];
         node.addEventListener(kind === 'check' ? 'change' : (node.tagName === 'SELECT' ? 'change' : 'input'), () => {
+            // ★ 总开关**只有一条实现**（见 setMaster）：面板顶上的 ⏻ 与这里的勾是同一个开关，
+            //   连「顺手摘挂世界书」也必须一起走，否则两条路的行为会不一致。
+            if (key === 'autoDirector') { setMaster(node.checked); return; }
             if (kind === 'check') s[key] = node.checked;
             else if (node.type === 'number') s[key] = Number(node.value);
             else s[key] = node.value;
-            // ★ 总开关拨到「开」＝**重新就位**（见 run.armedAt）：否则在一个已经聊了几百轮的聊天里
-            //   打开它，第一轮心跳就会立刻烧一次生成。设定页这个勾与面板顶上的 ⏻ 是同一个字段。
-            if (key === 'autoDirector' && s.autoDirector) armNow(s.run);
             save();
             syncMainInjection();
-            if (key === 'autoDirector') renderPower();
             if (key === 'bubbleSize' || key === 'bubbleIcon') applyBubbleLook();
         });
     };
@@ -5084,6 +5100,7 @@ function renderSetTab() {
     bind('auto-install-book', 'autoInstallBook');
     bind('auto-update-book', 'autoUpdateBook');
     bind('auto-mount-book', 'autoMountBook');
+    bind('book-unmount-on-off', 'bookUnmountOnOff');
     bind('bubble-size', 'bubbleSize', 'value');
     bind('bubble-icon', 'bubbleIcon', 'value');
 
@@ -5189,17 +5206,69 @@ function renderTabs() {
  *   否则在一个已经聊了几百楼的聊天里打开它，第一轮心跳就会立刻烧一次生成。
  */
 function toggleMaster(force) {
+    setMaster(force === undefined ? !settings().autoDirector : !!force);
+}
+
+/**
+ * 总开关的**唯一实现**（面板顶上的 ⏻ 与「设定」页那个勾都走它）：
+ * 改字段 → 重新就位 → 顺手摘挂世界书 → 存盘 → 同步注入 → 重画。
+ */
+function setMaster(want, { notify = true } = {}) {
     const s = settings();
-    const want = force === undefined ? !s.autoDirector : !!force;
-    if (!!s.autoDirector === want) return;
-    s.autoDirector = want;
-    if (want) armNow(s.run);
+    const next = !!want;
+    if (!!s.autoDirector === next) return false;
+    s.autoDirector = next;
+    // ★ 拨到「开」＝**重新就位**（见 run.armedAt）：否则在一个已经聊了几百轮的聊天里
+    //   打开它，第一轮心跳就会立刻烧一次生成。
+    if (next) armNow(s.run);
+    // ★ 0.27.7：关掉时顺手把自带世界书从全局挂载里摘掉，开回来时再挂回去（用户提的）。
+    const bookNote = syncBookWithMaster(next);
     save();
     syncMainInjection();
     render();
-    toast(want
-        ? '总开关已打开：插件会自己推进剧情（定篇章 / 开章 / 换拍 / 支线 / 插曲）。'
-        : '总开关已关闭：不再自己调模型（不再花钱）；注入与手动按钮照常。', want ? 'success' : 'info');
+    if (notify) {
+        toast(next
+            ? `总开关已打开：插件会自己推进剧情（定篇章 / 开章 / 换拍 / 支线 / 插曲）。${bookNote}`
+            : `总开关已关闭：不再自己调模型（不再花钱）；注入与手动按钮照常。${bookNote}`,
+        next ? 'success' : 'info');
+    }
+    return true;
+}
+
+/**
+ * ★ 总开关 ↔ 自带世界书的全局挂载（0.27.7，用户提的）。
+ *
+ * 用户的原话：「再点那个关插件的总开关后，会自动取消世界书的全局挂载，开启再自动挂回来」。
+ *
+ * 为什么这件事非做不可：**世界书是酒馆在注入的，不归插件管**。
+ * 插件停了，那本契约还挂在全局、每一轮都往上下文里塞「你会收到故事导演的幕后演出计划」——
+ * 于是关掉之后聊天反而更别扭：模型在等一份永远不会来的计划。
+ *
+ * ⚠ 「开回来时挂回去」只做**我们摘掉的那一次**（`bookMountedBySwitch` 记账）：
+ *   本来就没挂（用户不需要它）或用户自己摘的，都不该被我们偷偷挂上。
+ *
+ * @returns {string} 给 toast 补的一句说明（没动世界书时是空串）
+ */
+function syncBookWithMaster(on) {
+    const s = settings();
+    if (s.bookUnmountOnOff === false) return '';       // 用户把这条自动行为关了
+    try {
+        if (!on) {
+            if (!isGlobalBookEnabled(PLUGIN_WORLD)) { s.bookMountedBySwitch = false; return ''; }
+            setGlobalBook(PLUGIN_WORLD, false);
+            s.bookMountedBySwitch = true;
+            console.info(`[故事导演] 总开关关闭：顺手把世界书「${PLUGIN_WORLD}」从全局挂载摘掉了（开回来时会挂回）。`);
+            return `世界书「${PLUGIN_WORLD}」已从全局挂载摘掉（开回来会自动挂上）。`;
+        }
+        if (!s.bookMountedBySwitch) return '';          // 不是我们摘的 → 不擅自挂
+        setGlobalBook(PLUGIN_WORLD, true);
+        s.bookMountedBySwitch = false;
+        console.info(`[故事导演] 总开关打开：把世界书「${PLUGIN_WORLD}」挂回全局。`);
+        return `世界书「${PLUGIN_WORLD}」已挂回全局。`;
+    } catch (error) {
+        console.debug('[故事导演] 随总开关摘挂世界书失败', error);
+        return '';
+    }
 }
 
 /**
@@ -5506,6 +5575,13 @@ function exposeDiagnostics() {
             // ★ 0.27.6：中断这次生成（面板上那个「中断」按钮走的就是它）+ 查一下现在在生成什么。
             abort: () => { abortGenerate(); return true; },
             generating: () => ({ 生成中: storyGenerating, 在生成什么: genLabel, 已等秒数: genStartedAt ? Math.round((Date.now() - genStartedAt) / 1000) : 0, 已收字数: genChars, 支持中断: typeof genCtl?.abort === 'function' }),
+            // ★ 0.27.7：总开关（面板 ⏻ 与设定页那个勾是同一个）。排查「世界书为什么被摘了」用它。
+            master: (want) => setMaster(!!want),
+            book: () => ({
+                已全局挂载: isGlobalBookEnabled(PLUGIN_WORLD),
+                是我们随总开关摘的: !!settings().bookMountedBySwitch,
+                随总开关摘挂: settings().bookUnmountOnOff !== false,
+            }),
             epicKeys: () => {
                 const box = epicOf(rootOf()) ?? {};
                 return { 内存里读到的键: Object.keys(box), 说明: '「篇章」是新名字；「总纲」是旧名字（只读兼容用，不该再出现在变量里）' };
