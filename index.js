@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.27.11';
+const VERSION = '0.27.12';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -119,8 +119,12 @@ const ORACLE_ACTION_ID = 'story-director-adopt';
 const AFTER_MVU_DELAY = 1500;
 /** MVU 的 MESSAGE_RECEIVED 入口有 3s throttle，兜底路径必须晚于它。 */
 const AFTER_MESSAGE_DELAY = 4000;
-/** 一章/一条支线的拍数上限（防止模型把整本书塞进一章）。 */
-const BEAT_MAX = 6;
+/**
+ * 一章/一条支线的拍数上限（防止模型把整本书塞进一章）。
+ * ★ 0.27.12：6 → **8**。因为这一版把「一拍」改小了（一拍只写**一个来回**），
+ *   一章需要更多拍才撑得住原来的篇幅。
+ */
+const BEAT_MAX = 8;
 const BEAT_MIN = 3;
 /**
  * ★ 同一拍连着注入几轮之后，就往注入里加一句「别再重复同一场景 / 同一句台词」。
@@ -282,12 +286,24 @@ const DEFAULT = {
     chapterGap: 4,
     threadWarmup: 3,
     /**
-     * 一拍至少演多少轮才允许换拍（防连跳）。
-     * ★ 0.27.2：默认从 2 提到 **3** —— 单拍至少留出三轮，给 {{user}} 真正的回应与后果展开空间。
-     *   1 等于没有刹车；想更慢就继续调大。
-     *   想更慢就调到 4；这是**换拍刹车**，模型自己改拍号已经不算数（见 TOKEN_PULL 的注释）。
+     * 一拍至少演多少轮才允许换拍。
+     *
+     * ★ 0.26.1：默认 1 → **2**（当时以为「1 = 一拍一轮，推得太快」）。
+     * ★ 0.27.2：2 → **3**。
+     * ★ 0.27.12：**回到 1** —— 用户报的「第一拍一回合演完了，还要硬等三回合才跳拍」。
+     *
+     *   复盘：那个刹车是在治**症状**。真正的病根是**拍太大** —— 神谕被要求把拍写成
+     *   「一件能被叙述完的结果」（见 BEAT_FORMAT_RULES），于是一拍一条回复就能落地；
+     *   插件只好用「硬等 N 轮」压速度，而那几轮是**纯空转**：拍已经演完了，
+     *   注入却还把它当「当前拍」催模型推进（甚至挂一句「你还没回报落地」的假提示）。
+     *
+     *   现在改从粒度上治：一拍 = **一个来回的一次交锋**（拍更多、每条更小），
+     *   落地就**立刻**进下一拍。物理上也不会失控 —— 一次心跳最多进一拍，
+     *   所以「一拍 ≤ 一条回复」是天然下限，一章再快也要 N 条回复。
+     *
+     *   想慢还是可以调大（这就是留着这个设置项的理由：某些模型会乱报落拍）。
      */
-    minReplies: 3,
+    minReplies: 1,
     /** 两次「重排剩下的拍」之间至少隔几轮（防连着重生成，烧 token 也把剧情搅乱）。 */
     redesignGap: 3,
 
@@ -308,7 +324,12 @@ const DEFAULT = {
 
     /** 生成用的上下文。 */
     intensity: 'normal',
-    beatTarget: 4,
+    /**
+     * 请神谕排一章时「大约几拍」。
+     * ★ 0.27.12：4 → **6**。一拍改小成「一个来回」之后，一章要多几拍才撑得住原来的篇幅
+     *   （一章 ≈ 拍数条回复；以前 4 拍 × 硬等 3 轮 = 12 条，其中大半是白等）。
+     */
+    beatTarget: 6,
     /**
      * 一个**篇章**（一部完整的大故事）由几章组成。
      * 篇章的章表就是这个长度；写满这些章，这一部就收尾、换新的一部。
@@ -410,6 +431,12 @@ const DEFAULT = {
         focusBeatSince: 0,
         /** ★ 上面那种「同一拍卡住」时给注入用的一句话；换拍 / 正常时为空串。 */
         focusStale: '',
+        /**
+         * ★ 0.27.12：「**这一拍已经落了**，只是按刹车还在等换拍」时给注入用的一句话（例：`第 3 拍`）。
+         * 存在的理由：那段等待是给**余波**留的，不是给「重演这一拍」留的 ——
+         * 注入必须说清，否则模型会以为还没演完（见 evaluateDirector 里那段说明）。
+         */
+        landedHold: '',
         /**
          * ★ 用户钉住的要求（「记住它，每轮都带上」）。
          *
@@ -1656,6 +1683,7 @@ function buildInjection(live = null) {
         } else if (hasMain) {
             mainLines = renderMainSection(main, {
                 maxBeats: BEAT_MAX, root, banUserAction: ban, focusStale: s.run.focusStale,
+                landedHold: s.run.landedHold || '',
                 // ★ 0.27.0：模型自己报的「缺铺垫」与「微调」各回它一句（只出现一轮 / 补完为止）。
                 setupNote: s.run.setupNote || '',
                 beatNote: s.run.beatNote || '',
@@ -2247,12 +2275,16 @@ const COMMON_RULES = [
 const BEAT_FORMAT_RULES = [
     '每一拍按这个格式写：**谁做了什么 → 于是局面变成什么样**。',
     '   · 主语必须是 NPC、第三方或环境，**不能是 {{user}}**；',
-    '   · 写「结果」（事情真的发生了），不要写「即将发生」「气氛渐渐…」；',
-    '   · 不要以「{{user}} 的选择 / 回应 / 是否答应」为前置条件。',
+    // ★ 0.27.12（用户报的「一拍一回合就演完了，还要硬等」）：
+    //   以前这里写的是「写结果，不要写即将发生」+「不要以 {{user}} 的回应为前置条件」——
+    //   那两条合起来就把一拍定义成「一件**能被叙述完**的事」，于是它当然一条回复就落地。
+    //   现在改成「一拍 = 一个来回」，并要求**收在把局面递给他**（但不要求他回应才成立）。
+    '   · ★ **一拍只写一个来回**：别人的动作 + 它当场造成的局面变化。不要把两三个来回并成一拍；',
+    '   · ★ 收在**把局面递到 {{user}} 面前**（一个提问、一个条件、一件要他处置的事）——',
+    '     但**不要求他回应才成立**：他要是不接，世界照样往前走（下一拍就是别人接着动）。',
     '好例子：「一名陌生的客商住进了后巷的客栈，第二天清早她的贴身侍女与他搭了两句话」',
-    '　　「那位客商在席上送了她一支簪子，她收下之后没戴出来」（伏笔：簪子）',
     '坏例子：「她鼓起勇气向他搭话，他答应了」（安排了 {{user}}）',
-    '　　「他若同意，她便说出实情」（把剧情挂在 {{user}} 的选择上）',
+    '　　「他若同意，她便说出实情」（把这一拍挂在他的选择上，它就不成立了）',
 ];
 
 /**
@@ -4248,17 +4280,29 @@ async function evaluateDirector({ live = null } = {}) {
         // ★ 同一拍已经连着注入好几轮了吗？（正文模型没回报「本拍已落」时，注入块会和上一轮几乎一模一样 ——
         //   提示词如此相似，模型写出高度相似甚至复读的话是**可预期的**。见 buildInjection 里那段叮嘱。）
         //   「几轮」按回复数算，和别的节奏同源。
+        //
+        //   ⚠ 0.27.12：**已经落了的那一拍不算「卡住」**。以前这里不看 `本拍已落`，
+        //   于是「拍演完了、只是被刹车压着等」的那几轮会挂上一句
+        //   「第 N 拍已经连着演了 3 轮**还没落地** —— 说明你还没回报落地」——
+        //   那是**假话**（它报了），模型只会去重演或自我矛盾。用户报的「硬等三回合还很诡异」就是它。
         {
             const since = Math.round(toNumber(rt.focusBeatSince, 0));
+            const landed = truthy(main[KEY_BEAT_DONE]);
             if (!since || Math.round(toNumber(rt.focusBeat, 0)) !== beat) {
                 rt.focusBeatSince = count;              // 换拍（或首次）→ 重新开始计时
                 save();
-            } else if (count - since >= FOCUS_STALE_REPLIES) {
-                rt.focusStale =
-                    `第 ${beat} 拍已经连着演了 ${count - since} 轮还没落地`;
-                if (count - since === FOCUS_STALE_REPLIES) {
-                    console.info(`[故事导演] ${rt.focusStale} —— 已在注入里叮嘱不要重复同一场景 / 同一句台词；`
-                        + '若正文模型一直没写 `本拍已落`，可以用面板的「手动推进一拍」纠偏。');
+            } else if (!landed && count - since >= FOCUS_STALE_REPLIES) {
+                const want = `第 ${beat} 拍已经连着演了 ${count - since} 轮还没落地`;
+                if (rt.focusStale !== want) {
+                    rt.focusStale = want;
+                    if (count - since === FOCUS_STALE_REPLIES) {
+                        console.info(`[故事导演] ${want} —— 已在注入里叮嘱不要重复同一场景 / 同一句台词；`
+                            + '若正文模型一直没写 `本拍已落`，可以用面板的「手动推进一拍」纠偏。');
+                    }
+                    save();
+                    // ★ 0.27.12：**必须同步一次** —— 不然这句话只写到设置里，注入还是上一轮那份，
+                    //   模型永远看不到（原文就是漏了这一句：设了 focusStale 却没 syncMainInjection）。
+                    syncMainInjection();
                 }
             }
         }
@@ -4273,6 +4317,7 @@ async function evaluateDirector({ live = null } = {}) {
                 rt.beatAt = count;
                 rt.focusBeatSince = count;          // 换拍了：同一拍的「连着演了几轮」重新计时
                 rt.focusStale = '';
+                rt.landedHold = '';                 // 换拍了 → 上一条「已落等换拍」的回执作废
                 rt.setupNote = '';                  // 这一拍落了 → 之前按着它的铺垫要求完成使命
                 rt.beatNote = '';
                 save();
@@ -4282,6 +4327,13 @@ async function evaluateDirector({ live = null } = {}) {
                     : `第 ${Math.min(focus, next - 1)} 拍已落地，进入第 ${next} 拍。`, 'success');
                 syncMainInjection();
                 if (!panel?.hidden) render();
+            } else {
+                // ★ 0.27.12：这一拍**已经落了**，只是按刹车（minReplies > 1）还在等。
+                //   注入必须**说清这件事**：本轮写余波，不要重演；并把那句假的「还没落地」摘掉。
+                rt.focusStale = '';
+                rt.landedHold = `第 ${beat} 拍`;
+                save();
+                syncMainInjection();
             }
             return;
         }
@@ -5693,20 +5745,28 @@ async function forceOpenStory() {
 async function migrateLegacyKeysBothScopes({ notify = false } = {}) {
     const api = mvu();
     const report = { story: null, message: null, chat: null, pace: null, changed: false };
-    // ③′ 换拍刹车：0.27.2 默认 `minReplies = 3`。旧存档里常见 1 或 2，
-    //    光改默认值影响不到他们。用版本标记而不是旧的布尔标记，确保 0.27.1 已迁移过的存档也能升级一次。
+    // ③′ 换拍节奏的迁移，**一个版本标记只做一步**（顺序执行、绝不互相打架）。
+    //
+    //   历史：0.26.1 默认 1→2、0.27.2 又 2→3，两步都是「把更早的默认值提上去」。
+    //   0.27.12 把结论推翻了（硬刹车是治症状，病根是拍太大），默认回到 1 ——
+    //   于是**那两步的净效果等于零**，整段作废；这里只留一步「把我们自己设的那个 3 收回来」。
+    //
+    //   ⚠ 踩过一次（探针抓到的）：把两代迁移都留下、各自更新同一个标记，
+    //   结果第一代每次都会把 minReplies 改回 3、第二代再改回 1 ——
+    //   `changed` 永远为真、每轮都写盘、日志刷屏。
     {
         const s = settings();
-        if (!s.paceFixed || s.paceFixedVersion !== '0.27.2') {
-            s.paceFixed = true;
-            s.paceFixedVersion = '0.27.2';
-            if (Math.round(toNumber(s.minReplies, 1)) <= 2) {
-                const from = Math.round(toNumber(s.minReplies, 1));
-                s.minReplies = 3;
-                report.pace = { from, to: 3 };
+        if (s.paceFixedVersion !== '0.27.12') {
+            const from = Math.round(toNumber(s.minReplies, 1));
+            // 只回退**我们上次自己设的那个 3**：用户手动调成 4 / 5（想要刹车）的一律不动。
+            if (from === 3) {
+                s.minReplies = 1;
+                report.pace = { from, to: 1 };
                 report.changed = true;
-                console.info('[故事导演] 换拍刹车已调到「一拍至少演 3 轮」（想更慢就去设定页调大）。');
+                console.info('[故事导演] 换拍不再硬等：最小间隔回到 1 轮（一拍演完就进下一拍；想慢去设定页调大）。');
             }
+            s.paceFixed = true;
+            s.paceFixedVersion = '0.27.12';
             save();
         }
     }

@@ -868,7 +868,7 @@ export function renderInjectionHeader({ banUserAction = true, mode = 'main' } = 
 /**
  * 主线区块：整条线的拍列表 + 本轮聚焦哪一拍 + 落拍回报怎么写。
  */
-export function renderMainSection(main, { maxBeats = 8, root = null, banUserAction = true, focusStale = '', setupNote = '', beatNote = '' } = {}) {
+export function renderMainSection(main, { maxBeats = 8, root = null, banUserAction = true, focusStale = '', setupNote = '', beatNote = '', landedHold = '' } = {}) {
   const lines = [];
   const title = String(unwrap(main[MAIN_TITLE]) ?? '').trim();
   const arc = String(unwrap(main[MAIN_ARC]) ?? '').trim();
@@ -906,7 +906,15 @@ export function renderMainSection(main, { maxBeats = 8, root = null, banUserActi
       '　**给回应留位置**：NPC 提问、试探、提出条件或向 {{user}} 发起行动时，在有实质回应空间的位置收笔；不要接着替他默认答应、拒绝或沉默，再把后果演完。',
       '　世界可以自主行动，但不等于跳过他的参与；他主动闲聊、追问或改变方向时，就在当前拍里承接，**不要用突发事件把他正奔向的场面掀掉**（天降灾变、第三方插手、被人抢先一步都不许）。没有待回应的交锋、结果已自然落定时，也不必故意拖轮数。',
     );
-    // ★ 同一拍连着注入好几轮时点名提醒 —— 否则注入块和上一轮几乎一样，模型极易复读。
+    // ★ 0.27.12：这一拍**已经落了**、只是按刹车在等换拍（minReplies > 1）。
+  //   这段等待是给**余波**留的，不是给「重演这一拍」留的 —— 必须说清，否则模型会以为还没演完。
+  if (landedHold) {
+    lines.push(
+      `✅ **${landedHold}已经落了**（插件按节奏再进下一拍）—— 本轮**不要重演它**：`,
+      '　　写它留下的**余波**：别人的反应、被谁看见了、关系挪了一格；或者为下一拍铺一步。',
+    );
+  }
+  // ★ 同一拍连着注入好几轮时点名提醒 —— 否则注入块和上一轮几乎一样，模型极易复读。
     if (focusStale) {
       lines.push(
         `　⚠ **${focusStale}** —— 说明你还没回报「这一拍已经落地」，或者它确实还没发生。`,
