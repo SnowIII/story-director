@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.27.5';
+const VERSION = '0.27.6';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -2830,8 +2830,46 @@ let storyGeneratingSince = 0;
 /** 一次生成最多允许挂多久（毫秒）。超过就当成死了，放开闸门重试。 */
 const GENERATE_WATCHDOG = 4 * 60 * 1000;
 
+/**
+ * ★ 中断生成（0.27.6，用户提的「点下这个按钮，可以中断这次请求」）。
+ *
+ * 怎么做才是**真的**中断：神谕的 `api.run(messages, opts)` 收 `opts.signal`，
+ * 一路传给底层的 fetch（见 story-oracle 的 soCallModel）——所以我们持一个 AbortController，
+ * abort 掉发出的那个请求，而不是「等它跑完再假装没看见」（那样照样烧 token）。
+ *
+ * 三道保险，缺一不可：
+ *   · `genCtl`      —— 交给 api.run 的 signal（真正掐断网络请求）；
+ *   · `genId`       —— 每次生成一个新号；结果回来时号对不上就**作废**（中断后被新的一次顶掉的情形）；
+ *   · `genAborted`  —— 用户主动取消的标记：调用方据此**不记失败**（否则会白吃 90 秒退避，还弹一句「生成失败」）。
+ */
+let genCtl = null;
+let genId = 0;
+let genAborted = false;
+/** 当前在生成什么（给前端那行动画用，例如「章节」「篇章检查」）。 */
+let genLabel = '';
+/** 这次生成开始的时间戳 + 已收到的字数（流式时能看到它在动）。 */
+let genStartedAt = 0;
+let genChars = 0;
+/** 每秒刷新一次「生成中」那行（秒数得会走，不然看着像卡死）。 */
+let genTicker = null;
+
+/** 用户主动中断的结果标记：与「失败（null）」严格分开，免得被当成失败记进退避。 */
+const ORACLE_CANCELLED = Symbol('oracle-cancelled');
+
+/**
+ * 刚刚是不是**用户主动中断**的？
+ *
+ * 中断是用户的选择，不是错误 —— 但生成函数只能返回 true/false，调用方看到 false 就会
+ * 弹「开章失败」、或者在「当前」页记一条「上一次开章失败」。所以留一个短时间窗，
+ * 让那些提示自己让开（窗口外仍按真失败处理，不会把真问题吞掉）。
+ */
+let genAbortedAt = 0;
+function justAborted(ms = 10000) {
+    return genAborted && genAbortedAt > 0 && Date.now() - genAbortedAt < ms;
+}
+
 /** 开始一次生成：顺带做看门狗检查（超时就当上一次已经死了）。 */
-function beginGenerate() {
+function beginGenerate(label = '剧情') {
     if (storyGenerating) {
         const hung = storyGeneratingSince && Date.now() - storyGeneratingSince > GENERATE_WATCHDOG;
         if (!hung) return false;
@@ -2839,14 +2877,54 @@ function beginGenerate() {
         storyGenerating = false;
         storyGeneratingSince = 0;
     }
+    storyGenerating = true;
     storyGeneratingSince = Date.now();
+    genId++;
+    genAborted = false;
+    genLabel = String(label || '剧情');
+    genStartedAt = Date.now();
+    genChars = 0;
+    try { genCtl = new AbortController(); } catch { genCtl = null; }
+    if (genTicker) { clearInterval(genTicker); genTicker = null; }
+    genTicker = setInterval(() => { renderBusyBar(); }, 1000);
+    renderBusyBar();
     return true;
 }
 
 function endGenerate() {
     storyGenerating = false;
     storyGeneratingSince = 0;
+    if (genTicker) { clearInterval(genTicker); genTicker = null; }
+    genCtl = null;
+    genLabel = '';
+    genStartedAt = 0;
+    genChars = 0;
+    renderBusyBar();
 }
+
+/**
+ * 用户点了「中断」：掐断请求 + 立刻放开闸门（不等它 reject，用户可以马上重来）。
+ * ⚠ 不要在这里推进 genId —— 保留它，让刚才那次回来的结果能被认出「还是它」而作废。
+ */
+function abortGenerate() {
+    if (!storyGenerating) { toast('现在没有正在进行的生成。', 'info'); return; }
+    const label = genLabel || '剧情';
+    genAborted = true;
+    genAbortedAt = Date.now();
+    try { genCtl?.abort(); } catch { /* 已经结束 */ }
+    // 立刻放开闸门：底层 fetch 的 reject 不一定立刻回来，用户不该干等
+    if (genTicker) { clearInterval(genTicker); genTicker = null; }
+    storyGenerating = false;
+    storyGeneratingSince = 0;
+    genCtl = null;
+    genLabel = '';
+    genStartedAt = 0;
+    genChars = 0;
+    console.info(`[故事导演] 用户中断了「${label}」这次生成。`);
+    toast(`已中断「${label}」这次生成。`, 'info');
+    renderBusyBar();
+}
+
 
 /**
  * 生成失败的退避表：key → 失败时间戳。
@@ -2913,10 +2991,31 @@ async function askOracle({ task = 'chapter', userText = '', regenerate = false, 
     //   神谕的 api.run() 是**裸调用**（只带我们给的这两条消息、不带它的对话），所以想不留痕根本不用它提供机制 ——
     //   不发 appendReply 就够了。真要排查，看控制台与面板「诊断」页（生成闸门 / 世界书 / 实际注入的引导全文）。
     if (!quiet) console.debug(`[故事导演] 本次生成（${task}）的提示词与原始回复不写入神谕窗口；需要排查见面板「诊断」页。`);
-    const result = await api.run([
-        { role: 'system', content: system },
-        { role: 'user', content: user },
-    ]);
+    // ★ 0.27.6：把中断信号交下去（真掐断请求），并顺手接住流式进度让前端那行会动。
+    const myId = genId;
+    const ctl = genCtl;
+    let result;
+    try {
+        result = await api.run([
+            { role: 'system', content: system },
+            { role: 'user', content: user },
+        ], {
+            signal: ctl?.signal,
+            onDelta: (full) => { genChars = String(full || '').length; },
+        });
+    } catch (error) {
+        if (ctl?.signal?.aborted || genAborted || myId !== genId) {
+            console.info('[故事导演] 这次生成被中断（用户取消），结果不再采用。');
+            return ORACLE_CANCELLED;
+        }
+        throw error;   // 真失败：仍按原来的路子交给调用方（toast + 退避）
+    }
+    // ⚠ 必须同时判 `genAborted`：万一底层**不理会** signal（老版本神谕 / 非 fetch 路径），
+    //   迟到的结果照样会 resolve —— 只比 genId 拦不住它（中断并不推进 genId）。
+    if (genAborted || myId !== genId) {
+        console.info('[故事导演] 这次生成的结果已作废（用户中断 / 期间被新的一次生成取代）。');
+        return ORACLE_CANCELLED;
+    }
     return String(result ?? '');
 }
 
@@ -3060,12 +3159,13 @@ async function generateInterludeChapter({ quiet = true, userText = '', force = f
         return false;
     }
     const key = `interlude-chapter:${chatKey()}`;
-    if (!beginGenerate()) return false;
+    if (!beginGenerate('间章')) return false;
     if (!force && isBackingOff(key)) return false;
     if (quiet) toast('正在请故事神谕设计一段间章…');
     const origin = chatKey();
     try {
         const raw = await askOracle({ task: 'interlude', rejected, quiet, userText });
+        if (raw === ORACLE_CANCELLED) return false;          // 用户中断：不记失败、不弹错
         if (raw === null) { markFailed(key); return false; }
         if (origin && chatKey() !== origin) {
             console.info('[故事导演] 生成期间切换了聊天，这段间章（属于旧聊天）没有落盘。');
@@ -3274,7 +3374,7 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
         return false;
     }
     const key = `epic:${chatKey()}`;
-    if (!beginGenerate()) return false;
+    if (!beginGenerate(mode === 'audit' ? '篇章检查' : '篇章')) return false;
     if (!force && isBackingOff(key)) return false;
     if (quiet) toast(mode === 'establish' ? '正在请故事神谕定下一部篇章（一部完整的大故事）…' : '正在按他实际做的事重新校准篇章…');
     const origin = chatKey();
@@ -3300,6 +3400,7 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
             quiet,
             userText,
         });
+        if (raw === ORACLE_CANCELLED) return false;          // 用户中断：不记失败、不弹错
         if (raw === null) { clearFailed(key); return false; }
         if (origin && chatKey() !== origin) {
             clearFailed(key);
@@ -3377,7 +3478,7 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
         return false;
     }
     const key = `chapter:${chatKey()}:${regenerate ? 're' : 'new'}`;
-    if (!beginGenerate()) return false;
+    if (!beginGenerate(regenerate ? '重写这一章' : '下一章')) return false;
     if (!force && isBackingOff(key)) return false;
     const button = panel?.querySelector('.sd-generate-chapter');
     const label = button?.textContent || '';
@@ -3397,6 +3498,7 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
             // ★ 朱批只影响这一次重生成（不进钉住、不落盘）。
             taskOpts: { critique },
         });
+        if (raw === ORACLE_CANCELLED) return false;          // 用户中断：不记失败、不弹错
         if (raw === null) { markFailed(key); return false; }
         if (origin && chatKey() !== origin) {
             console.info('[故事导演] 生成期间切换了聊天，这一章（属于旧聊天）没有落盘。');
@@ -3427,13 +3529,14 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
 }
 
 async function generateThread({ quiet = true, userText = '', force = false } = {}) {
-    if (!beginGenerate()) return false;
+    if (!beginGenerate('支线')) return false;
     const key = `thread:${chatKey()}`;
     if (!force && isBackingOff(key)) return false;
     if (quiet) toast('正在请故事神谕设计一条支线…');
     const origin = chatKey();
     try {
         const raw = await askOracle({ task: 'thread', quiet, userText });
+        if (raw === ORACLE_CANCELLED) return false;          // 用户中断：不记失败、不弹错
         if (raw === null) { markFailed(key); return false; }
         if (origin && chatKey() !== origin) {
             console.info('[故事导演] 生成期间切换了聊天，这条支线（属于旧聊天）没有落盘。');
@@ -3459,7 +3562,7 @@ async function generateThread({ quiet = true, userText = '', force = false } = {
 }
 
 async function generateInterlude({ quiet = true, userText = '', force = false } = {}) {
-    if (!beginGenerate()) return false;
+    if (!beginGenerate('插曲')) return false;
     const key = `interlude:${chatKey()}`;
     if (!force && isBackingOff(key)) return false;
     if (quiet) toast('正在请故事神谕设计一条插曲…');
@@ -3468,6 +3571,7 @@ async function generateInterlude({ quiet = true, userText = '', force = false } 
         // ⚠ 必须用 task:'side'（小插曲）。'interlude' 现在是**间章**那条通道，
         //    用错会让不占幕的小插曲生成出一整章的数据结构。
         const raw = await askOracle({ task: 'side', quiet, userText });
+        if (raw === ORACLE_CANCELLED) return false;          // 用户中断：不记失败、不弹错
         if (raw === null) { markFailed(key); return false; }
         if (origin && chatKey() !== origin) {
             console.info('[故事导演] 生成期间切换了聊天，这条插曲（属于旧聊天）没有落盘。');
@@ -3724,6 +3828,8 @@ let lastBlockLogged = '';
 
 let lastAttempt = { key: 'none', text: '', at: 0 };
 function noteAttempt(ok, error) {
+    // 用户主动中断的那一次不算「开章失败」（否则「当前」页会留一条误导的记录）。
+    if (!ok && justAborted()) return;
     lastAttempt = { key: ok ? 'ok' : 'fail', text: ok ? '上一次开章成功' : `上一次开章失败：${String(error || '').slice(0, 80)}`, at: aiMessageCount() };
 }
 
@@ -5096,6 +5202,39 @@ function toggleMaster(force) {
         : '总开关已关闭：不再自己调模型（不再花钱）；注入与手动按钮照常。', want ? 'success' : 'info');
 }
 
+/**
+ * 「正在生成」那一条（0.27.6，用户提的）。
+ *
+ * 为什么放在**总开关那一条**里：它是 sticky、且切到哪个页签都在 —— 生成可能要几十秒，
+ * 用户切到别的页去填个设定，回来还得能一眼看见「它还在跑」，并且随时能掐掉。
+ *
+ * 显示三件事：**在生成什么**（篇章检查 / 下一章 / 间章…）、**已等了多少秒**（会自己走，
+ * 否则静止的文字看着像卡死）、以及流式时**已收到多少字**（真的在动）。
+ */
+function renderBusyBar() {
+    const host = panel?.querySelector('.sd-busybar');
+    if (!host) return;
+    if (!storyGenerating) {
+        host.hidden = true;
+        host.innerHTML = '';
+        return;
+    }
+    const secs = Math.max(0, Math.round((Date.now() - (genStartedAt || Date.now())) / 1000));
+    const chars = genChars > 0 ? `<span class="sd-busy-meta">· 已收 ${genChars} 字</span>` : '';
+    host.hidden = false;
+    host.innerHTML = `
+        <span class="sd-busy-spin" aria-hidden="true"></span>
+        <span class="sd-busy-text">正在生成<b>${esc(genLabel || '剧情')}</b>…</span>
+        <span class="sd-busy-meta">${secs}s</span>
+        ${chars}
+        <button type="button" class="sd-btn sd-busy-stop" title="掐断这次模型请求（已经发出的请求会被中止，不等它跑完）">中断</button>`;
+    host.querySelector('.sd-busy-stop')?.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        abortGenerate();
+    });
+}
+
 /** 画总开关那一条（在面板最上面，切到哪个页都看得见）。 */
 function renderPower() {
     const host = panel?.querySelector('.sd-powerbar');
@@ -5112,6 +5251,7 @@ function renderPower() {
             ? '它正在自己推进：定篇章 / 开章 / 换拍 / 支线 / 插曲。不想让它烧，就点左边关掉。'
             : '已关：不会自己调模型（不花钱）。注入与手动按钮照常 —— 点左边重新打开。'}</span>`;
     host.querySelector('.sd-power')?.addEventListener('click', () => { toggleMaster(); });
+    renderBusyBar();
 }
 
 function render() {
@@ -5259,13 +5399,19 @@ async function forceOpenStory() {
     if (s.autoEpic && !epicStarted(epic)) {
         toast('先定篇章…');
         const ok = await generateEpic({ quiet: false, force: true, mode: 'establish', entry: completedMainTitles(rootOf()).length });
-        if (!ok) { toast('篇章没做成 —— 但可以照样开章（它只是配料）。', 'warning'); }
+        // ⚠ `justAborted()` 只用来「压掉失败提示 / 不再往下走」，**绝不能当进门闸** ——
+        //   用户掐掉之后立刻再点一次「立刻开篇」是完全正常的操作（探针抓到过这个 bug）。
+        if (!ok) {
+            if (justAborted()) return;
+            toast('篇章没做成 —— 但可以照样开章（它只是配料）。', 'warning');
+        }
     }
     if (epicStarted(epicOf(rootOf()))) {
         await patchMain({ [MAIN_CLOSED]: false }, {});
     }
     // ★ 0.27.3：「立刻开篇」是**从第一拍开始**的入口，同样必须整章重来（别继承上一章的拍号）。
     const opened = await generateChapter({ quiet: false, force: true, restart: true });
+    if (!opened && justAborted()) return;   // 用户中断：不记失败、不弹错
     noteAttempt(opened, opened ? '' : '见控制台日志');
     if (!opened) toast('开章失败 —— 控制台里有 [故事导演] 的原始回复，发给我看看。', 'error');
     syncMainInjection();
@@ -5357,6 +5503,9 @@ function exposeDiagnostics() {
             oracle: () => oracleCompatReport(),
             forceOpen: () => forceOpenStory(),   // 排查用：立刻走一遍「定篇章 + 开章」全路径
             migrate: () => migrateLegacyKeysBothScopes({ notify: true }),   // 老存档字段名迁移（见 0.21.1/0.21.2）
+            // ★ 0.27.6：中断这次生成（面板上那个「中断」按钮走的就是它）+ 查一下现在在生成什么。
+            abort: () => { abortGenerate(); return true; },
+            generating: () => ({ 生成中: storyGenerating, 在生成什么: genLabel, 已等秒数: genStartedAt ? Math.round((Date.now() - genStartedAt) / 1000) : 0, 已收字数: genChars, 支持中断: typeof genCtl?.abort === 'function' }),
             epicKeys: () => {
                 const box = epicOf(rootOf()) ?? {};
                 return { 内存里读到的键: Object.keys(box), 说明: '「篇章」是新名字；「总纲」是旧名字（只读兼容用，不该再出现在变量里）' };
@@ -5698,6 +5847,7 @@ function makePanel() {
         </nav>
         <div class="sd-body">
             <div class="sd-powerbar"></div>
+            <div class="sd-busybar" hidden></div>
             <section class="sd-page sd-now-tab" data-tab="now"></section>
             <section class="sd-page sd-epic-tab" data-tab="epic" hidden></section>
             <section class="sd-page sd-main-tab" data-tab="main" hidden></section>

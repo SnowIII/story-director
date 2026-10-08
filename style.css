@@ -157,6 +157,44 @@
 #story-director-panel .sd-power-dot { font-size: 13px; line-height: 1; }
 #story-director-panel .sd-power-hint { font-size: 11px; line-height: 1.45; opacity: 0.72; }
 
+/* ★ 「正在生成…」那一条（0.27.6）：紧贴总开关下面，也 sticky —— 生成时切到哪个页都看得见，
+   并且随时能点「中断」把这次请求掐掉。
+   转圈用纯 CSS（不引图标库）：一个圆环 + 一段亮色弧，转起来就有「在跑」的感觉。 */
+#story-director-panel .sd-busybar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    flex: 0 0 auto;
+    border: 1px solid rgba(230, 195, 130, 0.55);
+    border-radius: 9px;
+    padding: 5px 9px;
+    font-size: 12px;
+    background-color: var(--SmartThemeBlurTintColor, rgba(24, 26, 34, 0.94));
+    background-image: linear-gradient(rgba(230, 195, 130, 0.13), rgba(230, 195, 130, 0.13));
+    backdrop-filter: blur(4px);
+}
+#story-director-panel .sd-busybar[hidden] { display: none; }
+#story-director-panel .sd-busybar b { font-weight: 700; }
+#story-director-panel .sd-busy-text { flex: 1 1 auto; min-width: 0; }
+#story-director-panel .sd-busy-meta { font-size: 11px; opacity: 0.7; flex: 0 0 auto; }
+#story-director-panel .sd-busy-spin {
+    flex: 0 0 auto;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    border: 2px solid rgba(230, 195, 130, 0.28);
+    border-top-color: rgb(240, 210, 150);
+    animation: sd-spin 0.8s linear infinite;
+}
+#story-director-panel .sd-busy-stop { flex: 0 0 auto; padding: 3px 9px; }
+@keyframes sd-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    #story-director-panel .sd-busy-spin { animation-duration: 2.4s; }
+}
+
 /* 「关于」页：头像 + 作者 + 版本。刻意简单 —— 说明文档在 README 与「设定」页里。 */
 #story-director-panel .sd-about { text-align: center; }
 #story-director-panel .sd-about-avatar {
