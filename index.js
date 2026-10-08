@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.27.1';
+const VERSION = '0.27.2';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -279,10 +279,11 @@ const DEFAULT = {
     threadWarmup: 3,
     /**
      * 一拍至少演多少轮才允许换拍（防连跳）。
-     * ★ 0.26.1：默认从 1 提到 **2** —— 1 等于没有刹车（一拍一轮，读者会觉得「推得太快」）。
-     *   想更慢就调到 3~4；这是**唯一的换拍刹车**，模型自己改拍号已经不算数（见 TOKEN_PULL 的注释）。
+     * ★ 0.27.2：默认从 2 提到 **3** —— 单拍至少留出三轮，给 {{user}} 真正的回应与后果展开空间。
+     *   1 等于没有刹车；想更慢就继续调大。
+     *   想更慢就调到 4；这是**换拍刹车**，模型自己改拍号已经不算数（见 TOKEN_PULL 的注释）。
      */
-    minReplies: 2,
+    minReplies: 3,
     /** 两次「重排剩下的拍」之间至少隔几轮（防连着重生成，烧 token 也把剧情搅乱）。 */
     redesignGap: 3,
 
@@ -5251,17 +5252,19 @@ async function forceOpenStory() {
 async function migrateLegacyKeysBothScopes({ notify = false } = {}) {
     const api = mvu();
     const report = { story: null, message: null, chat: null, pace: null, changed: false };
-    // ③′ 换拍刹车：0.26.1 之前默认 `minReplies = 1`（一拍一轮 = 没有刹车）。老存档里存着那个 1，
-    //    光改默认值影响不到他们 —— 所以一次性提到 2（只做一次，之后用户自己调回 1 也不会再被改）。
+    // ③′ 换拍刹车：0.27.2 默认 `minReplies = 3`。旧存档里常见 1 或 2，
+    //    光改默认值影响不到他们。用版本标记而不是旧的布尔标记，确保 0.27.1 已迁移过的存档也能升级一次。
     {
         const s = settings();
-        if (!s.paceFixed) {
+        if (!s.paceFixed || s.paceFixedVersion !== '0.27.2') {
             s.paceFixed = true;
-            if (Math.round(toNumber(s.minReplies, 1)) <= 1) {
-                s.minReplies = 2;
-                report.pace = { from: 1, to: 2 };
+            s.paceFixedVersion = '0.27.2';
+            if (Math.round(toNumber(s.minReplies, 1)) <= 2) {
+                const from = Math.round(toNumber(s.minReplies, 1));
+                s.minReplies = 3;
+                report.pace = { from, to: 3 };
                 report.changed = true;
-                console.info('[故事导演] 换拍刹车已调到「一拍至少演 2 轮」（想更慢就去设定页调大）。');
+                console.info('[故事导演] 换拍刹车已调到「一拍至少演 3 轮」（想更慢就去设定页调大）。');
             }
             save();
         }

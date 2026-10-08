@@ -900,6 +900,11 @@ export function renderMainSection(main, { maxBeats = 8, root = null, banUserActi
       lines.push(`${mark} ${i + 1}. ${beats[i]}`);
     }
     lines.push(`本轮聚焦第 ${current} 拍（✔ 的已经发生过、不要重演；· 的不要抢跑）。`);
+    lines.push(
+      '　**一拍不是一条回复的任务清单，可以跨多轮展开。** 本轮先承接 {{user}} 最新的言行，只推进当前局面中的一个小步；不要把发起、交锋与结果一次包办。',
+      '　**给回应留位置**：NPC 提问、试探、提出条件或向 {{user}} 发起行动时，在有实质回应空间的位置收笔；不要接着替他默认答应、拒绝或沉默，再把后果演完。',
+      '　世界可以自主行动，但不等于跳过他的参与；他主动闲聊、追问或改变方向时，就在当前拍里承接，不要用突发事件强行切走。没有待回应的交锋、结果已自然落定时，也不必故意拖轮数。',
+    );
     // ★ 同一拍连着注入好几轮时点名提醒 —— 否则注入块和上一轮几乎一样，模型极易复读。
     if (focusStale) {
       lines.push(
@@ -1092,7 +1097,8 @@ export function renderContractSection({ banUserAction = true } = {}) {
     '【落拍回报 · 命令写法】',
     '你可以在回复末尾用 MVU 命令写变量（与卡片自己的状态栏变量互不干扰，全部写在 `故事导演` 命名空间下）：',
     '```',
-    `_.set('${PATH.main}.${KEY_BEAT}', 3);`,
+    `// 当前拍号由插件推进；不要自己写 ${PATH.main}.${KEY_BEAT}`,
+    `_.set('${PATH.main}.${KEY_BEAT_DONE}', true);`,
     `_.set('${PATH.main}.${KEY_CHAPTER_DONE}', true);`,
     `_.set('${PATH.main}.${KEY_READY}', true);`,
     `_.set('${PATH.interlude}.${IL.beat}', 2);`,
