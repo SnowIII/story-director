@@ -1100,24 +1100,41 @@ export function renderInterludeChapterSection(chapter, { maxBeats = 6, banUserAc
 /**
  * 变量契约：只讲「怎么回报」，字段清单交给世界书（省 token）。
  * 每轮都注入，但正文很短。
+ *
+ * ★ 0.27.11：**按幕给不同的示例**（用户问「发给正文的变量提示词和间章是分开的吗」时查出来的）。
+ *   以前这一段不分幕，示例代码里永远是主线字段 —— 间章时段它照样注入，
+ *   模型顺手抄一句 `主线.本拍已落` 就会去动**已经收尾那一章**的进度。
+ *   现在：主线时段给主线示例，间章时段给间章示例，并且明说另一种被忽略。
+ *   整段「怎么回报」的规矩仍然只有这一处 + 世界书那三条常驻条目（不给两份，免得互相打架）。
  */
-export function renderContractSection({ banUserAction = true } = {}) {
-  const lines = [
-    '【落拍回报 · 命令写法】',
-    '你可以在回复末尾用 MVU 命令写变量（与卡片自己的状态栏变量互不干扰，全部写在 `故事导演` 命名空间下）：',
-    '```',
+export function renderContractSection({ banUserAction = true, mode = 'main' } = {}) {
+  const inInterlude = mode === 'interlude';
+  const code = inInterlude ? [
+    `// 画面号由插件推进；不要自己写 ${PATH.interlude}.${IL.beat}`,
+    `_.set('${PATH.interlude}.${IL.beatDone}', true);`,
+    `_.set('${PATH.interlude}.${IL.ready}', true);`,
+    `_.set('${PATH.threads}.t1.${THREAD_FIELDS.done}', true);`,
+    `_.set('${PATH.interludes}.i1.${INTERLUDE_FIELDS.done}', true);`,
+  ] : [
     `// 当前拍号由插件推进；不要自己写 ${PATH.main}.${KEY_BEAT}`,
     `_.set('${PATH.main}.${KEY_BEAT_DONE}', true);`,
     `_.set('${PATH.main}.${KEY_CHAPTER_DONE}', true);`,
     `_.set('${PATH.main}.${KEY_READY}', true);`,
-    `_.set('${PATH.interlude}.${IL.beat}', 2);`,
-    `_.set('${PATH.interlude}.${IL.ready}', true);`,
     `_.set('${PATH.threads}.t1.${THREAD_FIELDS.done}', true);`,
     `_.set('${PATH.interludes}.i1.${INTERLUDE_FIELDS.done}', true);`,
+  ];
+  const lines = [
+    '【落拍回报 · 命令写法】',
+    `你可以在回复末尾用 MVU 命令写变量（与卡片自己的状态栏变量互不干扰，全部写在 \`${NS}\` 命名空间下）：`,
+    '```',
+    ...code,
     '```',
     `　· \`${NS}.${EPIC}.*\`（篇章）是**导演写的，你只读** —— 不要自己改它。`,
     '　· 只有**真的写进正文之后**才写这些命令；写不出、拿不准就什么都不写（插件不会因此卡住，下一轮照旧引导）。',
-    `　· \`${PATH.interlude}.*\` 只在**间章**时段有效（注入块里有【间章】时）；主线时段写它会被插件忽略。`,
+    // 幕的边界要说清：现在在演哪一种幕，就只写那一种的字段。
+    inInterlude
+      ? `　· 你**现在在间章**：只写上面这些 \`${PATH.interlude}.*\`（与支线 / 插曲）；写 \`${PATH.main}.*\` 会被插件忽略。`
+      : `　· 你现在在**主线**：只写上面这些 \`${PATH.main}.*\`（与支线 / 插曲）；\`${PATH.interlude}.*\` 只在间章时段有效，主线时段写它会被忽略。`,
     '　· 不要自己改 `拍` 列表与 `标题`（那是导演的事）；不要写 `故事导演` 之外的新根键。',
   ];
   if (banUserAction) {
@@ -1340,6 +1357,10 @@ export function nsPathOfCommand(command) {
 const PLUGIN_OWNED = new Set();
 for (const key of [MAIN_BEATS, MAIN_TITLE, MAIN_ARC, MAIN_SCOPE, MAIN_GOAL]) PLUGIN_OWNED.add(`${NS}.主线.${key}`);
 for (const key of [IL.title, IL.scene, IL.beats]) PLUGIN_OWNED.add(`${NS}.${INTERLUDE}.${key}`);
+// ★ 0.27.11：**幕开关只能插件写**（0.27.10 补的洞）。
+//   以前 `间章.进行中` 是敞开的：模型在间章时段写一句 `_.set('故事导演.间章.进行中', false)`
+//   就能把自己踢出间章（`currentMode()` 就是读它），而且没有任何地方会发现。
+PLUGIN_OWNED.add(`${NS}.${INTERLUDE}.${IL.active}`);
 // 0.26.0：计划整棵住在插件里，MVU 只留回报 token —— 所以「计划」那一整块谁都不许往变量里写，
 // 模型真写了也丢掉（不然变量里会重新长出一份再也不更新的旧计划）。
 PLUGIN_OWNED.add(`${NS}.${EPIC}`);
@@ -1348,6 +1369,20 @@ let interludeWritesAllowed = false;
 export function setInterludeWritesAllowed(flag) {
   interludeWritesAllowed = !!flag;
 }
+
+/**
+ * ★ 0.27.11：**间章时段内，模型对 `主线.*` 的进度回报一律忽略**。
+ *
+ * 为什么必须拦（用户问「发给正文的那些变量提示词，和间章是分开的吗」时查出来的洞）：
+ * 契约槽是**不分幕**的，它给的示例代码是主线字段（`主线.本拍已落` / `主线.章目标达成` / `主线.可进下一章`）——
+ * 间章时段它照样在注入里。模型顺手抄一句，就会：
+ *   · 把**已经收尾那一章**的 `本拍已落` 标上（那件事早就演完了）；
+ *   · 或写 `合理性审查 = '驳回'` → 于是心跳里的审查梯子在**间章期间**去重排/改篇章。
+ * 那一章已经收尾了，它写什么都不该改变局面 —— 一律丢掉。
+ */
+const MAIN_LOCKED_IN_INTERLUDE = new Set([
+  KEY_BEAT, KEY_BEAT_DONE, KEY_CHAPTER_DONE, KEY_READY, KEY_REVIEW, KEY_REVIEW_NOTE, MAIN_CLOSED,
+]);
 
 function ownedPathOf(target) {
   return String(target ?? '').replace(/\[(['"])(.*?)\1\]/g, '.$2');
@@ -1425,6 +1460,12 @@ export function applyNsCommand(statData, command, path) {
   const owned = ownedPathOf(target);
   // 间章时段之外，模型写 `间章.*` 一律忽略：那些字段只在这段幕里有效，别让它留下脏状态。
   if (!interludeWritesAllowed && (owned === `${NS}.${INTERLUDE}` || owned.startsWith(`${NS}.${INTERLUDE}.`))) {
+    return true;
+  }
+  // 反方向也要拦：间章时段内，主线那一章已经收尾了，它的进度字段写什么都不算（见上面的说明）。
+  if (interludeWritesAllowed && owned.startsWith(`${NS}.主线.`)
+    && MAIN_LOCKED_IN_INTERLUDE.has(owned.slice(`${NS}.主线.`.length))) {
+    console.debug(`[故事导演] 间章时段忽略 AI 对主线进度的写入：${target}`);
     return true;
   }
   if (PLUGIN_OWNED.has(owned)) {

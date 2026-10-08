@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.27.10';
+const VERSION = '0.27.11';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -1703,7 +1703,10 @@ function syncMainInjection() {
         setExtensionPrompt(SLOT.threads, '', extension_prompt_types.IN_CHAT, 0, false, extension_prompt_roles.SYSTEM);
         setExtensionPrompt(SLOT.interludes, '', extension_prompt_types.IN_CHAT, 0, false, extension_prompt_roles.SYSTEM);
 
-        const contract = s.injectContract ? substitute(renderContractSection({ banUserAction: settings().banUserAction !== false }).join('\n')) : '';
+        // ★ 0.27.11：契约**按幕给示例** —— 间章时段不该再把主线那几条命令摆在模型面前。
+        const contract = s.injectContract
+            ? substitute(renderContractSection({ banUserAction: settings().banUserAction !== false, mode: currentMode() }).join('\n'))
+            : '';
         setExtensionPrompt(SLOT.contract, contract, extension_prompt_types.IN_CHAT, depth, false, extension_prompt_roles.SYSTEM);
 
         if (panel && !panel.hidden) renderDiagnostics(text, contract);
