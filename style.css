@@ -144,6 +144,23 @@
 #story-director-panel .sd-power-dot { font-size: 13px; line-height: 1; }
 #story-director-panel .sd-power-hint { font-size: 11px; line-height: 1.45; opacity: 0.72; }
 
+/* 「关于」页：头像 + 作者 + 版本。刻意简单 —— 说明文档在 README 与「设定」页里。 */
+#story-director-panel .sd-about { text-align: center; }
+#story-director-panel .sd-about-avatar {
+    width: 96px;
+    height: 96px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.18));
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    display: block;
+    margin: 4px auto 8px;
+}
+#story-director-panel .sd-about-name { font-size: 16px; font-weight: 700; margin: 0 0 2px; }
+#story-director-panel .sd-about-sub { font-size: 12.5px; margin: 0 0 6px; opacity: 0.9; }
+#story-director-panel .sd-about-note { font-size: 11.5px; opacity: 0.7; margin: 0; line-height: 1.5; }
+#story-director-panel .sd-about-link { text-decoration: none; display: inline-block; }
+
 #story-director-panel .sd-page { display: flex; flex-direction: column; gap: 10px; }
 #story-director-panel .sd-page[hidden] { display: none; }
 

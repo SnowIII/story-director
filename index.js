@@ -51,6 +51,11 @@ import {
 const ID = 'story-director';
 const PLUGIN_WORLD = '故事导演';
 const SCHEMA_VERSION = 1;
+/**
+ * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
+ * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
+ */
+const VERSION = '0.27.1';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -1295,6 +1300,8 @@ async function rememberChapter(main, { live = null } = {}) {
 
 const bundledWorldbookUrl = () => new URL('worldbook/story-director.json', import.meta.url).href;
 const bundledIconUrl = () => new URL('icon.svg', import.meta.url).href;
+/** 作者头像（256×256 的方形小图，见「关于」页）。原图 4 MB，仓库里放的是裁好的小图。 */
+const bundledAvatarUrl = () => new URL('avatar.jpg', import.meta.url).href;
 
 function isGlobalBookEnabled(name) {
     return Array.isArray(selected_world_info) && selected_world_info.includes(name);
@@ -4435,7 +4442,37 @@ let panel = null;
 let bubble = null;
 let dragging = false;
 
-const TABS = [['now', '当前'], ['epic', '篇章'], ['main', '主线'], ['interlude', '间章'], ['side', '支线/插曲'], ['set', '设定']];
+const TABS = [['now', '当前'], ['epic', '篇章'], ['main', '主线'], ['interlude', '间章'], ['side', '支线/插曲'], ['set', '设定'], ['about', '关于']];
+
+/**
+ * 「关于」页：头像 + 作者 + 版本 + 出处。
+ * 刻意做得**简洁**（用户的要求）：不放说明文档（那些在 README 与「设定」页里）。
+ */
+function renderAboutTab() {
+    const host = panel?.querySelector('.sd-about-tab');
+    if (!host) return;
+    const m = (() => { try { return new URL('manifest.json', import.meta.url).href; } catch { return ''; } })();
+    const version = VERSION;
+    host.innerHTML = `
+        <div class="sd-card sd-about">
+            <img class="sd-about-avatar" src="${esc(bundledAvatarUrl())}" alt="喵辉夜" title="喵辉夜">
+            <p class="sd-about-name">喵辉夜</p>
+            <p class="sd-about-sub">Discord：<b>喵辉夜</b></p>
+            <p class="sd-about-note">「故事导演」的作者。有问题、想提要求，Discord 上找我。</p>
+        </div>
+        <div class="sd-card">
+            <div class="sd-card-head"><span class="sd-card-title">这个插件</span><span class="sd-chip">v${esc(version || '?')}</span></div>
+            <p class="sd-note">让故事**自己往下走**：自动定篇章、开章、按拍推进，间隙用间章 / 支线 / 插曲填上。<br>
+            设计规则与提示词全文都在仓库里（<code>model/</code>），改了什么、为什么改，更新记录里都写了。</p>
+            <div class="sd-row">
+                <a class="sd-btn sd-about-link" href="https://github.com/SnowIII/story-director" target="_blank" rel="noreferrer">GitHub 仓库</a>
+                <a class="sd-btn sd-about-link" href="${esc(m)}" target="_blank" rel="noreferrer">manifest.json</a>
+            </div>
+            <p class="sd-note sd-dim">代码部分 <b>100% AI 生成</b> —— 不成熟的作者及其产品会带来一定的风险。<br>
+            底座与致谢：故事神谕 Story Oracle · 酒馆助手 JS-Slash-Runner · MagVarUpdate（MVU） · ST-Prompt-Template。</p>
+        </div>`;
+}
+
 
 function esc(value) {
     const node = document.createElement('div');
@@ -4993,6 +5030,7 @@ function renderTabs() {
     if (s.tab === 'interlude') renderInterludeTab();
     if (s.tab === 'side') renderSideTab();
     if (s.tab === 'set') renderSetTab();
+    if (s.tab === 'about') renderAboutTab();
 }
 
 /**
@@ -5277,7 +5315,7 @@ async function migrateLegacyKeysBothScopes({ notify = false } = {}) {
 function exposeDiagnostics() {
     try {
         window.__storyDirector = {
-            version: () => settings().schema,
+            version: () => VERSION,
             why: () => firstChapterBlocker(),
             oracle: () => oracleCompatReport(),
             forceOpen: () => forceOpenStory(),   // 排查用：立刻走一遍「定篇章 + 开章」全路径
@@ -5642,6 +5680,7 @@ function makePanel() {
             <section class="sd-page sd-interlude-tab" data-tab="interlude" hidden></section>
             <section class="sd-page sd-side-tab" data-tab="side" hidden></section>
             <section class="sd-page sd-set-tab" data-tab="set" hidden></section>
+            <section class="sd-page sd-about-tab" data-tab="about" hidden></section>
         </div>`;
     panel.querySelector('.sd-close').onclick = close;
     panel.querySelectorAll('.sd-tab').forEach((button) => {
