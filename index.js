@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.27.2';
+const VERSION = '0.27.3';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -380,11 +380,10 @@ const DEFAULT = {
         mode: 'main',
         /**
          * 插件**上一次聚焦**的拍号。
-         * 模型会把 `当前拍` 提前写成 N+1（世界书与注入都是这么要求的），所以换拍时不能拿库里那个值
-         * 当基准 —— 否则 `beat` 已经是 N+1，再加一就变成 N+2，整章会隔一拍跳一拍。
+         * 每次采用一章新主线时重置为 1；拍号只由插件推进，模型不再自己改。
          */
         focusBeat: 0,
-        /** 间章里插件上一次聚焦的拍号（与主线各自独立）。 */
+        /** 间章独立的拍号基准；每次采用新间章时重置为 1。 */
         focusInterlude: 0,
         /**
          * ★ 当前这一拍是**从第几轮开始**连续注入的（AI 回复数）。
@@ -2973,6 +2972,10 @@ async function applyChapter(chapter, { live = null, quiet = false, keep = undefi
     //   把 `chapterOpenedAt` 推到当轮（余波 / 支线 warmup 的时钟被重排搅乱）。
     if (played === 0) {
         rt.chapterOpenedAt = rt.beatAt;
+        // ★ 0.27.3：整章重来时把「同一拍卡住」的旧提醒也清掉（它指的是上一章那一拍）。
+        rt.focusStale = '';
+        rt.setupNote = '';
+        rt.beatNote = '';
         // 支线／插曲的节奏基准一起播在开章这一刻：这一个间隔之内只推主线，
         // 满了一个间隔才开始考虑往里面插配菜（挂机/狂点都不会提前）。
         rt.threadAt = rt.beatAt;
@@ -3022,7 +3025,12 @@ async function applyInterludeChapter(chapter, { live = null, quiet = false } = {
     await patchMain({ [MAIN_CLOSED]: true, [KEY_READY]: false }, { live });
     const rt = s.run;
     rt.mode = 'interlude';
+    // ★ 0.27.3：每段新间章都从第 1 个画面重新算 —— 绝不允许沿用上一段（或主线）的拍号；
+    //   顺手清掉主线留下的那两条一次性备注，免得在间章注入里冒出来。
     rt.focusInterlude = 1;
+    rt.focusStale = '';
+    rt.setupNote = '';
+    rt.beatNote = '';
     rt.beatAt = aiMessageCount();
     rt.interludeAt = rt.beatAt;
     rt.lastInterlude = String(chapter?.[IL.title] ?? '').trim();
@@ -3933,7 +3941,7 @@ async function evaluateDirector({ live = null } = {}) {
             rt.chapterOpenedAt = count;
             markGenerated(rt, count);
             save();
-            void generateChapter({ quiet: true, force: true }).then((ok) => noteAttempt(ok));
+            void generateChapter({ quiet: true, force: true, restart: true }).then((ok) => noteAttempt(ok));
             return;
         }
         noteBlock({ key: 'none', text: '' });
@@ -3960,11 +3968,11 @@ async function evaluateDirector({ live = null } = {}) {
         }
 
         // ② 自动换拍（手动模式下也照做：写盘不需要调模型）
-        if (s.autoBeat && truthy(main[KEY_BEAT_DONE])) {
+        if (s.autoBeat && beat <= total && truthy(main[KEY_BEAT_DONE])) {
             const at = Math.round(toNumber(rt.beatAt, 0));
             if (!at || count - at >= minReplies) {
                 const focus = Math.max(1, Math.round(toNumber(rt.focusBeat, 0)) || beat);
-                const next = Math.max(beat, focus + 1);
+                const next = Math.min(total + 1, Math.max(beat, focus + 1));
                 rt.focusBeat = next;
                 rt.beatAt = count;
                 rt.focusBeatSince = count;          // 换拍了：同一拍的「连着演了几轮」重新计时
@@ -3973,7 +3981,9 @@ async function evaluateDirector({ live = null } = {}) {
                 rt.beatNote = '';
                 save();
                 await patchMain({ [KEY_BEAT]: next, [KEY_BEAT_DONE]: false }, { live });
-                toast(`第 ${Math.min(focus, next - 1)} 拍已落地，进入第 ${next} 拍。`, 'success');
+                toast(next > total
+                    ? `第 ${Math.min(focus, total)} 拍已落地，本章拍已演完。`
+                    : `第 ${Math.min(focus, next - 1)} 拍已落地，进入第 ${next} 拍。`, 'success');
                 syncMainInjection();
                 if (!panel?.hidden) render();
             }
@@ -4105,7 +4115,10 @@ async function ensureClosingChapter({ interlude = true } = {}) {
         if (interlude) {
             return await generateInterludeChapter({ quiet: true, force: true });
         }
-        return await generateChapter({ quiet: true, force: true });
+        // ★ 0.27.3：这里开的是**新的一章**（上一章已经记进章节史了）→ 必须整章重来（restart）。
+        //   以前不传 keep，于是走「保住已演过的拍」那条默认路径：新章会把上一章演过的拍当成自己的，
+        //   拍号从 4 续到 5 —— 用户看到的「只生成了三拍，却说第四拍已落地、进入第五拍」就是这么来的。
+        return await generateChapter({ quiet: true, force: true, restart: true });
     })().catch((error) => {
         console.debug('[故事导演] 交出新一幕失败', error);
         return false;
@@ -4443,7 +4456,7 @@ let panel = null;
 let bubble = null;
 let dragging = false;
 
-const TABS = [['now', '当前'], ['epic', '篇章'], ['main', '主线'], ['interlude', '间章'], ['side', '支线/插曲'], ['set', '设定'], ['about', '关于']];
+const TABS = [['now', '当前'], ['epic', '篇章'], ['main', '主线'], ['side', '支线/插曲'], ['set', '设定'], ['about', '关于']];
 
 /**
  * 「关于」页：头像 + 作者 + 版本 + 出处。
@@ -4688,10 +4701,19 @@ function renderNowTab() {
 function renderMainTab() {
     const host = panel?.querySelector('.sd-main-tab');
     if (!host) return;
+    if (currentMode() === 'interlude') {
+        renderInterludeTab(host);
+        return;
+    }
     const s = settings();
     const main = mainState();
     const beats = beatsOf(main);
     host.innerHTML = `
+        <div class="sd-main-progress" aria-label="当前拍进度">
+            <span class="sd-main-progress-label">当前拍</span>
+            <strong>${beats.length ? Math.min(currentBeat(main), beats.length) : '—'}</strong>
+            <span class="sd-main-progress-total">/ ${beats.length || '—'}</span>
+        </div>
         <div class="sd-card">
             <div class="sd-card-head"><span class="sd-card-title">主线（一章一拍地演）</span></div>
             <label class="sd-field"><span>章标题</span><input name="main-title" value="${esc(String(unwrap(main[MAIN_TITLE]) ?? ''))}"></label>
@@ -5019,6 +5041,11 @@ async function applyBookMode() {
 function renderTabs() {
     if (!panel) return;
     const s = settings();
+    // 0.27.3：旧存档可能还记着已删除的「间章」页签，统一回到主线页；间章内容会在这里替换主线。
+    if (s.tab === 'interlude') {
+        s.tab = 'main';
+        save();
+    }
     panel.querySelectorAll('.sd-tab').forEach((button) => {
         button.classList.toggle('is-active', button.dataset.tab === s.tab);
     });
@@ -5028,7 +5055,6 @@ function renderTabs() {
     if (s.tab === 'now') renderNowTab();
     if (s.tab === 'epic') renderEpicTab();
     if (s.tab === 'main') renderMainTab();
-    if (s.tab === 'interlude') renderInterludeTab();
     if (s.tab === 'side') renderSideTab();
     if (s.tab === 'set') renderSetTab();
     if (s.tab === 'about') renderAboutTab();
@@ -5231,7 +5257,8 @@ async function forceOpenStory() {
     if (epicStarted(epicOf(rootOf()))) {
         await patchMain({ [MAIN_CLOSED]: false }, {});
     }
-    const opened = await generateChapter({ quiet: false, force: true });
+    // ★ 0.27.3：「立刻开篇」是**从第一拍开始**的入口，同样必须整章重来（别继承上一章的拍号）。
+    const opened = await generateChapter({ quiet: false, force: true, restart: true });
     noteAttempt(opened, opened ? '' : '见控制台日志');
     if (!opened) toast('开章失败 —— 控制台里有 [故事导演] 的原始回复，发给我看看。', 'error');
     syncMainInjection();
@@ -5408,57 +5435,46 @@ async function endInterludeNow() {
     await evaluateDirector();
 }
 
-/** 手动开一段间章（把主线暂时收着）。 */
-async function startInterludeNow() {
-    if (currentMode() === 'interlude') { toast('已经在间章里了。', 'info'); return; }
-    settings().run.lastGenerateAt = 0;
-    save();
-    await generateInterludeChapter({ quiet: false, force: true });
-}
-
-function renderInterludeTab() {
-    const host = panel?.querySelector('.sd-interlude-tab');
+/**
+ * 间章界面 —— 它**住在「主线」页里**（0.27.3）：页签只剩一个「主线」，
+ * 进间章时这一页整块换成间章内容，主线编辑区收起来。这样用户只有一个地方要看，
+ * 也不会再误以为「间章和主线是两条在同时推进的线」。
+ */
+function renderInterludeTab(host = panel?.querySelector('.sd-main-tab')) {
     if (!host) return;
-    const s = settings();
     const chapter = interludeChapterOf(rootOf());
     const beats = interludeBeatsOf(chapter);
     const beat = interludeBeat(chapter);
-    const active = truthy(chapter[IL.active]);
-    const rt = s.run;
-    const count = aiMessageCount();
-    const gap = Math.max(0, Math.round(toNumber(s.interludeGap, 3)));
-    const afterMark = Math.round(toNumber(rt.aftermathAt, 0)) || Math.round(toNumber(rt.chapterOpenedAt, 0));
-    const wait = Math.max(0, gap - (count - afterMark));
     const history = completedMainTitles(rootOf());
+    const title = String(unwrap(chapter[IL.title]) ?? '').trim();
+    const scene = String(unwrap(chapter[IL.scene]) ?? '').trim();
+    const note = String(unwrap(chapter[IL.note]) ?? '').trim();
+    const playedAll = beats.length > 0 && beat > beats.length;
 
     host.innerHTML = `
-        <div class="sd-card ${active ? 'sd-card-main' : ''}">
+        <div class="sd-main-progress" aria-label="当前日常画面进度">
+            <span class="sd-main-progress-label">当前画面</span>
+            <strong>${beats.length ? Math.min(beat, beats.length) : '—'}</strong>
+            <span class="sd-main-progress-total">/ ${beats.length || '—'}</span>
+        </div>
+        <div class="sd-card sd-card-main">
             <div class="sd-card-head">
-                <span class="sd-card-title">间章${String(unwrap(chapter[IL.title]) ?? '').trim() ? ` · ${esc(String(unwrap(chapter[IL.title])).trim())}` : ''}</span>
-                <span class="sd-chip ${active ? 'is-busy' : ''}">${active ? '进行中' : '未开始'}</span>
+                <span class="sd-card-title">间章${title ? ` · ${esc(title)}` : ''}</span>
+                <span class="sd-chip is-busy">进行中</span>
             </div>
             <p class="sd-note">间章是**与主线互斥**的另一种幕：主线收尾后的间隙交给它，演日常、顺手埋伏笔。
             与主线最大的区别是**它不要求跑完** —— 下面的日常画面只是素材，谁都可以跳过；写到合适的地方就收，随时回主线。</p>
-            ${active ? `
-                ${String(unwrap(chapter[IL.scene]) ?? '').trim() ? `<p class="sd-sub">场合：${esc(String(unwrap(chapter[IL.scene])).trim())}</p>` : ''}
-                <label class="sd-field"><span>标题</span><input name="il-title" value="${esc(String(unwrap(chapter[IL.title]) ?? ''))}"></label>
-                <label class="sd-field"><span>场合</span><input name="il-scene" value="${esc(String(unwrap(chapter[IL.scene]) ?? ''))}"></label>
-                <label class="sd-field"><span>日常画面（一行一个，可写 <code>1. …</code>）</span><textarea name="il-beats" rows="5">${esc(beats.map((text, index) => `${index + 1}. ${text}`).join('\n'))}</textarea></label>
-                <p class="sd-note">第 ${Math.min(beat, Math.max(1, beats.length))}/${beats.length || '—'} 个${beats.length && beat > beats.length ? '（素材已演完，可以回主线了）' : ''}
-                ${String(unwrap(chapter[IL.note]) ?? '').trim() ? `　· 顺手埋的线：${esc(String(unwrap(chapter[IL.note])).trim())}` : ''}</p>
-                <div class="sd-row">
-                    <button type="button" class="sd-btn sd-save-interlude">保存这段间章</button>
-                    <button type="button" class="sd-btn sd-next-ilbeat">手动推进一个画面</button>
-                    <button type="button" class="sd-btn sd-end-interlude">现在回主线</button>
-                    <button type="button" class="sd-btn sd-regen-interlude">换一段间章</button>
-                </div>` : `
-                <div class="sd-row">
-                    <button type="button" class="sd-btn sd-start-interlude">现在开一段间章</button>
-                    <button type="button" class="sd-btn sd-goto-main">去看看主线</button>
-                </div>
-                <p class="sd-note">${s.autoInterludeChapter
-                    ? `自动：主线一章收尾、余波过 ${gap} 轮之后，会自动开一段间章（现在还要等 ${wait} 轮）。`
-                    : '自动开间章是关着的：只有你点按钮才会进间章（主线收尾后会直接开下一章）。'}</p>`}
+            ${scene ? `<p class="sd-sub">场合：${esc(scene)}</p>` : ''}
+            <label class="sd-field"><span>标题</span><input name="il-title" value="${esc(String(unwrap(chapter[IL.title]) ?? ''))}"></label>
+            <label class="sd-field"><span>场合</span><input name="il-scene" value="${esc(String(unwrap(chapter[IL.scene]) ?? ''))}"></label>
+            <label class="sd-field"><span>日常画面（一行一个，可写 <code>1. …</code>）</span><textarea name="il-beats" rows="5">${esc(beats.map((text, index) => `${index + 1}. ${text}`).join('\n'))}</textarea></label>
+            ${playedAll || note ? `<p class="sd-note">${playedAll ? '素材都演过了，可以回主线了。' : ''}${note ? `${playedAll ? '　' : ''}顺手埋的线：${esc(note)}` : ''}</p>` : ''}
+            <div class="sd-row">
+                <button type="button" class="sd-btn sd-save-interlude">保存这段间章</button>
+                <button type="button" class="sd-btn sd-next-ilbeat">手动推进一个画面</button>
+                <button type="button" class="sd-btn sd-end-interlude">现在回主线</button>
+                <button type="button" class="sd-btn sd-regen-interlude">换一段间章</button>
+            </div>
         </div>
         ${history.length ? `<div class="sd-card"><div class="sd-card-head"><span class="sd-card-title">走过的章</span></div><p class="sd-note">${esc(history.join(' → '))}</p></div>` : ''}`;
 
@@ -5466,13 +5482,11 @@ function renderInterludeTab() {
     host.querySelector('.sd-next-ilbeat')?.addEventListener('click', () => { void manualAdvanceInterludeBeat(); });
     host.querySelector('.sd-end-interlude')?.addEventListener('click', () => { void endInterludeNow(); });
     host.querySelector('.sd-regen-interlude')?.addEventListener('click', () => { void generateInterludeChapter({ quiet: false, force: true }); });
-    host.querySelector('.sd-start-interlude')?.addEventListener('click', () => { void startInterludeNow(); });
-    host.querySelector('.sd-goto-main')?.addEventListener('click', () => { settings().tab = 'main'; save(); render(); });
 }
 
 /** 保存间章手改（标题 / 场合 / 日常画面）。 */
 async function saveInterludeFromForm() {
-    const host = panel?.querySelector('.sd-interlude-tab');
+    const host = panel?.querySelector('.sd-main-tab');
     if (!host) return;
     const beats = splitBeats(host.querySelector('[name="il-beats"]')?.value || '');
     const before = interludeBeatsOf(interludeChapterOf(rootOf()));
@@ -5670,17 +5684,16 @@ function makePanel() {
     panel.innerHTML = `
         <div class="sd-head">
             <span class="sd-title">故事导演</span>
-            <nav class="sd-tabs">
-                ${TABS.map(([key, label]) => `<button type="button" class="sd-tab" data-tab="${key}">${esc(label)}</button>`).join('')}
-            </nav>
             <button type="button" class="sd-close" title="关闭">✕</button>
         </div>
+        <nav class="sd-tabs" aria-label="故事导演页面">
+            ${TABS.map(([key, label]) => `<button type="button" class="sd-tab" data-tab="${key}">${esc(label)}</button>`).join('')}
+        </nav>
         <div class="sd-body">
             <div class="sd-powerbar"></div>
             <section class="sd-page sd-now-tab" data-tab="now"></section>
             <section class="sd-page sd-epic-tab" data-tab="epic" hidden></section>
             <section class="sd-page sd-main-tab" data-tab="main" hidden></section>
-            <section class="sd-page sd-interlude-tab" data-tab="interlude" hidden></section>
             <section class="sd-page sd-side-tab" data-tab="side" hidden></section>
             <section class="sd-page sd-set-tab" data-tab="set" hidden></section>
             <section class="sd-page sd-about-tab" data-tab="about" hidden></section>
