@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.27.7';
+const VERSION = '0.27.8';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -968,6 +968,14 @@ async function applyEpic(epic, { live = null, quiet = false, entry = null } = {}
     else delete fields[EP.chapter];      // 校准：进度由「写完一章就 +1」维护，不要被回复里的旧数字覆盖
     await patchEpic(fields, { live });
     const s = settings();
+    // ★ 0.27.8：**换新的一部时，把上一部留下的那一章从主线那一栏清掉**。
+    //   为什么非清不可：主线栏里永远躺着「当前这一章」（收尾不会清掉它的拍），
+    //   而「开第一章」的闸门是 `!beats.length` —— 不清的话新篇章的第一章**永远开不出来**，
+    //   屏幕上还挂着上一部最后一章的标题与拍列表。
+    if (entry !== null && entry !== undefined) {
+        await patchMain({ ...emptyMain(), [MAIN_CLOSED]: false }, { live });
+        console.info('[故事导演] 换了新的一部：主线那一栏已清空，下一次心跳会开这一部的第 1 章。');
+    }
     s.run.epicAt = aiMessageCount();
     // 冷却基准**只在生成成功之后**才写：失败不该消耗节流名额（否则后面开章会被挡住）
     markGenerated(s.run, s.run.epicAt);
@@ -1780,6 +1788,15 @@ function focusedStateBlock(task, { replacingEpic = false } = {}) {
         const written = epicChapter(epic);
         const climax = epicClimax(epic);
 
+        // ★ 0.27.8（用户提的）：**已归档的篇章不再作为「这一册的章内容」参与组装**。
+        //   「归档」的判据是它已经在上一部名单里（演完了就会被记进去，见 archiveFinishedEpic）。
+        //   这里只留一句极短的交代 —— 足够让模型知道「上一部收场了、正在定新的一部」，
+        //   而不是继续拿那张章表往下推。想避开旧剧情的重复，由 antiRepeatBlock 负责。
+        if (!replacingEpic && epicIsArchived(epic)) {
+            lines.push(`【篇章】上一部${title ? `《${title}》` : ''}已经**演义完了**（章表已写满）—— 不要照它的章表继续排。`);
+            if (ledger) lines.push(`既成事实：${ledger}`);
+            lines.push('');
+        } else {
         // ★★ 换新的一部时**绝不能把旧章表当"这一册的章内容"发过去**（补事故）：
         //    以前不管什么任务都把整张章表发下去，于是「重新生成章纲」拿到的就是
         //    「这是你这一册的四章」+「再给我排一次」—— 模型最省力的做法就是把它重抄一遍。
@@ -1814,6 +1831,7 @@ function focusedStateBlock(task, { replacingEpic = false } = {}) {
         if (hooks.length) lines.push(`**还没兑现的伏笔**（要埋就得与它们同源，不要另起炉灶）：${hooks.join('；')}`);
         if (ledger) lines.push(`既成事实：${ledger}`);
         lines.push('');
+        }
     }
 
     // ── 主线：写章节时**只给当前这一章** ──
@@ -2041,23 +2059,60 @@ function antiRepeatBlock(task = '') {
 }
 
 /**
- * 把一部**已经作废**的篇章记进「上一部」名单（换新的一部时调用）。
- * 幂等：同一部（标题 + 章表都一样）只记一次，重试不会把它堆成好几条。
- * 只留最近 3 部。
+ * 把一部**已经结束**的篇章记进归档名单。
+ *
+ * 两个调用时机，语义不同（`why`）：
+ *   · `finished` —— 章表写满了（这一部**演义完了**）。0.27.8：**在最后一章收尾的那一刻就归档**，
+ *     不再等到「新的一部生成成功」才记 —— 否则新篇章生成失败几次，这一部就永远赖在注入里。
+ *   · `replaced` —— 被手动/自动换掉（还没写完就不演了）。
+ *
+ * 归档之后：① 它只作为「**要避开的东西**」进防重复块；② 在「篇章」页的归档区可见；
+ * ③ 不再作为「这一册的章内容」参与提示词组装（见 focusedStateBlock）。
+ *
+ * 幂等：同一部（标题 + 章表都一样）只记一次，重试不会把它堆成好几条。只留最近 5 部。
  */
-function rememberRetiredEpic(epic) {
+function rememberRetiredEpic(epic, { why = 'replaced' } = {}) {
     const s = settings();
+    const chapters = epicChapters(epic).slice(0, 24);
     const entry = {
         title: String(unwrap(epic?.[EP.title]) ?? '').trim(),
-        chapters: epicChapters(epic).slice(0, 24),
+        chapters,
+        climax: String(unwrap(epic?.[EP.climax]) ?? '').trim(),
+        ledger: String(unwrap(epic?.[EP.ledger]) ?? '').trim(),
+        hooks: epicHooks(epic).slice(0, 12),
+        written: epicChapter(epic),
+        why,
+        at: new Date().toISOString(),
     };
     if (!entry.chapters.length) return false;
     const list = Array.isArray(s.run.retiredEpics) ? s.run.retiredEpics : [];
     const same = (a) => JSON.stringify(a?.chapters) === JSON.stringify(entry.chapters) && String(a?.title ?? '') === entry.title;
     if (list.some(same)) return false;
-    s.run.retiredEpics = [...list, entry].slice(-3);
+    s.run.retiredEpics = [...list, entry].slice(-5);
     save();
+    console.info(`[故事导演] 已归档篇章《${entry.title || '未命名'}》（${why === 'finished' ? '演义完了' : '被换掉'}，共 ${chapters.length} 章）。`);
     return true;
+}
+
+/**
+ * ★ 0.27.8：这一部**写完了**就立刻归档。
+ *
+ * 为什么不等「新的一部生成成功」再归档（用户报的那个 bug 的关键）：
+ * 完结的篇章如果一直留在盒子里，它就会一直参与提示词组装；而换新篇章的生成**可能失败**
+ * （网络 / 解析不出区块），失败时钉子摘不掉 —— 于是「一部演完之后永远不开下一部」。
+ */
+function archiveFinishedEpic(live = null) {
+    const epic = epicOf(rootOf(live));
+    if (!epicStarted(epic) || !epicFinished(epic)) return false;
+    return rememberRetiredEpic(epic, { why: 'finished' });
+}
+
+/** 这一部是不是已经归档过了（归档了就不再当「这一册的章内容」发下去）。 */
+function epicIsArchived(epic) {
+    const list = Array.isArray(settings().run.retiredEpics) ? settings().run.retiredEpics : [];
+    const title = String(unwrap(epic?.[EP.title]) ?? '').trim();
+    const chapters = epicChapters(epic);
+    return list.some((item) => String(item?.title ?? '') === title && JSON.stringify(item?.chapters) === JSON.stringify(chapters.slice(0, 24)));
 }
 
 /**
@@ -4019,8 +4074,14 @@ async function evaluateDirector({ live = null } = {}) {
 
             // ① **这一册写完了**（章表里的章都写过了）→ 换一部新的篇章。
             //    ⚠ 这是新模型的关键一环：篇章是**有始有终**的一册，不是无限延长的一条线。
-            //      所以只在「上一章已经收尾、场子空着」时才换，换完就当一部全新的开始。
-            if (beats.length === 0 && epicFinished(epic) && rt.closedChapter) {
+            //
+            //    ★ 0.27.8 修了用户报的「一部演完之后一直不生成下一部」：
+            //     这里原来还要求 `beats.length === 0`（「场子空着」）—— 但那个条件**永远不成立**：
+            //     章收尾并不会清掉主线那一栏的拍（`applyChapter` 总是覆盖成「当前这一章」），
+            //     所以第一部演完之后，这个闸门**一次都没开过**。
+            //     真正该看的只有一件事：**上一章已经收尾**（rt.closedChapter 记着）且章表写满了。
+            if (epicFinished(epic) && rt.closedChapter) {
+                archiveFinishedEpic(live);          // 先归档（失败也不影响下一轮）
                 if (canTryEpic) {
                     rt.epicTries = tries + 1;
                     markPending(`epic:${chatKey()}`);
@@ -4136,6 +4197,12 @@ async function evaluateDirector({ live = null } = {}) {
             markGenerated(rt, count);
             save();
             await rememberChapter(main, { live });
+            // ★ 0.27.8：**就在这一刻**判断这一部是不是演完了 —— 演完了就立刻归档。
+            //   不等「新篇章生成成功」再归档：生成可能失败，失败时它就会一直赖在注入里
+            //   （用户报的「一部演完之后一直不生成下一部」里，有一半是这个原因）。
+            if (archiveFinishedEpic(live)) {
+                toast(`《${String(unwrap(epicOf(rootOf(live))[EP.title]) ?? '这一部')}》这一部已经演义完了，已归档。`, 'success');
+            }
             syncInterludeWrites();
             const useInterlude = s.autoInterludeChapter;
             // ★ 不走间章时（`autoInterludeChapter` 关着）：**开下一章之前**先把篇章检查做掉 ——
@@ -4235,11 +4302,24 @@ function pinModeButtonFirst() {
  * 串行化：同一时间只跑一个；已有在跑就等它（返回它的结果），避免重复生成。
  */
 let closingChapterTask = null;
-async function ensureClosingChapter({ interlude = true } = {}) {
+async function ensureClosingChapter({ interlude = true, live = null } = {}) {
     if (closingChapterTask) return closingChapterTask;
     closingChapterTask = (async () => {
         if (interlude) {
             return await generateInterludeChapter({ quiet: true, force: true });
+        }
+        // ★ 0.27.8：**先判断这一部是不是演完了**。
+        //   用户报的「一部演完之后一直不生成下一部」有两条路都会走到这里：
+        //     ① 章收尾（不走间章时）；
+        //     ② **从间章回主线**（默认走的就是这条：章收尾 → 间章 → 回主线 → 开下一章）。
+        //   而这里原来**无脑开下一章** —— 于是在一个已经写满章表的篇章底下又开了一章，
+        //   换篇章的闸门（在心跳里、要求 epicFinished）虽然成立，却永远轮不到它先执行。
+        //   所以这里必须先换新的一部；新篇章的第一章由下一次心跳按常规开出来。
+        const outgoing = epicOf(rootOf(live));
+        if (epicFinished(outgoing)) {
+            archiveFinishedEpic(live);           // 演完了 → 立刻归档（不再参与注入）
+            console.info(`[故事导演] 上一部《${String(unwrap(outgoing[EP.title]) ?? '')}》章表已写满 —— 改为请神谕定下一部篇章。`);
+            return await generateEpic({ quiet: true, force: true, mode: 'establish', entry: 0 });
         }
         // ★ 0.27.3：这里开的是**新的一章**（上一章已经记进章节史了）→ 必须整章重来（restart）。
         //   以前不传 keep，于是走「保住已演过的拍」那条默认路径：新章会把上一章演过的拍当成自己的，
@@ -5593,6 +5673,7 @@ function exposeDiagnostics() {
                     mode: currentMode(),
                     拍数: beatsOf(main).length,
                     当前拍: currentBeat(main),
+                    章名: String(unwrap(main[MAIN_TITLE]) ?? '').trim(),
                     章目标达成: truthy(main[KEY_CHAPTER_DONE]),
                     可进下一章: truthy(main[KEY_READY]),
                     已收尾: truthy(main[MAIN_CLOSED]),
@@ -5741,6 +5822,53 @@ async function saveInterludeFromForm() {
     toast('这段间章已保存。', 'success');
 }
 
+/**
+ * 「已完结的篇章（归档）」折叠块 —— 0.27.8（用户提的：归档的篇章「仅在特定页面显示」）。
+ *
+ * 归档的篇章**不再参与提示词注入**（见 focusedStateBlock / antiRepeatBlock），
+ * 想看它演过什么、大高潮落在哪、留下了哪些既成事实，就在这里看。
+ * ⚠ 大高潮默认折起来并标「会剧透」——与「篇章」页其它地方同一条纪律。
+ */
+function archivedEpicSection() {
+    const list = Array.isArray(settings().run.retiredEpics) ? settings().run.retiredEpics : [];
+    if (!list.length) return '';
+    const items = list.slice().reverse().map((item) => {
+        const title = String(item?.title ?? '').trim() || '（未命名）';
+        const chapters = Array.isArray(item?.chapters) ? item.chapters : [];
+        const hooks = Array.isArray(item?.hooks) ? item.hooks : [];
+        const why = item?.why === 'finished' ? '演义完了' : '被换掉';
+        const when = (() => {
+            const t = Date.parse(String(item?.at ?? ''));
+            return Number.isFinite(t) ? new Date(t).toLocaleDateString() : '';
+        })();
+        const climax = String(item?.climax ?? '').trim();
+        const ledger = String(item?.ledger ?? '').trim();
+        return `<div class="sd-item">
+            <div class="sd-item-head">
+                <b>《${esc(title)}》</b>
+                <span class="sd-chip">${esc(why)}${item?.written ? ` · 写了 ${esc(String(item.written))} 章` : ''}</span>
+                ${when ? `<span class="sd-chip">${esc(when)}</span>` : ''}
+            </div>
+            ${ledger ? `<p class="sd-line"><b>既成事实</b>${esc(ledger)}</p>` : ''}
+            ${hooks.length ? `<p class="sd-line sd-dim"><b>伏笔</b>${esc(hooks.join('；'))}</p>` : ''}
+            ${(chapters.length || climax) ? `<details class="sd-fold sd-spoiler">
+                <summary>章表 / 大高潮（${chapters.length} 章${climax ? ' · 大高潮已定' : ''}）· 点开看内容<b>（会剧透）</b></summary>
+                <div class="sd-fold-body">
+                    ${climax ? `<p class="sd-line"><b>大高潮</b>${esc(climax)}</p>` : ''}
+                    <ol class="sd-beats">${chapters.map((text) => `<li class="sd-beat">${esc(String(text))}</li>`).join('')}</ol>
+                </div>
+            </details>` : ''}
+        </div>`;
+    }).join('');
+    return `<details class="sd-fold">
+        <summary>已完结的篇章（归档 · ${list.length} 部）</summary>
+        <div class="sd-fold-body">
+            <p class="sd-note">这些篇章**已经收场**，不再参与提示词注入 —— 只在这里留档（也用来让新的篇章避开它们的套路）。</p>
+            ${items}
+        </div>
+    </details>`;
+}
+
 function renderEpicTab() {
     const host = panel?.querySelector('.sd-epic-tab');
     if (!host) return;
@@ -5785,7 +5913,8 @@ function renderEpicTab() {
                     <button type="button" class="sd-btn sd-rebuild-epic">现在定一部篇章</button>
                 </div>
                 <p class="sd-note">${s.autoEpic ? '自动：聊满 2 轮、还没有拍列表时，会自动定篇章，然后才开第一章。' : '自动定篇章是关着的：只在「设定」页打开，或点上面的按钮。'}</p>`}
-        </div>`;
+        </div>
+        ${archivedEpicSection()}`;
 
     host.querySelector('[name="tone"]')?.addEventListener('change', (event) => {
         const picked = toneOf(event.target.value);
