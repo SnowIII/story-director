@@ -1962,3 +1962,42 @@ export function renderStoryLog({
 
   return out.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '') + '\n';
 }
+
+/**
+ * ★ 0.32.1：把世界书里**给别的管线用的模板 / 脚本**从设计提示词里剔掉。
+ *
+ * 真事故（用户报「切成日常之后一直生成失败」）：一次请求 60k 字，其中 **40k 是世界书 dump**，
+ * 里面混着 MVU 的 EJS 模板（`<%_ … _%>` / `getMessageVar('stat_data…')` / `_.set(` …）。
+ * 设计师既用不上这些代码，它们还白占体积、把请求推大。
+ *
+ * 判据保守：**按空行分段，整段命中模板标记才丢** —— 普通设定文字一个字都不动。
+ *
+ * @returns {{text:string, dropped:number}} dropped = 丢掉的段数
+ */
+export function stripScriptChunks(text) {
+  const SCRIPT = /<%|%>|getMessageVar|get_message_variable|stat_data|_\s*\.\s*(get|set|insert|assign|remove|delete|push|unset)\s*\(|<UpdateVariable>|<status_current_variables>|\{\{\s*(get|set)var::|\[mvu_update\]|\[InitVar\]/;
+  const chunks = String(text ?? '').split(/\n{2,}/);
+  const keep = chunks.filter((chunk) => !SCRIPT.test(chunk));
+  return { text: keep.join('\n\n'), dropped: chunks.length - keep.length };
+}
+
+/**
+ * ★ 0.32.1：认出**传输层**的失败（连不上 / 被掐断 / 超时）。
+ *
+ * 真事故里它只是一句 `Network request failed.`，退避却按 90 秒那一档走 ——
+ * 于是每 1.5 分钟重烧一次同样的大请求，用户看到的就是「一直生成失败」。
+ * 判据保守：只认传输层字样，不猜 HTTP 语义；**用户主动中断**不算（那条路另有处理）。
+ *
+ * @returns {string} 命中的字样（没命中就空串）
+ */
+export function transportErrorOf(error) {
+  const text = [
+    error?.message,
+    error?.cause?.message,
+    error?.name,
+    typeof error === 'string' ? error : '',
+  ].filter(Boolean).join(' | ');
+  if (!text) return '';
+  const hit = text.match(/network request failed|failed to fetch|fetch failed|networkerror|econn[a-z]*|etimedout|timed?\s*out|socket hang ?up|connection (reset|closed|refused)|broken pipe|dns|undici/i);
+  return hit ? hit[0] : '';
+}

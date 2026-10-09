@@ -1,5 +1,61 @@
 # 更新记录
 
+## 0.32.1
+**查清「切成日常之后一直生成失败」：锅在中转把长请求掐了 —— 而我们把这件事说错了、还重试太快。**
+
+> 「你看我切成日常之后，一直生成失败，你康康什么情况。」
+
+### 现场（`%APPDATA%\com.tauritavern.client\logs\` 里的 313…317）
+
+| 调用 | 结果 | 耗时 | 模型 | 请求 |
+| --- | --- | --- | --- | --- |
+| #313 | ✗ Network request failed | 23s | 假流式-gemini-3-flash-preview | **103k 字** |
+| #314 | ✓ | 83s | gemini-3.1-pro-preview | 59k 字 |
+| #315 | ✗ Network request failed | 58s | gemini-3.1-pro-preview | 60k 字 |
+| #316 | ✗ Network request failed | 52s | gemini-3.1-pro-preview | 61k 字 |
+| #317 | ✗ Network request failed | **245s** | gemini-3.1-pro-preview | 60k 字 |
+
+失败的**不是间章**，是**篇章设计**那一次调用（用户切完「日常」基调后点「重新定篇章（换一部）」）。
+`errorMessage` 是 `Network request failed. (https://gcli.ggchan.dev/v1/chat/completions)`，
+`response.sse` **0 字节** —— 连接在拿到任何数据之前就被掐了。
+把这 60k 字拆开看：
+
+```
+世界书 / 设定 ………… 40,048 字  ← 里面混着 MVU 的 EJS 模板
+近期对话 ………………… 12,012 字
+系统提示（我们那五份）…  4,986 字
+神谕侧 max_tokens = 65500
+```
+
+**思考型模型 + 60k 字输入 = 首字迟迟不来**，中转（或客户端）按超时把连接断了。
+而我们的退避只有 90 秒那一档（因为传输层错误没被当成「上游的锅」）——
+于是每 1.5 分钟重烧一次同样的大请求，用户看到的就是「一直生成失败」。
+
+### 改成什么
+
+1. **传输层失败按「上游的锅」算**：`network request failed` / `fetch failed` /
+   `ECONNRESET` / `timed out` / `connection reset` 这类字样，退避 **5 分钟**（不再是 90 秒）。
+   判据保守：只认传输层字样，不猜 HTTP 语义；**用户主动中断**不算失败（那条路另有处理）。
+2. **`run.lastError`**：记下「哪一种失败 / 哪台中转 / 退避多久 / **请求多大** / 是哪一次任务」，
+   面板那句「为什么还没有开篇」现在会直接说：
+   > 上一次「篇章」连不上上游（gcli.ggchan.dev）—— 4 分钟后再自动重试（也可以先去神谕那边换模型 / 中转）
+   诊断入口 `__storyDirector.lastError()` 也能直接拿。
+3. **失败提示分三种**（传输层 / 上游报错 / 其它），传输层那句会点名中转并报出这次请求多大 ——
+   不再是一律「生成失败：Network request failed.」。
+4. **世界书 dump 先洗一遍**：把**给别的管线用的模板 / 脚本**整段剔掉
+   （`<%_ … _%>`、`getMessageVar('stat_data…')`、`_.get(`/`_.set(`、`<UpdateVariable>`、`{{getvar::}}`、
+   `[mvu_update]` …）。判据保守：**按空行分段、整段命中才丢**，普通设定一个字不动；
+   实测用户那份 40k dump 里抠掉约 4.6k 的代码。顺手在控制台写一行剔了几段。
+
+### 你自己的那两份设置
+
+- `故事神谕`：`model = gemini-3.1-pro-preview`、`maxTokens = 65500`、`url = https://gcli.ggchan.dev/v1`。
+  设计调用只要几百字输出，**换成 flash 这类小模型、或把 maxTokens 调到几千**，这类掐断会明显少。
+- 这不是插件能替你决定的事，所以只把话说清（提示词 / 面板 / README 都写了）。
+
+验证：71 支探针全绿（1454 条断言），新增 `probe-transport-failure` 29 条
+（真调 `transportErrorOf` / `stripScriptChunks` 验行为，不只是查源码字符串）。
+
 ## 0.32.0
 **新功能：把「篇章 + 主线」导成一份 Markdown 记录。**
 

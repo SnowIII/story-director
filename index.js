@@ -42,7 +42,7 @@ import {
     isLiveThread, threadLanded, interludePending, interludeAfter,
     nextId, takenTitles, completedMainTitles,
     renderMainSection, renderThreadsSection, renderInterludeSection, renderContractSection, renderInjectionHeader,
-    renderInterludeChapterSection, renderStoryLog,
+    renderInterludeChapterSection, renderStoryLog, stripScriptChunks, transportErrorOf,
     chapterFromBlock, threadFromBlock, interludeFromBlock, interludeChapterFromBlock,
     applyNsCommands, extractNsCommands, worldbookDigest, setInterludeWritesAllowed, beatOrderSkipsRead,
     mergeBeats, remainingBeatBudget, worldbookUpdateDecision,
@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.32.0';
+const VERSION = '0.32.1';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -2002,7 +2002,15 @@ async function collectContextBlocks(task = 'chapter', taskOpts = {}) {
             if (typeof api?.buildWorldInfo === 'function') {
                 const picked = await api.buildWorldInfo({ forceMode: ORACLE_WORLDINFO_MODES[mode].forceMode, excludeBooks: [PLUGIN_WORLD] });
                 const text = typeof picked === 'string' ? picked : String(picked ?? '');
-                if (text.trim()) blocks.push(`=== 世界书 / 设定（${ORACLE_WORLDINFO_MODES[mode].label}；只含当前真正激活的条目）===\n${capText(text, 40000)}`);
+                if (text.trim()) {
+                    // ★ 0.32.1：40k 的世界书 dump 里混着 MVU 的 EJS 模板 —— 设计师用不上，还白占体积。
+                    const cleaned = stripScriptChunks(text);
+                    if (cleaned.dropped) {
+                        console.info(`[故事导演] 世界书里有 ${cleaned.dropped} 段是模板 / 脚本（MVU 之类），已从设计提示词里剔掉。`);
+                    }
+                    const body = cleaned.text.trim() ? cleaned.text : text;
+                    blocks.push(`=== 世界书 / 设定（${ORACLE_WORLDINFO_MODES[mode].label}；只含当前真正激活的条目）===\n${capText(body, 40000)}`);
+                }
                 else oracleCaps.worldInfo = false;
             } else {
                 oracleCaps.worldInfo = false;
@@ -3160,19 +3168,64 @@ function abortGenerate() {
  *   之后每隔 90 秒重烧一次，全是白烧）。
  */
 const failedKeys = new Map();
+/** ★ 0.32.1：最近一次请求的字数（system + user）—— 失败时一起报出来，能看出是不是请求太肥。 */
+let lastRequestChars = 0;
 const GENERATE_RETRY_BACKOFF = 90 * 1000;
 const PROVIDER_RETRY_BACKOFF = 5 * 60 * 1000;
 function markFailed(key, ms = GENERATE_RETRY_BACKOFF) { failedKeys.set(key, { at: Date.now(), ms }); }
 function clearFailed(key) { failedKeys.delete(key); }
 /** 失败时按「是不是上游的锅」挑退避窗口。 */
 function markFailedFromError(key, error) {
-    markFailed(key, error?.providerError ? PROVIDER_RETRY_BACKOFF : GENERATE_RETRY_BACKOFF);
+    // ★ 0.32.1：**传输层**失败（连不上 / 被掐断 / 超时）跟上游报错一样，几十秒内好不了 ——
+    //   以前它走 90 秒那一档，于是每 1.5 分钟重烧一次 100 KB 量级的大请求（用户看到的「一直生成失败」）。
+    markFailed(key, (error?.providerError || transportErrorOf(error)) ? PROVIDER_RETRY_BACKOFF : GENERATE_RETRY_BACKOFF);
 }
 /** 正在生成中的标记（异步期间不再重复排队）。与失败退避分开存，语义不混。 */
 const pendingGenerates = new Set();
 const isPending = (key) => pendingGenerates.has(key);
 const markPending = (key) => pendingGenerates.add(key);
 const clearPending = (key) => pendingGenerates.delete(key);
+
+/**
+ * ★ 0.32.1：把「上一次为什么失败」记下来 —— 面板 / `why()` / 诊断页都要说这一句。
+ *
+ * 真事故：用户只看到反复的「生成失败：Network request failed.」，既不知道锅在中转，
+ * 也不知道插件还会重试几次、等多久。这里把判定结果落进 `run.lastError`。
+ */
+function noteGenerateFailure(error) {
+    const s = settings();
+    const transport = transportErrorOf(error);
+    const provider = !!error?.providerError;
+    const host = (String(error?.message || '').match(/https?:\/\/([^/\s)]+)/) || [])[1] || '';
+    s.run.lastError = {
+        at: Date.now(),
+        atCount: aiMessageCount(),
+        task: String(genLabel || ''),
+        kind: transport ? 'transport' : (provider ? 'provider' : 'other'),
+        message: String(error?.message || error || '').replace(/\s+/g, ' ').slice(0, 200),
+        上游: host,
+        请求字数: lastRequestChars,
+        backoffMs: transport || provider ? PROVIDER_RETRY_BACKOFF : GENERATE_RETRY_BACKOFF,
+    };
+    save();
+    console.warn('[故事导演] 生成失败：', s.run.lastError);
+    return s.run.lastError;
+}
+
+/**
+ * ★ 0.32.1：失败的说法分三种 —— 传输层 / 上游报错 / 其它。
+ * 用户原话是「一直生成失败」，而真正该告诉他的是「中转把请求掐了，5 分钟内不再重试」。
+ */
+function failureToastText(info) {
+    const mins = Math.max(1, Math.round(toNumber(info?.backoffMs, GENERATE_RETRY_BACKOFF) / 60000));
+    if (info?.kind === 'transport') {
+        return `连不上上游${info.上游 ? `（${info.上游}）` : ''}：请求被掐断或超时`
+            + `${info.请求字数 ? `（这次请求 ${Math.round(info.请求字数 / 1000)}k 字）` : ''} —— ${mins} 分钟内不再重试。`
+            + '也可以先去「故事神谕」换个模型 / 中转，或把它的最大回复长度调小。';
+    }
+    if (info?.kind === 'provider') return `上游报错：${info.message || '（没说原因）'} —— ${mins} 分钟内不再重试。`;
+    return `生成失败：${info?.message || '未知原因'}`;
+}
 
 function isBackingOff(key) {
   const hit = failedKeys.get(key);
@@ -3216,6 +3269,7 @@ async function askOracle({ task = 'chapter', userText = '', regenerate = false, 
             : task === 'interlude' ? buildInterludeChapterSystemPrompt({ rejected })
                 : buildChapterSystemPrompt({ regenerate, rejected, keep, remaining: Math.max(0, Math.round(toNumber(remaining, 0))) }));
     const user = await buildUserPrompt(task, userText, taskOpts);
+    lastRequestChars = String(system).length + String(user).length;
     // ⚠ **绝不往神谕窗口里写东西**（这一条是补事故）。
     //   这里以前用 api.appendReply() 把「导演请求全文」和「模型原始回复」追加进神谕的对话里 ——
     //   后果有两个，都很难绷：
@@ -3459,7 +3513,8 @@ async function generateInterludeChapter({ quiet = true, userText = '', force = f
         return true;
     } catch (error) {
         console.debug('[故事导演] 生成间章失败', error);
-        toast(`生成失败：${error?.message || error}`, 'error');
+        const failure = noteGenerateFailure(error);
+        toast(failureToastText(failure), failure.kind === 'other' ? 'error' : 'warning');
         markFailedFromError(key, error);
         return false;
     } finally {
@@ -3723,7 +3778,8 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
         return true;
     } catch (error) {
         console.debug('[故事导演] 生成史诗失败', error);
-        toast(`生成失败：${error?.message || error}`, 'error');
+        const failure = noteGenerateFailure(error);
+        toast(failureToastText(failure), failure.kind === 'other' ? 'error' : 'warning');
         markFailedFromError(key, error);
         return false;
     } finally {
@@ -3794,7 +3850,8 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
         return true;
     } catch (error) {
         console.debug('[故事导演] 生成主线失败', error);
-        toast(`生成失败：${error?.message || error}`, 'error');
+        const failure = noteGenerateFailure(error);
+        toast(failureToastText(failure), failure.kind === 'other' ? 'error' : 'warning');
         markFailedFromError(key, error);
         return false;
     } finally {
@@ -3829,7 +3886,8 @@ async function generateThread({ quiet = true, userText = '', force = false } = {
         return true;
     } catch (error) {
         console.debug('[故事导演] 生成支线失败', error);
-        toast(`生成失败：${error?.message || error}`, 'error');
+        const failure = noteGenerateFailure(error);
+        toast(failureToastText(failure), failure.kind === 'other' ? 'error' : 'warning');
         markFailedFromError(key, error);
         return false;
     } finally {
@@ -3863,7 +3921,8 @@ async function generateInterlude({ quiet = true, userText = '', force = false } 
         return true;
     } catch (error) {
         console.debug('[故事导演] 生成插曲失败', error);
-        toast(`生成失败：${error?.message || error}`, 'error');
+        const failure = noteGenerateFailure(error);
+        toast(failureToastText(failure), failure.kind === 'other' ? 'error' : 'warning');
         markFailedFromError(key, error);
         return false;
     } finally {
@@ -4073,6 +4132,19 @@ function firstChapterBlocker({ live = null } = {}) {
     if (!s.autoDirector) return { key: 'director-off', text: '「总开关」是关着的 —— 点面板顶上的 ⏻ 打开，或点下面的「设计下一章」手动开' };
     if (typeof oracleApi()?.run !== 'function') {
         return { key: 'no-oracle', text: '读不到「故事神谕」的模型连接 —— 确认故事神谕已安装并启用（版本要 1.21 以上，且它的 Hook API 没被关掉）' };
+    }
+    // ★ 0.32.1：先回答「上一次为什么失败」—— 不然用户只会看到「正在定篇章」而一直等。
+    const lastError = rt.lastError;
+    const lastBackoff = Math.round(toNumber(lastError?.backoffMs, 0));
+    if (lastError?.at && lastBackoff > 0 && Date.now() - Number(lastError.at) < lastBackoff) {
+        const left = Math.max(1, Math.ceil((lastBackoff - (Date.now() - Number(lastError.at))) / 60000));
+        const what = lastError.kind === 'transport'
+            ? `连不上上游${lastError.上游 ? `（${lastError.上游}）` : ''}`
+            : lastError.kind === 'provider' ? '上游报错' : '生成失败';
+        return {
+            key: 'last-error',
+            text: `上一次${lastError.task ? `「${lastError.task}」` : ''}${what} —— ${left} 分钟后再自动重试（也可以先去神谕那边换模型 / 中转）`,
+        };
     }
     if (s.autoEpic && !epicStarted(epicOf(rootOf(live))) && Math.round(toNumber(rt.epicTries, 0)) < 3 && rounds >= 2) {
         return { key: 'epic-pending', text: '正在定篇章（定篇章完成或失败 3 次之后就会开第一章）' };
@@ -5914,6 +5986,8 @@ function exposeDiagnostics() {
             }),
             // ★ 0.32.0：导出文本（不弹窗，直接拿字符串，方便对着看格式）；以及「清空篇章与主线」。
             log: () => storyLogMarkdown(),
+            // ★ 0.32.1：上一次为什么失败（kind/上游/退避多久）。
+            lastError: () => settings().run.lastError || null,
             clearPlan: () => clearStoryPlan({ quiet: true }),
             epicKeys: () => {
                 const box = epicOf(rootOf()) ?? {};
