@@ -42,7 +42,7 @@ import {
     isLiveThread, threadLanded, interludePending, interludeAfter,
     nextId, takenTitles, completedMainTitles,
     renderMainSection, renderThreadsSection, renderInterludeSection, renderContractSection, renderInjectionHeader,
-    renderInterludeChapterSection,
+    renderInterludeChapterSection, renderStoryLog,
     chapterFromBlock, threadFromBlock, interludeFromBlock, interludeChapterFromBlock,
     applyNsCommands, extractNsCommands, worldbookDigest, setInterludeWritesAllowed, beatOrderSkipsRead,
     mergeBeats, remainingBeatBudget, worldbookUpdateDecision,
@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.31.0';
+const VERSION = '0.32.0';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -583,6 +583,18 @@ function chatKey() {
         if (!ctx) return '';
         const id = (typeof ctx.getCurrentChatId === 'function' && ctx.getCurrentChatId()) || ctx.chatId || '';
         return `${ctx.groupId || ''}::${id}`;
+    } catch { return ''; }
+}
+
+/** 这一场的名字（群聊名 / 角色名）—— 导出记录时写在文件头，日后好对上是哪一场。 */
+function chatLabel() {
+    try {
+        const ctx = window.SillyTavern?.getContext?.();
+        if (!ctx) return '';
+        const group = Array.isArray(ctx.groups) ? ctx.groups.find((item) => String(item?.id) === String(ctx.groupId)) : null;
+        if (group?.name) return String(group.name).trim();
+        const name = ctx.characters?.[ctx.characterId ?? ctx.chid]?.name || ctx.name2 || '';
+        return String(name).trim();
     } catch { return ''; }
 }
 
@@ -5900,6 +5912,9 @@ function exposeDiagnostics() {
                 是我们随总开关摘的: !!settings().bookMountedBySwitch,
                 随总开关摘挂: settings().bookUnmountOnOff !== false,
             }),
+            // ★ 0.32.0：导出文本（不弹窗，直接拿字符串，方便对着看格式）；以及「清空篇章与主线」。
+            log: () => storyLogMarkdown(),
+            clearPlan: () => clearStoryPlan({ quiet: true }),
             epicKeys: () => {
                 const box = epicOf(rootOf()) ?? {};
                 return { 内存里读到的键: Object.keys(box), 说明: '「篇章」是新名字；「总纲」是旧名字（只读兼容用，不该再出现在变量里）' };
@@ -6190,6 +6205,90 @@ async function confirmClearStoryPlan() {
     await clearStoryPlan();
 }
 
+/** ★ 0.32.0（用户提的）：把「篇章 + 主线」整理成 Markdown 记录（导出 / 复制 / 诊断都用它）。 */
+function storyLogMarkdown() {
+    const s = settings();
+    const root = rootOf();
+    const ns = isPlainObject(root?.[NS]) ? root[NS] : {};
+    const box = isPlainObject(ns.章节史) ? ns.章节史 : {};
+    const history = Object.keys(box)
+        .filter((key) => /^\d+$/.test(key))
+        .sort((a, b) => Number(a) - Number(b))
+        .map((key) => box[key]);
+    return renderStoryLog({
+        epic: epicOf(root),
+        main: mainOf(root),
+        history,
+        archived: Array.isArray(s.run.retiredEpics) ? s.run.retiredEpics : [],
+        tone: TONES[toneOf(s.tone)]?.label || '',
+        version: VERSION,
+        chat: chatLabel(),
+        now: new Date(),
+    });
+}
+
+/** 导出弹窗：一段只读 Markdown + 「复制 Markdown」/「下载 .md」。 */
+async function exportStoryLog() {
+    const text = storyLogMarkdown();
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
+
+    const box = document.createElement('div');
+    box.className = 'sd-log-box';
+    const area = document.createElement('textarea');
+    area.className = 'sd-log-text';
+    area.readOnly = true;
+    area.rows = 16;
+    area.spellcheck = false;
+    area.value = text;
+    const row = document.createElement('div');
+    row.className = 'sd-log-actions';
+
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'sd-btn';
+    copy.textContent = '复制 Markdown';
+    copy.addEventListener('click', async () => {
+        try {
+            await navigator.clipboard.writeText(area.value);
+            toast('已复制到剪贴板。', 'success');
+        } catch {
+            area.focus();
+            area.select();
+            toast('浏览器不让写剪贴板 —— 已经帮你选中，按 Ctrl+C 复制。', 'info');
+        }
+    });
+
+    const download = document.createElement('button');
+    download.type = 'button';
+    download.className = 'sd-btn';
+    download.textContent = '下载 .md';
+    download.addEventListener('click', () => {
+        const blob = new Blob([area.value], { type: 'text/markdown;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `故事导演-篇章与主线-${stamp}.md`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        toast('已导出 .md。', 'success');
+    });
+
+    row.appendChild(copy);
+    row.appendChild(download);
+    box.appendChild(area);
+    box.appendChild(row);
+
+    await storyDialog({
+        title: '导出篇章与主线记录',
+        body: box,
+        actions: [{ label: '关闭', kind: 'ok', result: true }],
+    });
+}
+
 function renderEpicTab() {
     const host = panel?.querySelector('.sd-epic-tab');
     if (!host) return;
@@ -6231,11 +6330,13 @@ function renderEpicTab() {
                     <button type="button" class="sd-btn sd-evolve-epic">按现在的情况重新校准</button>
                     <button type="button" class="sd-btn sd-rebuild-epic">重新定篇章（换一部）</button>
                     <button type="button" class="sd-btn sd-btn-danger sd-clear-plan" title="把这一部与当前这一章整个删掉，等它自然重新生成">清空篇章与主线</button>
+                    <button type="button" class="sd-btn sd-export-log" title="把篇章与主线导成 Markdown（可复制 / 下载）">导出记录</button>
                 </div>
                 ${done ? '<p class="sd-note">✔ 这一部的章表已经全部写完 —— 下一章开始时会自动请神谕<b>定下一部篇章</b>（也可以现在点「重新定篇章」）。</p>' : ''}` : `
                 <div class="sd-row">
                     <button type="button" class="sd-btn sd-rebuild-epic">现在定一部篇章</button>
                     ${mainLive ? '<button type="button" class="sd-btn sd-btn-danger sd-clear-plan" title="把当前主线的章目标与所有拍删掉，等它自然重新生成">清空主线</button>' : ''}
+                    <button type="button" class="sd-btn sd-export-log" title="把篇章与主线导成 Markdown（可复制 / 下载）">导出记录</button>
                 </div>
                 <p class="sd-note">${s.autoEpic ? '自动：聊满 2 轮、还没有拍列表时，会自动定篇章，然后才开第一章。' : '自动定篇章是关着的：只在「设定」页打开，或点上面的按钮。'}</p>`}
         </div>
@@ -6257,6 +6358,7 @@ function renderEpicTab() {
         void openEpicDialog({ mode: 'establish', entry: 0 });
     });
     host.querySelector('.sd-clear-plan')?.addEventListener('click', () => { void confirmClearStoryPlan(); });
+    host.querySelector('.sd-export-log')?.addEventListener('click', () => { void exportStoryLog(); });
 }
 
 /** 保存篇章手改。 */

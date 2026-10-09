@@ -1823,3 +1823,142 @@ export function reviewLadder({ strikes = 0, epicRewritten = false } = {}) {
   }
   return { action: 'retry', attempt, nextStrikes, reason };
 }
+
+/**
+ * ★ 0.32.0（用户提的）：把「篇章 + 主线」的记录导成 **Markdown**。
+ *
+ * 为什么放在 model.js：它**纯** —— 只吃数据、不碰 DOM / 酒馆 API，
+ * 所以探针可以直接喂 fixtures 去验格式（而不是只做源码字符串检查）。
+ *
+ * 格式上守三条：
+ *   · **表格不许被内容破坏**：单元格里的 `|` 转义、换行压成空格；
+ *   · **进度一眼看得出来**：章表 `✔ 已写 / ▶ 正在写 / · 还没写`，拍 `✔ 已演 / ▶ 本轮 / · 还没到`；
+ *   · **没开篇也要能导出**：那种情况只写一行说明，不吐半张空表。
+ */
+
+/** Markdown 表格单元格：转义竖线，把换行与连续空白压成一个空格。 */
+function mdCell(text) {
+  return String(text ?? '').replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
+}
+
+/** 本地时间 `YYYY-MM-DD HH:MM`（不用 toISOString：那是 UTC，还会带 T 与 Z）。 */
+function mdWhen(date) {
+  const d = date instanceof Date ? date : new Date(date);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+export function renderStoryLog({
+  epic = null,
+  main = null,
+  history = [],
+  archived = [],
+  tone = '',
+  version = '',
+  chat = '',
+  now = new Date(),
+} = {}) {
+  const out = [];
+  const started = epicStarted(epic);
+  const mainTitle = String(unwrap(main?.[MAIN_TITLE]) ?? '').trim();
+  const beats = beatsOf(main);
+  const current = currentBeat(main);
+  const past = Array.isArray(history) ? history.filter(Boolean) : [];
+  const finished = (Array.isArray(archived) ? archived : []).filter((item) => item && item.why === 'finished');
+
+  out.push('# 故事导演 · 篇章与主线记录', '');
+  out.push(`- 导出时间：${mdWhen(now)}`);
+  if (version) out.push(`- 插件版本：${version}`);
+  if (tone) out.push(`- 基调：${tone}`);
+  if (chat) out.push(`- 聊天：${chat}`);
+  out.push('');
+
+  if (!started && !mainTitle && !beats.length && !past.length) {
+    out.push('（这个聊天还没有开局：既没有篇章，也没有主线。聊两句之后再来看。）', '');
+    return out.join('\n');
+  }
+
+  out.push('## 一、当前篇章', '');
+  if (started) {
+    const title = String(unwrap(epic[EP.title]) ?? '').trim();
+    const chapters = epicChapters(epic);
+    const written = epicChapter(epic);
+    const total = chapters.length;
+    out.push(`### ${title ? `《${title}》` : '（未命名）'}`, '');
+    const line = String(unwrap(epic[EP.line]) ?? '').trim();
+    if (line) out.push(`> ${line}`, '');
+    out.push(`- **进度**：${epicFinished(epic) ? `已写完（共 ${total} 章）` : `已写 ${written} / 共 ${total} 章`}`);
+    const climax = epicClimax(epic);
+    if (climax) out.push(`- **大高潮**：${climax}`);
+    const hooks = epicHooks(epic);
+    if (hooks.length) out.push(`- **伏笔**：${hooks.join('；')}`);
+    const ledger = String(unwrap(epic[EP.ledger]) ?? '').trim();
+    if (ledger) out.push(`- **既成事实**：${ledger}`);
+    out.push('');
+    if (chapters.length) {
+      out.push('#### 章表', '', '| # | 状态 | 这一章 |', '| --- | --- | --- |');
+      chapters.forEach((text, index) => {
+        const n = index + 1;
+        const mark = n <= written ? '✔ 已写' : (n === written + 1 ? '▶ 正在写' : '· 还没写');
+        out.push(`| ${n} | ${mark} | ${mdCell(text)} |`);
+      });
+      out.push('');
+    }
+  } else {
+    out.push('（还没有篇章。）', '');
+  }
+
+  out.push('## 二、主线', '');
+  if (mainTitle || beats.length) {
+    out.push(`### ${mainTitle || '（未命名）'}`, '');
+    const arc = String(unwrap(main?.[MAIN_ARC]) ?? '').trim();
+    if (arc) out.push(`- **分卷**：${arc}`);
+    const goal = String(unwrap(main?.[MAIN_GOAL]) ?? '').trim();
+    if (goal) out.push(`- **章目标**：${goal}`);
+    const scope = String(unwrap(main?.[MAIN_SCOPE]) ?? '').trim();
+    if (scope) out.push(`- **范围**：${scope}`);
+    if (truthy(main?.[MAIN_CLOSED])) out.push('- **状态**：这一章已经收尾');
+    out.push('');
+    if (beats.length) {
+      const at = Math.min(Math.max(Number(current) || 1, 1), beats.length);
+      out.push(`#### 拍（本轮第 ${at} 拍 / 共 ${beats.length} 拍）`, '');
+      beats.forEach((text, index) => {
+        const n = index + 1;
+        const mark = n < at ? '✔ 已演' : (n === at ? '▶ 本轮' : '· 还没到');
+        out.push(`${n}. ${mark} —— ${text}`);
+      });
+      out.push('');
+    }
+  } else {
+    out.push('（还没有主线。）', '');
+  }
+
+  out.push('## 三、演过的章（章节史）', '');
+  if (past.length) {
+    out.push('| # | 章标题 | 分卷 | 实际达成的目标 |', '| --- | --- | --- | --- |');
+    past.forEach((item, index) => {
+      const box = isPlainObject(item) ? item : {};
+      out.push(`| ${index + 1} | ${mdCell(box[MAIN_TITLE] ?? item)} | ${mdCell(box[MAIN_ARC])} | ${mdCell(box[MAIN_GOAL])} |`);
+    });
+    out.push('');
+  } else {
+    out.push('（还没有演完的章。）', '');
+  }
+
+  if (finished.length) {
+    out.push(`## 附：已归档的篇章（${finished.length} 部）`, '');
+    for (const item of finished) {
+      const chapters = Array.isArray(item.chapters) ? item.chapters : [];
+      out.push(`### 《${mdCell(item.title) || '（未命名）'}》`, '');
+      out.push(`- **章数**：${chapters.length}${item.written ? `（写到第 ${item.written} 章）` : ''}`);
+      if (item.climax) out.push(`- **大高潮**：${item.climax}`);
+      if (Array.isArray(item.hooks) && item.hooks.length) out.push(`- **伏笔**：${item.hooks.join('；')}`);
+      if (item.ledger) out.push(`- **既成事实**：${item.ledger}`);
+      out.push('');
+      chapters.forEach((text, index) => out.push(`${index + 1}. ${mdCell(text)}`));
+      if (chapters.length) out.push('');
+    }
+  }
+
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '') + '\n';
+}

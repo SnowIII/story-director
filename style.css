@@ -104,6 +104,20 @@
 /* 破坏性按钮（清空篇章与主线）：红一点，别让人顺手点掉一整部 */
 #story-director-panel .sd-btn-danger { border-color: rgba(230, 120, 120, 0.55); color: #f0b4b4; }
 #story-director-panel .sd-btn-danger:hover { background: rgba(200, 80, 80, 0.28); border-color: rgba(240, 140, 140, 0.85); }
+/* ★ 0.32.0：导出弹窗里那段只读 Markdown，等宽字体、可滚动、别把弹窗撑爆 */
+dialog.sd-dialog .sd-log-text {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 220px;
+    max-height: 46vh;
+    resize: vertical;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre;
+    overflow: auto;
+}
+dialog.sd-dialog .sd-log-actions { display: flex; gap: 8px; margin-top: 8px; }
 #story-director-panel .sd-close { padding: 3px 8px; }
 
 #story-director-panel .sd-body {
