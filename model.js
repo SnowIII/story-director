@@ -309,12 +309,16 @@ export function epicStarted(epic) {
  * 留空（或只有空白）→ 回空串，等于「不加要求，让它自己判断」。
  *
  * @param {string} raw 用户填的原文
- * @param {'epic'|'chapter'} kind 生成的是篇章还是某一章（只影响那句话的措辞）
+ * @param {'epic'|'chapter'|'thread'|'side'|'interlude'} kind 生成的是哪一层（只影响那句话的措辞）
  */
 export function userAskText(raw, kind = 'epic') {
   const ask = String(raw ?? '').trim();
   if (!ask) return '';
-  const what = kind === 'epic' ? '这条篇章' : '这一章';
+  // ★ 0.33.0：支线 / 插曲也有自己的「要求」了 —— 措辞要说对是哪一层。
+  const what = kind === 'epic' ? '这条篇章'
+    : kind === 'thread' ? '这条支线'
+      : (kind === 'side' || kind === 'interlude') ? '这段插曲'
+        : '这一章';
   return `用户对${what}的要求与倾向（**优先满足**，与下面其它规则冲突时以它为准）：\n${ask}`;
 }
 
@@ -334,12 +338,15 @@ export function epicAskText(raw) {
  * 抽成纯函数是为了能离线测（弹窗本身要 DOM）。
  *
  * @param {string} raw 用户填的朱批原文
- * @param {'epic'|'chapter'} kind 批的是篇章的章表，还是某一章的拍列表
+ * @param {'epic'|'chapter'|'thread'|'side'|'interlude'} kind 批的是哪一层
  */
 export function critiqueText(raw, kind = 'epic') {
   const text = String(raw ?? '').trim();
   if (!text) return '';
-  const what = kind === 'epic' ? '这一部篇章（章表）' : '这一章的主线（拍列表）';
+  const what = kind === 'epic' ? '这一部篇章（章表）'
+    : kind === 'thread' ? '上一条支线'
+      : (kind === 'side' || kind === 'interlude') ? '上一段插曲'
+        : '这一章的主线（拍列表）';
   return `=== 用户对上一版${what}的**朱批**（新的一版必须照它改，不要只是换个说法）===\n${text}`;
 }
 

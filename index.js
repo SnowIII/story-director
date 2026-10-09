@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.32.1';
+const VERSION = '0.33.0';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -451,6 +451,9 @@ const DEFAULT = {
         epicPin: '',
         chapterPin: '',
         chapterPinFor: '',
+        // ★ 0.33.0：支线 / 插曲也有自己的钉住要求（以前它们会错拿章节那份 —— 串味）。
+        threadPin: '',
+        interludePin: '',
         /** 上一次换拍时的 AI 回复数。 */
         beatAt: 0,
         /** 本章开始时的 AI 回复数（只在真的开出一章时写）。 */
@@ -2067,6 +2070,9 @@ async function collectContextBlocks(task = 'chapter', taskOpts = {}) {
 function pinnedAskText(task) {
     const s = settings();
     if (task === 'epic') return String(s.run.epicPin || '').trim();
+    // ★ 0.33.0：支线 / 插曲各有自己的那份 —— 以前 task='thread' 会掉到下面拿走**章节**的要求。
+    if (task === 'thread') return String(s.run.threadPin || '').trim();
+    if (task === 'side' || task === 'interlude') return String(s.run.interludePin || '').trim();
     syncChapterPin();
     return String(s.run.chapterPin || '').trim();
 }
@@ -2091,6 +2097,10 @@ function pinAsk({ task = 'chapter', ask = '' } = {}) {
     if (!text) return false;
     if (task === 'epic') {
         s.run.epicPin = text;
+    } else if (task === 'thread') {
+        s.run.threadPin = text;
+    } else if (task === 'side' || task === 'interlude') {
+        s.run.interludePin = text;
     } else {
         s.run.chapterPin = text;
         s.run.chapterPinFor = String(unwrap(mainState()[MAIN_TITLE]) ?? '').trim();
@@ -2103,8 +2113,11 @@ function pinAsk({ task = 'chapter', ask = '' } = {}) {
 function clearPin(task = '') {
     const s = settings();
     let changed = false;
+    // ★ 0.33.0：四层各有各的钉子；不传 task = 全清。
     if (!task || task === 'epic') { if (s.run.epicPin) { s.run.epicPin = ''; changed = true; } }
-    if (!task || task !== 'epic') { if (s.run.chapterPin) { s.run.chapterPin = ''; s.run.chapterPinFor = ''; changed = true; } }
+    if (!task || task === 'thread') { if (s.run.threadPin) { s.run.threadPin = ''; changed = true; } }
+    if (!task || task === 'side' || task === 'interlude') { if (s.run.interludePin) { s.run.interludePin = ''; changed = true; } }
+    if (!task || task === 'chapter') { if (s.run.chapterPin) { s.run.chapterPin = ''; s.run.chapterPinFor = ''; changed = true; } }
     if (changed) save();
     return changed;
 }
@@ -3689,6 +3702,81 @@ async function openChapterDialog({ regenerate = false } = {}) {
 }
 
 /**
+ * ★ 0.33.0（用户提的）：**支线 / 插曲也有「先说要求」的弹窗** —— 跟篇章与主线同款。
+ *
+ * 以前这两颗按钮是**直接生成**的：想说「别写成第二个主线」没地方写，
+ * 想重生成也只能先删掉再来一遍（连「上一版哪里不行」都说不出口）。
+ * 现在统一成：**要求**（可钉住）+ **朱批**（只批这一次），加新的与重生成共用这一个窗口。
+ *
+ * @param {'thread'|'side'} task
+ * @param {{ replaceId?: string }} [opts] 传 replaceId = 重生成那一条（id 不变，原地替换）
+ * @returns {Promise<boolean>} true = 已发起生成；false = 取消 / 只是清了钉住
+ */
+async function openSideDialog(task, { replaceId = '' } = {}) {
+    const s = settings();
+    const isThread = task === 'thread';
+    const label = isThread ? '支线' : '插曲';
+    const list = isThread ? threadsState() : interludesState();
+    const old = replaceId ? list.find((item) => String(item.id) === String(replaceId)) : null;
+    const pinKey = isThread ? 'threadPin' : 'interludePin';
+    const pinned = String(s.run[pinKey] || '').trim();
+
+    const body = document.createElement('div');
+    body.className = 'sd-epic-form';
+    body.innerHTML = `
+        <p class="sd-dialog-note">${isThread
+            ? '<b>支线是配菜</b>：它永远服务主线（<b>给动机 / 给线索 / 给压力 / 给位移</b>），只写一个落点，一两拍就收。'
+            : '<b>插曲是幕间小段</b>：让故事喘口气，<b>不推进主线</b>，一到两个画面就该结束。'}</p>
+        ${old ? `<p class="sd-dialog-pin">🔁 <b>正在重生成</b>这一条：<br>${esc(String(unwrap(old[isThread ? THREAD_FIELDS.title : INTERLUDE_FIELDS.title]) ?? ''))}</p>` : ''}
+        ${pinned ? `<p class="sd-dialog-pin">📌 <b>已钉住的要求</b>（每轮都会带上，不会被重生成覆盖）：<br>${esc(pinned)}</p>` : ''}
+        <label class="sd-dialog-field">
+            <span>你对这条${label}的要求 / 倾向<b>（留空 = 让它自己按当前处境判断）</b></span>
+            <textarea data-field="ask" rows="5" placeholder="${isThread
+                ? '例如：&#10;· 我要一条给主角「动机」的线，别抢主线当前那一拍的戏&#10;· 只写一个落点，一两拍就收，接不上就写「已收尾」'
+                : '例如：&#10;· 写一段集市上的日常，带一点旧事的余味&#10;· 别推进主线，也别把埋着的那根线点破'}">${esc(pinned)}</textarea>
+        </label>
+        <label class="sd-dialog-field">
+            <span>朱批 —— 上一版<b>哪里不行</b><b>（只这一次生效；不写 = 没批过）</b></span>
+            <textarea data-field="critique" rows="3" placeholder="例如：&#10;· 写成第二个主线了，抢戏&#10;· 跟上次那条几乎一样，只换了名字&#10;· 落点太大，一两拍收不住"></textarea>
+        </label>
+        <p class="sd-dialog-hint">${pinHint(isThread ? '重生成这条支线' : '重生成这段插曲')}<br>${CRITIQUE_HINT}</p>`;
+
+    const picked = await storyDialog({
+        title: replaceId ? `重新生成这条${label}` : `再加一条${label}`,
+        body,
+        actions: [
+            { label: '取消', result: null, kind: 'cancel' },
+            { label: '留空，让它自己判断', result: { go: true, ask: '' } },
+            ...(pinned ? [{ label: '清掉钉住的要求', result: { go: false, clear: true } }] : []),
+            { label: '按这些要求生成（只这一次）', result: { go: true, submit: true }, emit: true },
+            { label: '记住它，每轮都带上', result: { go: true, submit: true, pin: true }, kind: 'ok', emit: true },
+        ],
+    });
+
+    if (!picked) return false;                                  // 取消 / Esc / 点遮罩
+    if (picked.clear) { clearPin(task); toast('已清掉钉住的要求。', 'info'); render(); return false; }
+    if (!picked.go) return false;
+
+    const ask = String(picked.ask || '').trim() || String(picked.fields?.ask || '').trim();
+    const critique = String(picked.fields?.critique || '').trim();
+    if (picked.pin) {
+        if (ask) { pinAsk({ task, ask }); toast('已记住这条要求 —— 以后每次重生成都会带上它。', 'success'); }
+        else { clearPin(task); }
+    }
+
+    const common = {
+        quiet: false,
+        force: true,
+        userText: userAskText(ask, task),
+        critique: critiqueText(critique, task),
+        replaceId,
+    };
+    if (isThread) void generateThread(common);
+    else void generateInterlude(common);
+    return true;
+}
+
+/**
  * 生成 / 校准篇章。
  *
  * ⚠ `entry` 的语义在 0.22.0 变了：以前是「这份篇章校准到总第几章」（进度是全局的），
@@ -3862,14 +3950,14 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
     }
 }
 
-async function generateThread({ quiet = true, userText = '', force = false } = {}) {
+async function generateThread({ quiet = true, userText = '', force = false, critique = '', replaceId = '' } = {}) {
     if (!beginGenerate('支线')) return false;
     const key = `thread:${chatKey()}`;
     if (!force && isBackingOff(key)) return false;
     if (quiet) toast('正在请故事神谕设计一条支线…');
     const origin = chatKey();
     try {
-        const raw = await askOracle({ task: 'thread', quiet, userText });
+        const raw = await askOracle({ task: 'thread', quiet, userText, taskOpts: { critique } });
         if (raw === ORACLE_CANCELLED) return false;          // 用户中断：不记失败、不弹错
         if (raw === null) { markFailed(key); return false; }
         if (origin && chatKey() !== origin) {
@@ -3880,7 +3968,8 @@ async function generateThread({ quiet = true, userText = '', force = false } = {
         const thread = blocks.length ? threadFromBlock(blocks[blocks.length - 1], {}) : null;
         if (!thread) { toast('没解析到 <StoryThreads> 区块，原始回复已打印到控制台。', 'warning'); markFailed(key); return false; }
         clearFailed(key);
-        thread.id = nextId(threadsState().map((item) => item.id), 't');
+        // ★ 0.33.0：重生成 = **替换那一条**（同一个 id），不是再挂一条。
+        thread.id = replaceId || nextId(threadsState().map((item) => item.id), 't');
         thread[THREAD_FIELDS.status] = STATUS_ACTIVE;
         await applyThread(thread, { quiet: false });
         return true;
@@ -3896,7 +3985,7 @@ async function generateThread({ quiet = true, userText = '', force = false } = {
     }
 }
 
-async function generateInterlude({ quiet = true, userText = '', force = false } = {}) {
+async function generateInterlude({ quiet = true, userText = '', force = false, critique = '', replaceId = '' } = {}) {
     if (!beginGenerate('插曲')) return false;
     const key = `interlude:${chatKey()}`;
     if (!force && isBackingOff(key)) return false;
@@ -3905,7 +3994,7 @@ async function generateInterlude({ quiet = true, userText = '', force = false } 
     try {
         // ⚠ 必须用 task:'side'（小插曲）。'interlude' 现在是**间章**那条通道，
         //    用错会让不占幕的小插曲生成出一整章的数据结构。
-        const raw = await askOracle({ task: 'side', quiet, userText });
+        const raw = await askOracle({ task: 'side', quiet, userText, taskOpts: { critique } });
         if (raw === ORACLE_CANCELLED) return false;          // 用户中断：不记失败、不弹错
         if (raw === null) { markFailed(key); return false; }
         if (origin && chatKey() !== origin) {
@@ -3916,7 +4005,8 @@ async function generateInterlude({ quiet = true, userText = '', force = false } 
         const interlude = blocks.length ? interludeFromBlock(blocks[blocks.length - 1], {}) : null;
         if (!interlude) { toast('没解析到 <StoryInterlude> 区块，原始回复已打印到控制台。', 'warning'); markFailed(key); return false; }
         clearFailed(key);
-        interlude.id = nextId(interludesState().map((item) => item.id), 'i');
+        // ★ 0.33.0：重生成 = **替换那一条**（同一个 id），不是再挂一条。
+        interlude.id = replaceId || nextId(interludesState().map((item) => item.id), 'i');
         await applyInterlude(interlude, { quiet: false });
         return true;
     } catch (error) {
@@ -5284,6 +5374,7 @@ function renderSideTab() {
             <p class="sd-line"><b>目标</b>${esc(String(unwrap(item[THREAD_FIELDS.goal]) ?? ''))}</p>
             <p class="sd-line"><b>落点</b>${esc(String(unwrap(item[THREAD_FIELDS.land]) ?? ''))}</p>
             <div class="sd-row">
+                <button type="button" class="sd-btn sd-thread-regen" data-id="${esc(item.id)}">重新生成</button>
                 <button type="button" class="sd-btn sd-thread-done" data-id="${esc(item.id)}">标记完成</button>
                 <button type="button" class="sd-btn sd-thread-drop" data-id="${esc(item.id)}">删除</button>
             </div>
@@ -5300,6 +5391,7 @@ function renderSideTab() {
             <p class="sd-line"><b>内容</b>${esc(String(unwrap(item[INTERLUDE_FIELDS.beat]) ?? ''))}</p>
             <p class="sd-line sd-dim"><b>接在</b>${esc(String(unwrap(item[INTERLUDE_FIELDS.after]) ?? ''))}</p>
             <div class="sd-row">
+                <button type="button" class="sd-btn sd-interlude-regen" data-id="${esc(item.id)}">重新生成</button>
                 <button type="button" class="sd-btn sd-interlude-done" data-id="${esc(item.id)}">标记已演</button>
                 <button type="button" class="sd-btn sd-interlude-drop" data-id="${esc(item.id)}">删除</button>
             </div>
@@ -5318,8 +5410,15 @@ function renderSideTab() {
             <div class="sd-row"><button type="button" class="sd-btn sd-add-interlude">让神谕再加一条</button></div>
         </div>`;
 
-    host.querySelector('.sd-add-thread')?.addEventListener('click', () => { void generateThread({ quiet: false, force: true }); });
-    host.querySelector('.sd-add-interlude')?.addEventListener('click', () => { void generateInterlude({ quiet: false, force: true }); });
+    // ★ 0.33.0：加新的也一样 —— 先弹「要求 + 钉住 + 朱批」，跟篇章与主线同款。
+    host.querySelector('.sd-add-thread')?.addEventListener('click', () => { void openSideDialog('thread'); });
+    host.querySelector('.sd-add-interlude')?.addEventListener('click', () => { void openSideDialog('side'); });
+    host.querySelectorAll('.sd-thread-regen').forEach((button) => button.addEventListener('click', () => {
+        void openSideDialog('thread', { replaceId: button.dataset.id });
+    }));
+    host.querySelectorAll('.sd-interlude-regen').forEach((button) => button.addEventListener('click', () => {
+        void openSideDialog('side', { replaceId: button.dataset.id });
+    }));
     host.querySelectorAll('.sd-thread-done').forEach((button) => button.addEventListener('click', () => {
         void patchEntry('支线', button.dataset.id, { [THREAD_FIELDS.status]: STATUS_DONE, [THREAD_FIELDS.done]: true, [THREAD_FIELDS.ended]: new Date().toISOString() }).then(() => { syncMainInjection(); render(); });
     }));
