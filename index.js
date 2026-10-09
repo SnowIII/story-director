@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.30.3';
+const VERSION = '0.31.0';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -6119,6 +6119,77 @@ function archivedEpicSection() {
     </details>`;
 }
 
+/**
+ * ★ 0.31.0（用户提的）：**把这一部篇章 + 当前主线一起清掉，然后等它自然重新生成**。
+ *
+ * 与「重新定篇章（换一部）」的区别：那个会**当场**叫一次神谕，而且当前这一章还挂着；
+ * 这个是把整条计划清空，交给正常节奏自己长出来 ——
+ * 聊满 2 轮自动定新的一部篇章，再聊几轮自动开第一章（也可以手动点「现在定一部篇章」）。
+ *
+ * ⚠ 三件事**刻意不动**：
+ *   · **章节史**：演过的章是既成事实，新的一部要接着它们走（清掉等于假装那些事没发生）；
+ *   · **钉住的要求**（epicPin / chapterPin）：那是用户自己写的方针，替他清掉才是帮倒忙；
+ *   · **接管起点 `rt.armedAt`**：重置它会让用户白等 3 轮。
+ *   被清掉的那一部会记进**防重复名单**（why=replaced）—— 新的一部要知道避开什么，但**不进归档**。
+ */
+async function clearStoryPlan({ quiet = false } = {}) {
+    const s = settings();
+    const rt = s.run;
+    const epic = epicOf(rootOf());
+    if (epicStarted(epic)) rememberRetiredEpic(epic, { why: 'replaced' });
+
+    await writeStory((root) => {
+        if (!isPlainObject(root[NS])) root[NS] = {};
+        root[NS][EPIC] = emptyEpic();
+        root[NS][MAIN_SECTION] = emptyMain();
+        root[NS][INTERLUDE] = emptyInterlude();
+    });
+
+    // 幕回到主线（间章已清空，currentMode() 自然就是 main），把「这一章」的运行时钉子全部撤掉
+    rt.mode = 'main';
+    rt.closedChapter = '';
+    rt.reviewStrikes = 0;
+    rt.focusBeat = 0;
+    rt.focusInterlude = 0;
+    rt.focusBeatSince = 0;
+    rt.focusStale = false;
+    rt.landedHold = false;
+    rt.aftermathAt = 0;
+    rt.chapterOpenedAt = 0;   // 用户主动要重来：别再按「上一章刚开」的间隔白等那几轮
+    rt.epicTries = 0;         // 定篇章失败过 3 次的话，不清零就永远轮不到自动定
+    rt.auditedFor = '';
+    rt.lastInterlude = '';
+    save();
+
+    syncMainInjection();
+    if (!panel?.hidden) render();
+    console.info('[故事导演] 已清空篇章与主线，等它按正常节奏自然重新生成。');
+    if (!quiet) {
+        toast(s.autoEpic
+            ? '已清空篇章与主线：聊满 2 轮会自动定新的一部篇章，然后再开第一章。'
+            : '已清空篇章与主线：自动定篇章关着，去篇章页点「现在定一部篇章」。', 'success');
+    }
+    return true;
+}
+
+/** 「清空篇章与主线」的确认弹窗 —— 破坏性操作，必须问一次，并把「不动什么」写清楚。 */
+async function confirmClearStoryPlan() {
+    const ok = await storyDialog({
+        title: '清空篇章与主线？',
+        body: '<p>会删掉：<b>当前这一部的章表 / 大高潮 / 伏笔 / 既成事实</b>，以及<b>当前主线的章目标与所有拍</b>'
+            + '（间章若在演，也一并收掉）。</p>'
+            + '<p>不会动：<b>聊天记录</b>、<b>章节史</b>（演过的章仍然是既成事实）、<b>你钉住的要求</b>、支线与插曲。</p>'
+            + `<p>之后按正常节奏自然重来：${settings().autoEpic ? '聊满 2 轮会自动定新的一部篇章' : '自动定篇章关着，要自己点「现在定一部篇章」'}，`
+            + '然后才会开第一章。</p>',
+        actions: [
+            { label: '清空，让它自己重来', kind: 'ok', result: true },
+            { label: '算了', result: false },
+        ],
+    });
+    if (!ok) return;
+    await clearStoryPlan();
+}
+
 function renderEpicTab() {
     const host = panel?.querySelector('.sd-epic-tab');
     if (!host) return;
@@ -6131,6 +6202,8 @@ function renderEpicTab() {
     const written = epicChapter(epic);
     const total = chapters.length;
     const done = epicFinished(epic);
+    const mainBox = mainOf(rootOf());
+    const mainLive = Boolean(String(unwrap(mainBox[MAIN_TITLE]) ?? '').trim() || beatsOf(mainBox).length);
 
     host.innerHTML = `
         <div class="sd-card ${started ? 'sd-card-main' : ''}">
@@ -6157,10 +6230,12 @@ function renderEpicTab() {
                     <button type="button" class="sd-btn sd-save-epic">保存篇章</button>
                     <button type="button" class="sd-btn sd-evolve-epic">按现在的情况重新校准</button>
                     <button type="button" class="sd-btn sd-rebuild-epic">重新定篇章（换一部）</button>
+                    <button type="button" class="sd-btn sd-btn-danger sd-clear-plan" title="把这一部与当前这一章整个删掉，等它自然重新生成">清空篇章与主线</button>
                 </div>
                 ${done ? '<p class="sd-note">✔ 这一部的章表已经全部写完 —— 下一章开始时会自动请神谕<b>定下一部篇章</b>（也可以现在点「重新定篇章」）。</p>' : ''}` : `
                 <div class="sd-row">
                     <button type="button" class="sd-btn sd-rebuild-epic">现在定一部篇章</button>
+                    ${mainLive ? '<button type="button" class="sd-btn sd-btn-danger sd-clear-plan" title="把当前主线的章目标与所有拍删掉，等它自然重新生成">清空主线</button>' : ''}
                 </div>
                 <p class="sd-note">${s.autoEpic ? '自动：聊满 2 轮、还没有拍列表时，会自动定篇章，然后才开第一章。' : '自动定篇章是关着的：只在「设定」页打开，或点上面的按钮。'}</p>`}
         </div>
@@ -6181,6 +6256,7 @@ function renderEpicTab() {
     host.querySelector('.sd-rebuild-epic')?.addEventListener('click', () => {
         void openEpicDialog({ mode: 'establish', entry: 0 });
     });
+    host.querySelector('.sd-clear-plan')?.addEventListener('click', () => { void confirmClearStoryPlan(); });
 }
 
 /** 保存篇章手改。 */

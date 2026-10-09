@@ -101,6 +101,9 @@
 #story-director-panel .sd-btn:hover,
 #story-director-panel .sd-close:hover { background: rgba(140, 170, 220, 0.2); }
 #story-director-panel .sd-tab.is-active { background: rgba(140, 170, 220, 0.28); border-color: rgba(160, 190, 240, 0.6); font-weight: 600; }
+/* 破坏性按钮（清空篇章与主线）：红一点，别让人顺手点掉一整部 */
+#story-director-panel .sd-btn-danger { border-color: rgba(230, 120, 120, 0.55); color: #f0b4b4; }
+#story-director-panel .sd-btn-danger:hover { background: rgba(200, 80, 80, 0.28); border-color: rgba(240, 140, 140, 0.85); }
 #story-director-panel .sd-close { padding: 3px 8px; }
 
 #story-director-panel .sd-body {
