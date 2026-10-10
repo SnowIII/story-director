@@ -33,7 +33,7 @@ import {
     critiqueText,
     TONES, toneOf, toneOptions, toneDirective,
     KEY_BEAT, KEY_BEAT_DONE, KEY_CHAPTER_DONE, KEY_READY, KEY_REVIEW, KEY_REVIEW_NOTE,
-    REVIEW_PASS, REVIEW_STATES, REVIEW_MAX_RETRY, REVIEW_TAG, REVIEW_NOTE_TAG,
+    REVIEW_PASS, REVIEW_STATES, REVIEW_MAX_RETRY, REVIEW_TAG, REVIEW_NOTE_TAG, SELF_CHECK_TAG,
     STATUS_PENDING, STATUS_ACTIVE, STATUS_DONE, STATUS_SKIPPED, STATUS_STALLED,
     isPlainObject, unwrap, unwrapDeep, display, toNumber, truthy,
     reviewLadder, STRIKES_BEFORE_EPIC, nsHasState, beatRollbackTarget, reviewAction, REVIEW_SETUP,
@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.38.3';
+const VERSION = '0.38.4';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -518,6 +518,12 @@ const DEFAULT = {
         reviewStrikesFor: '',
         /** ★ 0.36.0：正文模型在消息里报的那一档（优先于 MVU 里的值；处理完就清掉）。 */
         reviewFromReply: null,
+        /**
+         * ★ 0.38.4：正文模型**最近一次自检的原文**（`<故事导演自检>…`）。
+         * 留着只为一件小事：面板上能看见「它到底判断了没、判断成什么样」——
+         * 这是「让它把推理输出出来」这套机制唯一的可查凭据（用户点名的做法）。
+         */
+        reviewThinking: '',
         epicRewroteFor: '',
         redesignAt: 0,
         /** 上一段间章的标题（防重复用；间章本身不留在注入里）。 */
@@ -1929,10 +1935,16 @@ function stripStatusEcho(messageId) {
  * ★ 0.36.0：**从正文里收割「合理性审查」**。
  *
  * 判断类字段（这一拍演不演得出来）**只有写正文的模型判断得了** —— 变量模型只看到成品。
- * 而「额外模型解析」模式下，正文写的 \`_.set\` 会被 MVU 丢掉，所以它改走纯文本标签：
- *   \`<故事导演审查>驳回</故事导演审查>\` ＋ \`<故事导演审查说明>…</故事导演审查说明>\`
- * 这里把标签读进 \`run.reviewFromReply\`（心跳里的 handleBeatReview 优先用它），
- * 并把标签从消息里剥掉 —— 读者不该看到它们。
+ * 而「额外模型解析」模式下，正文写的 \`_.set\` 会被 MVU 丢掉，所以它改走纯文本标签。
+ *
+ * ★ 0.38.4（用户点名）：**让它把推理输出出来再给结论** ——
+ *   \`<故事导演自检>① 演得出来吗：… ② 有没有该等 {{user}} 自己动的：… ③ 结论：通过</故事导演自检>\`
+ *   为什么非这样不可：只让它「心里过一遍」时，它跳没跳过判断、是不是硬演完再补一句结论，
+ *   插件都无从知道；写成块之后**先推理、后结论**，顺序摆在那儿，跳不过去，而且面板可查。
+ *   旧的两行标签（\`<故事导演审查>\` / \`<故事导演审查说明>\`）照旧认 —— 老 prompt / 老习惯不至于报废。
+ *
+ * 这一块读进 \`run.reviewFromReply\`（心跳里的 handleBeatReview 优先用它），
+ * 并把块从消息里剥掉 —— 读者不该看到它们。
  *
  * @returns {boolean} 这一楼有没有报出一档有效结论
  */
@@ -1941,32 +1953,51 @@ function harvestReviewTag(messageId) {
         const msg = chat?.[messageId];
         if (!msg || msg.is_user || msg.is_system || typeof msg.mes !== 'string') return false;
         const before = msg.mes;
-        if (!before.includes(REVIEW_TAG) && !before.includes(REVIEW_NOTE_TAG)) return false;
-        const verdict = (before.match(new RegExp(`<${REVIEW_TAG}>([\\s\\S]*?)<\\/${REVIEW_TAG}>`, 'i')) || [])[1];
-        const note = (before.match(new RegExp(`<${REVIEW_NOTE_TAG}>([\\s\\S]*?)<\\/${REVIEW_NOTE_TAG}>`, 'i')) || [])[1];
-        const state = String(verdict || '').trim();
+        const hasSelfCheck = before.includes(SELF_CHECK_TAG);
+        if (!hasSelfCheck && !before.includes(REVIEW_TAG) && !before.includes(REVIEW_NOTE_TAG)) return false;
+
+        const selfBlock = hasSelfCheck
+            ? (before.match(new RegExp(`<${SELF_CHECK_TAG}>([\\s\\S]*?)<\\/${SELF_CHECK_TAG}>`, 'i')) || [])[1]
+            : '';
+        const thinking = String(selfBlock || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+        // 结论：自检块里最后那行「③ 结论：…」为准；读不出来再退回旧标签。
+        let state = '';
+        if (thinking) {
+            const tail = thinking.match(/结论\s*[:：]([^\n]{0,40})/);
+            const where = tail ? tail[1] : thinking;
+            state = REVIEW_STATES.find((item) => where.includes(item)) || '';
+        }
+        const legacyVerdict = (before.match(new RegExp(`<${REVIEW_TAG}>([\\s\\S]*?)<\\/${REVIEW_TAG}>`, 'i')) || [])[1];
+        const legacyNote = (before.match(new RegExp(`<${REVIEW_NOTE_TAG}>([\\s\\S]*?)<\\/${REVIEW_NOTE_TAG}>`, 'i')) || [])[1];
+        if (!REVIEW_STATES.includes(state)) state = String(legacyVerdict || '').trim();
         const known = REVIEW_STATES.includes(state);
+
+        const s = settings();
+        // 自检原文留一份给面板（「它到底判断了没」是这套机制唯一的可查凭据）
+        if (thinking && s.run.reviewThinking !== thinking) { s.run.reviewThinking = thinking; save(); }
         if (known) {
-            const s = settings();
+            // ★ 结论是「通过」是**例行**（现在每轮都会有一份自检）—— 别往控制台刷（0.38.1 的纪律）。
+            const note = String(thinking || legacyNote || '').replace(/\s+/g, ' ').trim().slice(0, 200);
             s.run.reviewFromReply = {
                 state,
-                note: String(note || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+                note,
+                thinking,
                 chapterId: currentChapterId(),
                 at: aiMessageCount(),
             };
             save();
-            console.info(`[故事导演] 正文模型报了合理性审查「${state}」${note ? `（${String(note).replace(/\s+/g, ' ').slice(0, 40)}…）` : ''}`);
+            if (state !== REVIEW_PASS) {
+                console.info(`[故事导演] 正文模型自检报了「${state}」${note ? `（${note.slice(0, 40)}…）` : ''}`);
+            }
         }
-        const after = before
+
+        // 剥掉：整块（含闭合）先削，再从**第一个残留标签**起全砍 —— 它只该出现在消息末尾，
+        // 留半截 `<故事导演自检…` 在正文里，读者只会莫名其妙（0.37.1 那套纪律）。
+        let cleaned = before
+            .replace(new RegExp(`<${SELF_CHECK_TAG}>[\\s\\S]*?<\\/${SELF_CHECK_TAG}>`, 'gi'), '')
             .replace(new RegExp(`<${REVIEW_TAG}>[\\s\\S]*?<\\/${REVIEW_TAG}>`, 'gi'), '')
-            .replace(new RegExp(`<${REVIEW_NOTE_TAG}>[\\s\\S]*?<\\/${REVIEW_NOTE_TAG}>`, 'gi'), '')
-            .replace(/\n{3,}/g, '\n\n')
-            .trimEnd();
-        // ★ 0.37.1：**没闭合 / 写坏了的标签也要收干净**（与状态块那套同一个思路）——
-        //   它只该出现在消息末尾；留一行残缺的 `<故事导演审查…` 在正文里，读者只会莫名其妙。
-        //   从第一个残留的标签起全砍掉（标签之后本来就不该有正文）。
-        let cleaned = after;
-        for (const tag of [REVIEW_TAG, REVIEW_NOTE_TAG]) {
+            .replace(new RegExp(`<${REVIEW_NOTE_TAG}>[\\s\\S]*?<\\/${REVIEW_NOTE_TAG}>`, 'gi'), '');
+        for (const tag of [SELF_CHECK_TAG, REVIEW_TAG, REVIEW_NOTE_TAG]) {
             const stray = cleaned.search(new RegExp(`<\\/?${tag}`, 'i'));
             if (stray >= 0) cleaned = cleaned.slice(0, stray);
         }
@@ -2483,7 +2514,7 @@ const TONE_GUARD = [
 /** 拍 / 支线 / 插曲统一的「怎么写」要求（各生成提示词里复用）。 */
 const BEAT_FORMAT_RULES = [
     '每一拍按这个格式写：**谁做了什么 → 于是局面变成什么样**。',
-    '   · 主语必须是 NPC、第三方或环境，**不能是 {{user}}**；',
+    '   · 主语必须是 NPC、第三方或环境，**不能是 {{user}}**（藏进前提也算：「得到他的承诺后…」）；',
     // ★ 0.27.12（用户报的「一拍一回合就演完了，还要硬等」）：
     //   以前这里写的是「写结果，不要写即将发生」+「不要以 {{user}} 的回应为前置条件」——
     //   那两条合起来就把一拍定义成「一件**能被叙述完**的事」，于是它当然一条回复就落地。
@@ -2494,6 +2525,7 @@ const BEAT_FORMAT_RULES = [
     '好例子：「一名陌生的客商住进了后巷的客栈，第二天清早她的贴身侍女与他搭了两句话」',
     '坏例子：「她鼓起勇气向他搭话，他答应了」（安排了 {{user}}）',
     '　　「他若同意，她便说出实情」（把这一拍挂在他的选择上，它就不成立了）',
+    '　　「得到他的承诺后，她便倒戈」（前提是他的动作，一样算安排了他）',
 ];
 
 /**
@@ -6395,6 +6427,8 @@ function exposeDiagnostics() {
                     // ★ 0.27.0：给正文模型的自由裁量权 + 篇章检查，都在这儿看得见。
                     待补的铺垫: settings().run.setupNote || '',
                     上一轮的微调回执: settings().run.beatNote || '',
+                    // ★ 0.38.4：正文模型最近一次**自检原文**（它到底判断了没，看这格）
+                    本轮自检: settings().run.reviewThinking || '',
                     篇章检查: settings().run.lastAudit || null,
                     定篇章已试: Math.round(toNumber(settings().run.epicTries, 0)),
                     // ★ 审查升级梯的记账（用户报「大纲自己变了」时，先看这三个数）：
