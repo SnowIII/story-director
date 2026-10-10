@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.38.4';
+const VERSION = '0.38.5';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -1991,15 +1991,27 @@ function harvestReviewTag(messageId) {
             }
         }
 
-        // 剥掉：整块（含闭合）先削，再从**第一个残留标签**起全砍 —— 它只该出现在消息末尾，
-        // 留半截 `<故事导演自检…` 在正文里，读者只会莫名其妙（0.37.1 那套纪律）。
+        // 剥掉：整块（含闭合）先削，再从**残留标签**起处理。
         let cleaned = before
             .replace(new RegExp(`<${SELF_CHECK_TAG}>[\\s\\S]*?<\\/${SELF_CHECK_TAG}>`, 'gi'), '')
             .replace(new RegExp(`<${REVIEW_TAG}>[\\s\\S]*?<\\/${REVIEW_TAG}>`, 'gi'), '')
             .replace(new RegExp(`<${REVIEW_NOTE_TAG}>[\\s\\S]*?<\\/${REVIEW_NOTE_TAG}>`, 'gi'), '');
+        // ★ 0.38.5：自检块搬到了**回复最开头**（用户点破的：写在正文后面等于事后补签 ——
+        //   正文都生成完了，判断还有什么用）。于是「没闭合就从这儿全砍」这条老纪律**不能照用**：
+        //   块在开头时那样会把整篇正文连坐吃掉。改成按位置判断：
+        //     · 标签后面还有**正文开头标志**（`### 正文` / `<content>`）→ 砍到那个标志为止（正文留下）；
+        //     · 没有标志、但标签在**前半段**（块在开头）→ 砍到第一个空行（块与正文之间那道缝）；
+        //     · 其余（块在末尾，或认不出来）→ 照旧全砍：标签之后本来就不该有正文。
         for (const tag of [SELF_CHECK_TAG, REVIEW_TAG, REVIEW_NOTE_TAG]) {
             const stray = cleaned.search(new RegExp(`<\\/?${tag}`, 'i'));
-            if (stray >= 0) cleaned = cleaned.slice(0, stray);
+            if (stray < 0) continue;
+            const rest = cleaned.slice(stray);
+            const storyAt = rest.search(/###\s*正文|<content>/);
+            if (storyAt > 0) cleaned = cleaned.slice(0, stray) + rest.slice(storyAt);
+            else if (stray < cleaned.length * 0.5) {
+                const gap = rest.search(/\n\s*\n/);
+                cleaned = gap >= 0 ? cleaned.slice(0, stray) + rest.slice(gap) : cleaned.slice(0, stray);
+            } else cleaned = cleaned.slice(0, stray);
         }
         cleaned = cleaned.replace(/\n{3,}/g, '\n\n').trimEnd();
         if (cleaned !== before) {
