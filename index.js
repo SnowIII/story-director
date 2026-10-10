@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.38.0';
+const VERSION = '0.38.1';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -877,7 +877,7 @@ function adoptInterludeBeatFromMvu() {
     const want = Math.max(mine, Math.min(asked, mine + 1, cap));
     if (want === mine) return false;
     setPath(story, `${INTERLUDE}.${IL.beat}`, want);
-    console.info(`[故事导演] 间章画面号从变量收回来：${mine} → ${want}（模型想写 ${asked}，一次只进一格）。`);
+    console.debug(`[故事导演] 间章画面号从变量收回来：${mine} → ${want}（模型想写 ${asked}，一次只进一格）。`);
     return true;
 }
 
@@ -1154,7 +1154,7 @@ function reconcileFromLatestMessage(live) {
             const before = JSON.stringify(root[NS] ?? null);
             applyNsCommands(root, commands);
             const changed = JSON.stringify(root[NS] ?? null) !== before;
-            if (changed) console.info(`[故事导演] 兜底：从第 ${i} 楼正文补写了变量（命令事件没送到）`);
+            if (changed) console.debug(`[故事导演] 兜底：从第 ${i} 楼正文补写了变量（命令事件没送到）`);
             return changed;
         }
     } catch (error) {
@@ -1864,7 +1864,7 @@ function stripStatusEcho(messageId) {
         msg.mes = after;
         try { updateMessageBlock(messageId, msg); } catch { /* 老版本 ST 可能没有这个导出 */ }
         try { saveChatDebounced(); } catch { /* ignore */ }
-        console.info(`[故事导演] 已从第 ${messageId} 楼剥掉被误输出的导演状态块（-${before.length - after.length} 字符）`);
+        console.debug(`[故事导演] 已从第 ${messageId} 楼剥掉被误输出的导演状态块（-${before.length - after.length} 字符）`);
         return true;
     } catch (error) {
         console.debug('[故事导演] 剥离状态块失败', error);
@@ -1922,7 +1922,7 @@ function harvestReviewTag(messageId) {
             msg.mes = cleaned;
             try { updateMessageBlock(messageId, msg); } catch { /* 老版本 ST 可能没有这个导出 */ }
             try { saveChatDebounced(); } catch { /* ignore */ }
-            console.info(`[故事导演] 已从第 ${messageId} 楼剥掉审查标签（-${before.length - cleaned.length} 字符）`);
+            console.debug(`[故事导演] 已从第 ${messageId} 楼剥掉审查标签（-${before.length - cleaned.length} 字符）`);
         }
         return known;
     } catch (error) {
@@ -2113,7 +2113,7 @@ async function collectContextBlocks(task = 'chapter', taskOpts = {}) {
                     // ★ 0.32.1：40k 的世界书 dump 里混着 MVU 的 EJS 模板 —— 设计师用不上，还白占体积。
                     const cleaned = stripScriptChunks(text);
                     if (cleaned.dropped) {
-                        console.info(`[故事导演] 世界书里有 ${cleaned.dropped} 段是模板 / 脚本（MVU 之类），已从设计提示词里剔掉。`);
+                        console.debug(`[故事导演] 世界书里有 ${cleaned.dropped} 段是模板 / 脚本（MVU 之类），已从设计提示词里剔掉。`);
                     }
                     const body = cleaned.text.trim() ? cleaned.text : text;
                     blocks.push(`=== 世界书 / 设定（${ORACLE_WORLDINFO_MODES[mode].label}；只含当前真正激活的条目）===\n${capText(body, 40000)}`);
@@ -2353,7 +2353,7 @@ function pruneDiscardedEpics() {
     if (kept.length === list.length) return false;
     const gone = list.length - kept.length;
     s.run.retiredEpics = kept;
-    console.info(`[故事导演] 清掉 ${gone} 条过期的废弃篇章记录（只留 ${keep} 轮；归档的不动）。`);
+    console.debug(`[故事导演] 清掉 ${gone} 条过期的废弃篇章记录（只留 ${keep} 轮；归档的不动）。`);
     return true;
 }
 
@@ -4707,11 +4707,12 @@ async function evaluateDirector({ live = null } = {}) {
         //   额外模型看到这句又接着写 true（自我强化），用户看到的就是「永远已落」。
         //   纪律：**插件是这些 token 的主人**，收不下来的（没有拍可落 / 本章的拍已演完）就复位。
         //   ⚠ 只在「确实没有下一拍可推」时复位 —— 因为被刹车压着等的那几轮（beat<=total）它还该留着。
+        //   ★ 0.38.1：**静默做，不写日志** —— 这是例行自愈、每轮都可能发生；
+        //     控制台只留给「需要用户知道 / 需要排查」的事（纪律见文件开头那几条）。
         if (truthy(main[KEY_BEAT_DONE]) && (total === 0 || beat > total)) {
             await patchMain({ [KEY_BEAT_DONE]: false }, { live });
             save();
-            console.info(`[故事导演] 没有可落的拍（${total === 0 ? '还没排拍' : '本章的拍已演完'}）`
-                + '—— 已把「本拍已落」收回来（留着它会让每一轮的变量快照都说"已落"）。');
+            // 静默复位：这是例行自愈，每轮都可能发生 —— 别往控制台刷（0.38.1，用户提的）。
             syncMainInjection();
         }
 
