@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.36.0';
+const VERSION = '0.36.1';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -1862,6 +1862,9 @@ function renderDiagnostics(text = null, contract = null) {
 /** 模型有时会把注入的状态块抄进正文：确定性剥离（只动我们自己那个标签）。 */
 function stripStatusEcho(messageId) {
     try {
+        // ★ 0.36.1：**先收割审查标签**（放在「没有状态标签就 return」之前）——
+        //   message_received 那两条路是直接调本函数的，挂在外层那条上会漏。
+        harvestReviewTag(messageId);
         const msg = chat?.[messageId];
         if (!msg || msg.is_user || msg.is_system || typeof msg.mes !== 'string') return false;
         const before = msg.mes;
@@ -1937,8 +1940,7 @@ function stripStatusEchoFromLatest() {
         for (let i = chat.length - 1; i >= 0; i--) {
             const m = chat[i];
             if (!m || m.is_user || m.is_system) continue;
-            harvestReviewTag(i);          // ★ 0.36.0：同一楼里先把审查标签收走
-            return stripStatusEcho(i);
+            return stripStatusEcho(i);      // 收割在里面（0.36.1）
         }
     } catch { /* ignore */ }
     return false;
