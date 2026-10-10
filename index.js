@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.37.0';
+const VERSION = '0.37.1';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -1909,11 +1909,20 @@ function harvestReviewTag(messageId) {
             .replace(new RegExp(`<${REVIEW_NOTE_TAG}>[\\s\\S]*?<\\/${REVIEW_NOTE_TAG}>`, 'gi'), '')
             .replace(/\n{3,}/g, '\n\n')
             .trimEnd();
-        if (after !== before) {
-            msg.mes = after;
+        // ★ 0.37.1：**没闭合 / 写坏了的标签也要收干净**（与状态块那套同一个思路）——
+        //   它只该出现在消息末尾；留一行残缺的 `<故事导演审查…` 在正文里，读者只会莫名其妙。
+        //   从第一个残留的标签起全砍掉（标签之后本来就不该有正文）。
+        let cleaned = after;
+        for (const tag of [REVIEW_TAG, REVIEW_NOTE_TAG]) {
+            const stray = cleaned.search(new RegExp(`<\\/?${tag}`, 'i'));
+            if (stray >= 0) cleaned = cleaned.slice(0, stray);
+        }
+        cleaned = cleaned.replace(/\n{3,}/g, '\n\n').trimEnd();
+        if (cleaned !== before) {
+            msg.mes = cleaned;
             try { updateMessageBlock(messageId, msg); } catch { /* 老版本 ST 可能没有这个导出 */ }
             try { saveChatDebounced(); } catch { /* ignore */ }
-            console.info(`[故事导演] 已从第 ${messageId} 楼剥掉审查标签（-${before.length - after.length} 字符）`);
+            console.info(`[故事导演] 已从第 ${messageId} 楼剥掉审查标签（-${before.length - cleaned.length} 字符）`);
         }
         return known;
     } catch (error) {
