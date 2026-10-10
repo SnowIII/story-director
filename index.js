@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.38.1';
+const VERSION = '0.38.2';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -4490,17 +4490,44 @@ async function evaluateDirector({ live = null } = {}) {
                 return;
             }
 
+            // ★ 0.38.2：**插件不认的 `本拍已落` 一律收回来**（与主线 0.38.0 那条同一纪律）。
+            //   间章这一支原来没有这一格：画面号涨过最后一个素材之后（`ilBeat > ilBeats.length`），
+            //   下面那道闸门再也接不住模型写的 true，可它一直挂着 —— 每轮注入都照着它说
+            //   「第 N 个画面真的演到了」，额外模型接着再写一次（自我强化）。
+            //   顺手把**老存档里越界太远**的画面号夹回「素材数 + 1」：那是旧版没有天花板时涨出去的
+            //   （现场涨到了 5），留着只会让面板显示一个不存在的画面号。静默做 —— 例行自愈，不刷控制台。
+            if (ilBeats.length === 0 || ilBeat > ilBeats.length) {
+                const fields = {};
+                if (truthy(chapter[IL.beatDone])) {
+                    fields[IL.beatDone] = false;
+                    fields[IL.beat] = Math.min(ilBeat, ilBeats.length + 1);
+                }
+                if (Object.keys(fields).length) {
+                    await patchInterlude(fields, { live });
+                    save();
+                    syncMainInjection();
+                }
+            }
+
             // 间章里的换拍：与主线同款算法（focusInterlude 是基准，模型可能自己把拍号写成 N+1）
-            if (s.autoBeat && truthy(chapter[IL.beatDone])) {
+            // ★ 0.38.2：**补上主线早有的那两道限幅**（`beat <= total` 与 `min(total + 1, …)`）。
+            //   为什么非补不可（用户报的「才过了一条回复，篇章直接给我过完了？而且明明第二条还没演呢」）：
+            //   这里原来只看「本拍已落 = true」，指针**没有天花板** —— 模型每轮写一次 true 它就每轮 +1，
+            //   一路涨到 4、5、6…（真实现场的变量快照：2 个素材的前提下 当前拍 3 → 4 → …）。
+            //   而面板的 ✔ 判据是 `index + 1 < 当前拍`：指针一越界，剩下的画面全变 ✔、一个 ▶ 都不剩
+            //   （看着就是「这段日常已经演完了」），`allPlayed` 又会顺手把间章收掉 —— 没演的素材就此跳过。
+            if (s.autoBeat && ilBeat <= ilBeats.length && truthy(chapter[IL.beatDone])) {
                 const at = Math.round(toNumber(rt.beatAt, 0));
                 if (!at || count - at >= minReplies) {
                     const focus = Math.max(1, Math.round(toNumber(rt.focusInterlude, 0)) || ilBeat);
-                    const next = Math.max(ilBeat, focus + 1);
+                    const next = Math.min(ilBeats.length + 1, Math.max(ilBeat, focus + 1));
                     rt.focusInterlude = next;
                     rt.beatAt = count;
                     save();
                     await patchInterlude({ [IL.beat]: next, [IL.beatDone]: false }, { live });
-                    toast(`间章第 ${Math.min(focus, next - 1)} 个日常画面已演过，接着第 ${next} 个。`, 'success');
+                    toast(next > ilBeats.length
+                        ? `间章第 ${Math.min(focus, ilBeats.length)} 个日常画面已演过，素材演完了。`
+                        : `间章第 ${Math.min(focus, next - 1)} 个日常画面已演过，接着第 ${next} 个。`, 'success');
                     syncMainInjection();
                     if (!panel?.hidden) render();
                 }
