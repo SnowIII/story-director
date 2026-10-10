@@ -33,7 +33,7 @@ import {
     critiqueText,
     TONES, toneOf, toneOptions, toneDirective,
     KEY_BEAT, KEY_BEAT_DONE, KEY_CHAPTER_DONE, KEY_READY, KEY_REVIEW, KEY_REVIEW_NOTE,
-    REVIEW_PASS, REVIEW_STATES, REVIEW_MAX_RETRY,
+    REVIEW_PASS, REVIEW_STATES, REVIEW_MAX_RETRY, REVIEW_TAG, REVIEW_NOTE_TAG,
     STATUS_PENDING, STATUS_ACTIVE, STATUS_DONE, STATUS_SKIPPED, STATUS_STALLED,
     isPlainObject, unwrap, unwrapDeep, display, toNumber, truthy,
     reviewLadder, STRIKES_BEFORE_EPIC, nsHasState, beatRollbackTarget, reviewAction, REVIEW_SETUP,
@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.35.0';
+const VERSION = '0.36.0';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -507,6 +507,8 @@ const DEFAULT = {
          */
         reviewStrikes: 0,
         reviewStrikesFor: '',
+        /** ★ 0.36.0：正文模型在消息里报的那一档（优先于 MVU 里的值；处理完就清掉）。 */
+        reviewFromReply: null,
         epicRewroteFor: '',
         redesignAt: 0,
         /** 上一段间章的标题（防重复用；间章本身不留在注入里）。 */
@@ -1880,11 +1882,62 @@ function stripStatusEcho(messageId) {
     }
 }
 
+/**
+ * ★ 0.36.0：**从正文里收割「合理性审查」**。
+ *
+ * 判断类字段（这一拍演不演得出来）**只有写正文的模型判断得了** —— 变量模型只看到成品。
+ * 而「额外模型解析」模式下，正文写的 \`_.set\` 会被 MVU 丢掉，所以它改走纯文本标签：
+ *   \`<故事导演审查>驳回</故事导演审查>\` ＋ \`<故事导演审查说明>…</故事导演审查说明>\`
+ * 这里把标签读进 \`run.reviewFromReply\`（心跳里的 handleBeatReview 优先用它），
+ * 并把标签从消息里剥掉 —— 读者不该看到它们。
+ *
+ * @returns {boolean} 这一楼有没有报出一档有效结论
+ */
+function harvestReviewTag(messageId) {
+    try {
+        const msg = chat?.[messageId];
+        if (!msg || msg.is_user || msg.is_system || typeof msg.mes !== 'string') return false;
+        const before = msg.mes;
+        if (!before.includes(REVIEW_TAG) && !before.includes(REVIEW_NOTE_TAG)) return false;
+        const verdict = (before.match(new RegExp(`<${REVIEW_TAG}>([\\s\\S]*?)<\\/${REVIEW_TAG}>`, 'i')) || [])[1];
+        const note = (before.match(new RegExp(`<${REVIEW_NOTE_TAG}>([\\s\\S]*?)<\\/${REVIEW_NOTE_TAG}>`, 'i')) || [])[1];
+        const state = String(verdict || '').trim();
+        const known = REVIEW_STATES.includes(state);
+        if (known) {
+            const s = settings();
+            s.run.reviewFromReply = {
+                state,
+                note: String(note || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+                chapterId: currentChapterId(),
+                at: aiMessageCount(),
+            };
+            save();
+            console.info(`[故事导演] 正文模型报了合理性审查「${state}」${note ? `（${String(note).replace(/\s+/g, ' ').slice(0, 40)}…）` : ''}`);
+        }
+        const after = before
+            .replace(new RegExp(`<${REVIEW_TAG}>[\\s\\S]*?<\\/${REVIEW_TAG}>`, 'gi'), '')
+            .replace(new RegExp(`<${REVIEW_NOTE_TAG}>[\\s\\S]*?<\\/${REVIEW_NOTE_TAG}>`, 'gi'), '')
+            .replace(/\n{3,}/g, '\n\n')
+            .trimEnd();
+        if (after !== before) {
+            msg.mes = after;
+            try { updateMessageBlock(messageId, msg); } catch { /* 老版本 ST 可能没有这个导出 */ }
+            try { saveChatDebounced(); } catch { /* ignore */ }
+            console.info(`[故事导演] 已从第 ${messageId} 楼剥掉审查标签（-${before.length - after.length} 字符）`);
+        }
+        return known;
+    } catch (error) {
+        console.debug('[故事导演] 收割审查标签失败', error);
+        return false;
+    }
+}
+
 function stripStatusEchoFromLatest() {
     try {
         for (let i = chat.length - 1; i >= 0; i--) {
             const m = chat[i];
             if (!m || m.is_user || m.is_system) continue;
+            harvestReviewTag(i);          // ★ 0.36.0：同一楼里先把审查标签收走
             return stripStatusEcho(i);
         }
     } catch { /* ignore */ }
@@ -4152,8 +4205,14 @@ async function handleBeatReview({ live = null } = {}) {
     //   ⚠ 以前这里只看 autoRedesign，总闸关了它照样在重排 —— 做总开关时顺手审计出来的漏网之鱼。
     if (!s.autoDirector || !s.autoRedesign) return false;
     const main = mainState(live);
-    const state = reviewStateOf(main);
     const chapterId = currentChapterId(live);
+    // ★ 0.36.0：**判断类字段以正文模型的回报为准** —— 它在消息里用纯文本标签报（见 harvestReviewTag）；
+    //   MVU 里那个值在「额外模型解析」模式下根本收不到正文的判断（_.set 会被丢掉），只当兜底。
+    const fromReply = s.run.reviewFromReply;
+    const fresh = fromReply && fromReply.chapterId === chapterId && fromReply.state ? fromReply : null;
+    const noteFromReply = fresh ? String(fresh.note || '') : '';
+    if (fresh) { s.run.reviewFromReply = null; save(); }
+    const state = fresh ? fresh.state : reviewStateOf(main);
     // 新的章 → 审查额度重新算（由 chapterId 判定，不看章名 —— 章名会变、也会重名）
     if (s.run.reviewStrikesFor !== chapterId) {
         s.run.reviewStrikesFor = chapterId;
@@ -4178,7 +4237,7 @@ async function handleBeatReview({ live = null } = {}) {
     //   两者都**不动计划、不计入打回阶梯**（阶梯只数 `驳回`）。
     const action = reviewAction(state);
     if (action.kind === 'lite') {
-        const note = reviewNoteOf(main);
+        const note = noteFromReply || reviewNoteOf(main);
         await patchMain({ [KEY_REVIEW]: REVIEW_PASS, [KEY_REVIEW_NOTE]: '' }, { live });
         clearReviewInLive(live);
         if (action.note === 'setup') {
@@ -4207,7 +4266,7 @@ async function handleBeatReview({ live = null } = {}) {
         return false;
     }
 
-    const note = reviewNoteOf(main);
+    const note = noteFromReply || reviewNoteOf(main);
     // 复位结论，免得下一轮又照它重设计一次
     await patchMain({ [KEY_REVIEW]: REVIEW_PASS, [KEY_REVIEW_NOTE]: '' }, { live });
     clearReviewInLive(live);
