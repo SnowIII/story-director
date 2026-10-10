@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.37.1';
+const VERSION = '0.38.0';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -4697,6 +4697,22 @@ async function evaluateDirector({ live = null } = {}) {
                 syncMainInjection();
             }
             return;
+        }
+
+        // ★ 0.38.0：**插件不认的 `本拍已落` 一律收回来**（用户报的「回复一次之后一直会本拍已落」）。
+        //
+        //   真事故的现场（方舟那个聊天）：插件还没排拍，模型却写了一次 `本拍已落 = true`；
+        //   而这一格**没有任何东西会消费它**（上面那道闸门是 `beat <= total`，total=0 时永不成立），
+        //   于是它一直挂着 true —— 每一轮的变量快照都说「本拍已落: true」，
+        //   额外模型看到这句又接着写 true（自我强化），用户看到的就是「永远已落」。
+        //   纪律：**插件是这些 token 的主人**，收不下来的（没有拍可落 / 本章的拍已演完）就复位。
+        //   ⚠ 只在「确实没有下一拍可推」时复位 —— 因为被刹车压着等的那几轮（beat<=total）它还该留着。
+        if (truthy(main[KEY_BEAT_DONE]) && (total === 0 || beat > total)) {
+            await patchMain({ [KEY_BEAT_DONE]: false }, { live });
+            save();
+            console.info(`[故事导演] 没有可落的拍（${total === 0 ? '还没排拍' : '本章的拍已演完'}）`
+                + '—— 已把「本拍已落」收回来（留着它会让每一轮的变量快照都说"已落"）。');
+            syncMainInjection();
         }
 
         if (!s.autoDirector) return;
