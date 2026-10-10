@@ -1153,8 +1153,10 @@ export function renderInterludeChapterSection(chapter, { maxBeats = 6, banUserAc
  *   现在：主线时段给主线示例，间章时段给间章示例，并且明说另一种被忽略。
  *   整段「怎么回报」的规矩仍然只有这一处 + 世界书那三条常驻条目（不给两份，免得互相打架）。
  */
-export function renderContractSection({ banUserAction = true, mode = 'main' } = {}) {
+export function renderContractSection({ banUserAction = true, mode = 'main', beat = '', landingBy = '' } = {}) {
   const inInterlude = mode === 'interlude';
+  const byExtra = landingBy === 'extra';
+  const flag = inInterlude ? `${PATH.interlude}.${IL.beatDone}` : `${PATH.main}.${KEY_BEAT_DONE}`;
   const code = inInterlude ? [
     `// 画面号由插件推进；不要自己写 ${PATH.interlude}.${IL.beat}`,
     `_.set('${PATH.interlude}.${IL.beatDone}', true);`,
@@ -1169,20 +1171,52 @@ export function renderContractSection({ banUserAction = true, mode = 'main' } = 
     `_.set('${PATH.threads}.t1.${THREAD_FIELDS.done}', true);`,
     `_.set('${PATH.interludes}.i1.${INTERLUDE_FIELDS.done}', true);`,
   ];
-  const lines = [
-    '【落拍回报 · 命令写法】',
-    `你可以在回复末尾用 MVU 命令写变量（与卡片自己的状态栏变量互不干扰，全部写在 \`${NS}\` 命名空间下）：`,
-    '```',
-    ...code,
-    '```',
+
+  const lines = [];
+  // ① 这一轮该演什么 + 落拍判据。
+  //   ⚠ 这段是**唯一**能让「额外变量模型」知道"这一拍是什么"的通道（查过日志：变量回填调用里
+  //     有契约槽、没有幕内容槽）。所以判据必须写在这里，而且要说给**两个读者**听。
+  if (beat) {
+    lines.push(
+      inInterlude ? '【这一轮该演的画面 —— 演完它才算落拍】' : '【这一轮该演的一拍 —— 演完它才算落拍】',
+      beat,
+      '',
+      `【落拍判据：满足这些才把 ${flag} 写成 true】`,
+      '　· 正文里**上面这件事已经完整发生**了 —— 不是刚要开始、不是只做了一半、不是只被提到或只做了铺垫；',
+      '　· 正文是**报错 / 空白 / 明显被截断**时，什么都不要写（保持 false；插件会继续等，这比写错安全）；',
+      '　· ⚠ 只演了一半就写落拍 = 把还没发生的事当成已经发生，后面的章会跟着塌。',
+      '',
+    );
+  }
+  // ② 谁写这些变量。
+  if (byExtra) {
+    lines.push(
+      '【落拍回报 · 由**变量模型**回填】',
+      '这个聊天里变量是**额外模型**在正文写完后回填的 —— **讲故事的人什么都不用写**：',
+      '　· 不要把 `_.set` / `<UpdateVariable>` / `本拍已落` 写进正文或任何可见输出；把这一拍演完就行。',
+      '下面这几个字段是**留给变量模型**的（它按上面的判据回填，字段与卡片自己的状态栏变量互不干扰）：',
+      '```',
+      ...code,
+      '```',
+    );
+  } else {
+    lines.push(
+      '【落拍回报 · 命令写法】',
+      `你可以在回复末尾用 MVU 命令写变量（与卡片自己的状态栏变量互不干扰，全部写在 \`${NS}\` 命名空间下）：`,
+      '```',
+      ...code,
+      '```',
+    );
+  }
+  lines.push(
     `　· \`${NS}.${EPIC}.*\`（篇章）是**导演写的，你只读** —— 不要自己改它。`,
-    '　· 只有**真的写进正文之后**才写这些命令；写不出、拿不准就什么都不写（插件不会因此卡住，下一轮照旧引导）。',
+    '　· 只有**正文里真的演完了**（见上面的落拍判据）才写这些命令；写不出、拿不准就什么都不写（插件不会因此卡住，下一轮照旧引导）。',
     // 幕的边界要说清：现在在演哪一种幕，就只写那一种的字段。
     inInterlude
       ? `　· 你**现在在间章**：只写上面这些 \`${PATH.interlude}.*\`（与支线 / 插曲）；写 \`${PATH.main}.*\` 会被插件忽略。`
       : `　· 你现在在**主线**：只写上面这些 \`${PATH.main}.*\`（与支线 / 插曲）；\`${PATH.interlude}.*\` 只在间章时段有效，主线时段写它会被忽略。`,
     '　· 不要自己改 `拍` 列表与 `标题`（那是导演的事）；不要写 `故事导演` 之外的新根键。',
-  ];
+  );
   if (banUserAction) {
     lines.push('　· 这些字段只描述**世界里发生了什么**：不要用它们安排 {{user}} 的行为（「他答应了」「她看着他离开」这种把玩家写成被安排的对象）。');
   }

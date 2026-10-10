@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.34.0';
+const VERSION = '0.35.0';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -1733,6 +1733,52 @@ function buildInjection(live = null) {
     return substitute([...header, ...body, '</story_director_status>'].join('\n'));
 }
 
+/**
+ * ★ 0.35.0：这个聊天里**变量是谁在写**？
+ *
+ * MVU 的「更新方式」有两档：「模型自己输出」与「**额外模型解析**」（额外模型在正文写完后回填）。
+ * 后者是这次用户报的那两个问题的共同前提：我们再教**讲故事的人**写命令，它就会真往正文里写
+ * （「本拍已落漏进正文」），而**真正写变量的那个额外模型**根本看不到我们的幕注入 —— 它不知道这一拍是什么，
+ * 只能凭"看着像演完了"盖章（「没完成拍内任务也会落拍」）。
+ *
+ * 读不到就返回 false（保持老行为：让正文模型写）—— 检测失败只会退化成今天的样子，不会更糟。
+ */
+function landingByExtraModel() {
+    try {
+        const ctx = window.SillyTavern?.getContext?.();
+        const box = ctx?.extensionSettings?.mvu_settings
+            || ctx?.extension_settings?.mvu_settings
+            || window.extensionSettings?.mvu_settings
+            || null;
+        const raw = String(box?.['更新方式'] ?? box?.updateMode ?? '').trim();
+        return /额外模型/.test(raw);
+    } catch { return false; }
+}
+
+/**
+ * ★ 0.35.0：**这一轮该演的那一拍（或那一个画面）** —— 写进契约槽给变量模型看。
+ *
+ * 为什么放在契约里：查过日志 —— 变量回填调用里**有契约槽（31/36），几乎没有幕注入（1/36）**。
+ * 也就是说契约是唯一能让额外模型知道"这一拍是什么"的通道。没有它，「确认演完了再落拍」无从谈起。
+ */
+function currentBeatLine() {
+    try {
+        const root = rootOf();
+        if (currentMode() === 'interlude') {
+            const il = interludeChapterOf(root) || {};
+            const beats = Array.isArray(il[IL.beats]) ? il[IL.beats] : [];
+            const n = Math.max(1, Math.round(toNumber(il[IL.beat], 1)));
+            const text = String(unwrap(beats[n - 1]) ?? '').trim();
+            return text ? `第 ${n} 个画面：${text}` : '';
+        }
+        const main = mainOf(root);
+        const beats = beatsOf(main);
+        const n = Math.max(1, Math.round(toNumber(currentBeat(main), 1)));
+        const text = String(unwrap(beats[n - 1]) ?? '').trim();
+        return text ? `第 ${n} 拍 / 共 ${beats.length} 拍：${text}` : '';
+    } catch { return ''; }
+}
+
 /** 注入槽同步：主线/支线/插曲/变量契约各占一个槽，都独立于别的插件。 */
 function syncMainInjection() {
     try {
@@ -1747,8 +1793,15 @@ function syncMainInjection() {
         setExtensionPrompt(SLOT.interludes, '', extension_prompt_types.IN_CHAT, 0, false, extension_prompt_roles.SYSTEM);
 
         // ★ 0.27.11：契约**按幕给示例** —— 间章时段不该再把主线那几条命令摆在模型面前。
+        // ★ 0.35.0：把「这一轮那一拍」和「谁来写变量」一起交给契约块 ——
+        //   契约是唯一到得了**额外变量模型**的通道（见 landingByExtraModel 的注释）。
         const contract = s.injectContract
-            ? substitute(renderContractSection({ banUserAction: settings().banUserAction !== false, mode: currentMode() }).join('\n'))
+            ? substitute(renderContractSection({
+                banUserAction: settings().banUserAction !== false,
+                mode: currentMode(),
+                beat: currentBeatLine(),
+                landingBy: landingByExtraModel() ? 'extra' : '',
+            }).join('\n'))
             : '';
         setExtensionPrompt(SLOT.contract, contract, extension_prompt_types.IN_CHAT, depth, false, extension_prompt_roles.SYSTEM);
 
