@@ -44,7 +44,7 @@ import {
     renderMainSection, renderThreadsSection, renderInterludeSection, renderContractSection, renderInjectionHeader,
     renderInterludeChapterSection, renderStoryLog, stripScriptChunks, transportErrorOf,
     chapterFromBlock, threadFromBlock, interludeFromBlock, interludeChapterFromBlock,
-    applyNsCommands, extractNsCommands, worldbookDigest, setInterludeWritesAllowed, beatOrderSkipsRead,
+    applyNsCommands, extractNsCommands, landingOpsInReply, worldbookDigest, setInterludeWritesAllowed, beatOrderSkipsRead,
     mergeBeats, remainingBeatBudget, worldbookUpdateDecision,
 } from './model.js';
 
@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.38.2';
+const VERSION = '0.38.3';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -424,6 +424,14 @@ const DEFAULT = {
         focusBeat: 0,
         /** 间章独立的拍号基准；每次采用新间章时重置为 1。 */
         focusInterlude: 0,
+        /**
+         * ★ 0.38.3：**这套宿主里，模型的 `故事导演.*` 回报会不会落进回复正文**。
+         *
+         * 见过的第一次就记下来（见 landingReportedByReply）。记住它是为了让「落拍只认原文」这条路
+         * **只在本机成立时才启用**：有的宿主会把 `<UpdateVariable>` 块从正文里摘掉，
+         * 那种机器上读原文永远读不到回报 —— 不记住就会把整局剧情卡在「模型报了、插件不认」。
+         */
+        opSeen: false,
         /**
          * ★ 当前这一拍是**从第几轮开始**连续注入的（AI 回复数）。
          * 换拍时重置。用来判断「同一拍是不是已经连着演了好几轮而没落地」——
@@ -1161,6 +1169,51 @@ function reconcileFromLatestMessage(live) {
         console.debug('[故事导演] 兜底补写失败', error);
     }
     return false;
+}
+
+/** 最新一楼**回复**（AI 消息）的原文；没有就返回 null。 */
+function latestReplyText() {
+    if (!Array.isArray(chat)) return null;
+    for (let i = chat.length - 1; i >= 0; i--) {
+        const message = chat[i];
+        if (!message || message.is_user || message.is_system || typeof message.mes !== 'string') continue;
+        return message.mes;
+    }
+    return null;
+}
+
+/**
+ * ★ 0.38.3：**落拍只认「这一轮回复里模型自己写下的那条命令」**（用户报的「怎么又第一拍已落地了」）。
+ *
+ * 原来这里读的是**常驻变量**（`pullTokens` 抄进来的 `本拍已落`）。可那一格
+ * 「上一拍 / 上一章留下的 true」和「模型这一轮刚报的 true」在插件眼里完全一样 ——
+ * 只要宿主按旧基准把它盖回来，插件就会把**旧值当新回报**消费掉：
+ *
+ *   真发现场（方舟那个聊天，读的是 llm-api 日志）：
+ *     · 额外模型那一轮的原始响应里 `故事导演.*` **一个字段都没有**（它只写了时间 / 精力 / NPC）；
+ *     · 可下一轮的注入快照已经是「当前拍 2 / 本拍已落 false」—— 说明这次换拍**不是模型报的**，
+ *       是插件把上一章留下的那个 true 当成新回报吃了。
+ *   用户看到的就是「新的一章刚开，第 1 拍自己就落地了」。
+ *
+ * 所以改成**读回复原文**（`landingOpsInReply`）：这一楼写了才算。三态返回：
+ * `true` 落了 / `false` 这一楼没报 / `null` **判定不了**（见下）。
+ *
+ * ⚠ 什么时候退回旧行为（`null`）：这套宿主里**从没见过**任何 `故事导演.*` 命令落进正文
+ *   （有的版本会把变量块从正文里摘掉）。那说明「读原文」这条路在这台机器上不成立，
+ *   只能继续信变量 —— 否则所有聊天都会卡在「模型报了、插件不认」。
+ *   一旦见过一次（`run.opSeen`），以后一律只认原文：**这一楼没写 = 没落**。
+ */
+function landingReportedByReply(kind) {
+    const text = latestReplyText();
+    if (text === null) return null;
+    const flags = landingOpsInReply(text);
+    const want = kind === 'interlude' ? flags.interlude : flags.main;
+    if (flags.hasAnyOp) {
+        const s = settings();
+        if (!s.run.opSeen) { s.run.opSeen = true; save(); }
+        return want;
+    }
+    return settings().run.opSeen ? want : null;
 }
 
 /** 键顺序无关的序列化（用来判断两份命名空间是否真的一样）。 */
@@ -4429,7 +4482,10 @@ async function evaluateDirector({ live = null } = {}) {
             // ★ 顺手把引用接回去：`applySliceToSettings` 是**同一个对象**（不是克隆），
             //   上面这行克隆会把切片与前台的联系打断 —— 不接回去，本次会话推进的游标
             //   （beatAt / threadAt / armedAt …）就只活在前台，一刷新被旧切片盖掉。
-            if (isPlainObject(s.chats)) s.chats[key] = { run: s.run, chapters: s.chapters };
+            //   ⚠ `story` 也要带上（0.38.3 补）：切片键是 `CHAT_SLICE_KEYS` 那三个，
+            //     这里少写一个就等于**把这一局的剧情状态从切片里抹掉** —— 下次切回这个聊天，
+            //     `applySliceToSettings` 会拿默认空 story 盖上去（计划整个丢）。
+            if (isPlainObject(s.chats)) s.chats[key] = { run: s.run, chapters: s.chapters, story: s.story };
             save();
         }
 
@@ -4490,23 +4546,24 @@ async function evaluateDirector({ live = null } = {}) {
                 return;
             }
 
+            // ★ 0.38.3：换拍的依据从「变量里那个 true」改成「**这一轮回复里模型自己写的**那条命令」。
+            //   三态：true 落了 / false 这一楼没报 / null 判定不了（宿主把变量块摘掉了 → 退回旧行为）。
+            const ilReport = landingReportedByReply('interlude');
+            const interludeLanded = ilReport === null ? truthy(chapter[IL.beatDone]) : ilReport;
+
             // ★ 0.38.2：**插件不认的 `本拍已落` 一律收回来**（与主线 0.38.0 那条同一纪律）。
             //   间章这一支原来没有这一格：画面号涨过最后一个素材之后（`ilBeat > ilBeats.length`），
             //   下面那道闸门再也接不住模型写的 true，可它一直挂着 —— 每轮注入都照着它说
             //   「第 N 个画面真的演到了」，额外模型接着再写一次（自我强化）。
             //   顺手把**老存档里越界太远**的画面号夹回「素材数 + 1」：那是旧版没有天花板时涨出去的
             //   （现场涨到了 5），留着只会让面板显示一个不存在的画面号。静默做 —— 例行自愈，不刷控制台。
-            if (ilBeats.length === 0 || ilBeat > ilBeats.length) {
-                const fields = {};
-                if (truthy(chapter[IL.beatDone])) {
-                    fields[IL.beatDone] = false;
-                    fields[IL.beat] = Math.min(ilBeat, ilBeats.length + 1);
-                }
-                if (Object.keys(fields).length) {
-                    await patchInterlude(fields, { live });
-                    save();
-                    syncMainInjection();
-                }
+            //   ★ 0.38.3：`ilReport === false`（这一楼没写落拍）也算「插件不认的 true」，一起收。
+            if ((ilBeats.length === 0 || ilBeat > ilBeats.length || ilReport === false) && truthy(chapter[IL.beatDone])) {
+                const fields = { [IL.beatDone]: false };
+                if (ilBeat > ilBeats.length) fields[IL.beat] = Math.min(ilBeat, ilBeats.length + 1);
+                await patchInterlude(fields, { live });
+                save();
+                syncMainInjection();
             }
 
             // 间章里的换拍：与主线同款算法（focusInterlude 是基准，模型可能自己把拍号写成 N+1）
@@ -4516,7 +4573,7 @@ async function evaluateDirector({ live = null } = {}) {
             //   一路涨到 4、5、6…（真实现场的变量快照：2 个素材的前提下 当前拍 3 → 4 → …）。
             //   而面板的 ✔ 判据是 `index + 1 < 当前拍`：指针一越界，剩下的画面全变 ✔、一个 ▶ 都不剩
             //   （看着就是「这段日常已经演完了」），`allPlayed` 又会顺手把间章收掉 —— 没演的素材就此跳过。
-            if (s.autoBeat && ilBeat <= ilBeats.length && truthy(chapter[IL.beatDone])) {
+            if (s.autoBeat && ilBeat <= ilBeats.length && interludeLanded) {
                 const at = Math.round(toNumber(rt.beatAt, 0));
                 if (!at || count - at >= minReplies) {
                     const focus = Math.max(1, Math.round(toNumber(rt.focusInterlude, 0)) || ilBeat);
@@ -4695,8 +4752,14 @@ async function evaluateDirector({ live = null } = {}) {
             }
         }
 
+        // ★ 0.38.3：主线的换拍依据也改成「**这一轮回复里模型自己写的**那条命令」——
+        //   与间章同一套（见 landingReportedByReply 的长注释：常驻变量分不清「旧值」与「新回报」，
+        //   用户报的「新章刚开、第 1 拍自己就落地了」就是旧值被当新回报吃了）。
+        const mainReport = landingReportedByReply('main');
+        const mainLanded = mainReport === null ? truthy(main[KEY_BEAT_DONE]) : mainReport;
+
         // ② 自动换拍（手动模式下也照做：写盘不需要调模型）
-        if (s.autoBeat && beat <= total && truthy(main[KEY_BEAT_DONE])) {
+        if (s.autoBeat && beat <= total && mainLanded) {
             const at = Math.round(toNumber(rt.beatAt, 0));
             if (!at || count - at >= minReplies) {
                 const focus = Math.max(1, Math.round(toNumber(rt.focusBeat, 0)) || beat);
@@ -4736,7 +4799,10 @@ async function evaluateDirector({ live = null } = {}) {
         //   ⚠ 只在「确实没有下一拍可推」时复位 —— 因为被刹车压着等的那几轮（beat<=total）它还该留着。
         //   ★ 0.38.1：**静默做，不写日志** —— 这是例行自愈、每轮都可能发生；
         //     控制台只留给「需要用户知道 / 需要排查」的事（纪律见文件开头那几条）。
-        if (truthy(main[KEY_BEAT_DONE]) && (total === 0 || beat > total)) {
+        //   ★ 0.38.3：再加一条 —— **这一轮回复里没写落拍**（`mainReport === false`）时，
+        //     变量里那个 true 就不可能是这一轮的回报（是旧值被宿主按基准盖回来的，
+        //     用户报的「新章刚开、第 1 拍自己就落地了」就是它被当成了新回报）→ 一样收回来。
+        if (truthy(main[KEY_BEAT_DONE]) && (total === 0 || beat > total || mainReport === false)) {
             await patchMain({ [KEY_BEAT_DONE]: false }, { live });
             save();
             // 静默复位：这是例行自愈，每轮都可能发生 —— 别往控制台刷（0.38.1，用户提的）。

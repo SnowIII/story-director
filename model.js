@@ -1776,6 +1776,54 @@ export function extractNsCommands(text) {
 }
 
 /**
+ * ★ 0.38.3：**从「这一楼的回复原文」里读模型自己报的落拍**（用户报的「怎么又第一拍已落地了」）。
+ *
+ * 为什么非读原文不可（真事故）：`本拍已落` 是**常驻变量**，插件每轮从 MVU 抄一遍。
+ * 于是「上一拍 / 上一章留下的 true」和「模型这一轮刚报的 true」在插件眼里长得**一模一样** ——
+ * 只要那个 true 还在（我们写回 false 之后又会被宿主按旧基准盖回来），插件就会把它当成
+ * **新**回报消费掉。用户看到的就是「新的一章刚开，第 1 拍自己就落地了」，
+ * 而那一轮的额外模型其实**一个 `故事导演` 字段都没写**。
+ *
+ * 现场（llm-api-431 的原始响应）：额外模型那一轮只写了时间 / 精力 / NPC，
+ * `故事导演.*` 一个都没有；可下一轮注入里的快照已经是 `当前拍 2 / 本拍已落 false`。
+ *
+ * 所以落拍改成只认**回复原文里那条命令**（模型这一轮到底写了什么）。
+ *
+ * 返回 `{ hasAnyOp, main, interlude }`：
+ *   · `hasAnyOp` —— 这一楼有没有出现**任何** `故事导演.*` 命令
+ *     （用来判断这套宿主里「回报会不会落进正文」，见 index.js 的 landingReportedByReply）；
+ *   · `main` / `interlude` —— 回复里有没有把对应的 `本拍已落` 写成 `true`。
+ * 两种写法都认：`_.set('故事导演.主线.本拍已落', true)`（契约里的写法）与
+ * `{"op":"replace","path":"/故事导演/主线/本拍已落","value":true}`（MVU 额外模型的原生输出）。
+ * 围栏 / 行内代码里的示例不算（注入块里的示例命令会被模型整段抄回去）。
+ */
+export function landingOpsInReply(text) {
+  const src = String(text ?? '');
+  const out = { hasAnyOp: false, main: false, interlude: false };
+  if (!src) return out;
+  const kindOf = (section) => (section === '间章' ? 'interlude' : (section === '主线' ? 'main' : ''));
+  const mark = (section, field, value) => {
+    const kind = kindOf(section);
+    if (!kind) return;
+    out.hasAnyOp = true;
+    if (field === KEY_BEAT_DONE && value === true) out[kind] = true;
+  };
+  // ① 契约里的写法：`_.set('故事导演.主线.本拍已落', true)`（单/双/反引号、可带 stat_data. 前缀）
+  for (const m of src.matchAll(/_\.set\(\s*['"`](?:stat_data\.)?故事导演\.(主线|间章)\.([^'"`]+)['"`]\s*,\s*(true|false)\b/g)) {
+    if (insideFence(src, m.index)) continue;
+    mark(m[1], m[2].trim(), m[3] === 'true');
+  }
+  // ② MVU 额外模型的原生写法：`{ "op": "replace", "path": "/故事导演/主线/本拍已落", "value": true }`
+  for (const m of src.matchAll(/"path"\s*:\s*"\/(?:stat_data\/)?故事导演\/(主线|间章)\/([^"]+)"/g)) {
+    const tail = src.slice(m.index, m.index + 240);
+    const value = /"value"\s*:\s*(true|false)\b/.exec(tail);
+    if (!value) { out.hasAnyOp = true; continue; }      // 认得路径就算「有命令」，值读不出就不当落拍
+    mark(m[1], m[2].trim(), value[1] === 'true');
+  }
+  return out;
+}
+
+/**
  * 位置是否落在 ``` 围栏里，或落在一行里未闭合的行内 `code` 里。
  * 注入块把示例命令写成 `` `_.set(...)` ``，模型整段抄回去时不该被当成真命令。
  *
