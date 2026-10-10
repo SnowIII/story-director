@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.38.5';
+const VERSION = '0.38.6';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -1956,9 +1956,12 @@ function harvestReviewTag(messageId) {
         const hasSelfCheck = before.includes(SELF_CHECK_TAG);
         if (!hasSelfCheck && !before.includes(REVIEW_TAG) && !before.includes(REVIEW_NOTE_TAG)) return false;
 
-        const selfBlock = hasSelfCheck
-            ? (before.match(new RegExp(`<${SELF_CHECK_TAG}>([\\s\\S]*?)<\\/${SELF_CHECK_TAG}>`, 'i')) || [])[1]
-            : '';
+        // ★ 0.38.6：**两种写法都认**。用户那一楼它写成了 HTML 注释
+        //   （`<!-- 故事导演自检 … -->`）—— 旧代码只认 `<故事导演自检>…`，于是那一轮的结论**根本没读到**，
+        //   该按住的没按住，而注释还留在正文里被读者看见。模型不听话是常态，插件得两头接住。
+        const selfMatch = before.match(new RegExp(
+            `<${SELF_CHECK_TAG}>([\\s\\S]*?)<\\/${SELF_CHECK_TAG}>` + `|<!--\\s*${SELF_CHECK_TAG}\\s*([\\s\\S]*?)-->`, 'i'));
+        const selfBlock = selfMatch ? (selfMatch[1] ?? selfMatch[2] ?? '') : '';
         const thinking = String(selfBlock || '').replace(/\s+/g, ' ').trim().slice(0, 300);
         // 结论：自检块里最后那行「③ 结论：…」为准；读不出来再退回旧标签。
         let state = '';
@@ -1994,6 +1997,9 @@ function harvestReviewTag(messageId) {
         // 剥掉：整块（含闭合）先削，再从**残留标签**起处理。
         let cleaned = before
             .replace(new RegExp(`<${SELF_CHECK_TAG}>[\\s\\S]*?<\\/${SELF_CHECK_TAG}>`, 'gi'), '')
+            // ★ 0.38.6：注释式那一份也要整块削掉。⚠ 只削**我们自己那条** ——
+            //   卡片预设里本来就有 `<!-- begin_of_Subtext_think -->` 这类注释，不能一并误伤。
+            .replace(new RegExp(`<!--\\s*${SELF_CHECK_TAG}[\\s\\S]*?-->`, 'gi'), '')
             .replace(new RegExp(`<${REVIEW_TAG}>[\\s\\S]*?<\\/${REVIEW_TAG}>`, 'gi'), '')
             .replace(new RegExp(`<${REVIEW_NOTE_TAG}>[\\s\\S]*?<\\/${REVIEW_NOTE_TAG}>`, 'gi'), '');
         // ★ 0.38.5：自检块搬到了**回复最开头**（用户点破的：写在正文后面等于事后补签 ——
@@ -2002,8 +2008,9 @@ function harvestReviewTag(messageId) {
         //     · 标签后面还有**正文开头标志**（`### 正文` / `<content>`）→ 砍到那个标志为止（正文留下）；
         //     · 没有标志、但标签在**前半段**（块在开头）→ 砍到第一个空行（块与正文之间那道缝）；
         //     · 其余（块在末尾，或认不出来）→ 照旧全砍：标签之后本来就不该有正文。
+        //   ★ 0.38.6：残留检测也认注释式写法（`<!-- 故事导演自检` 没闭合）。
         for (const tag of [SELF_CHECK_TAG, REVIEW_TAG, REVIEW_NOTE_TAG]) {
-            const stray = cleaned.search(new RegExp(`<\\/?${tag}`, 'i'));
+            const stray = cleaned.search(new RegExp(`<\\/?${tag}|<!--\\s*${tag}`, 'i'));
             if (stray < 0) continue;
             const rest = cleaned.slice(stray);
             const storyAt = rest.search(/###\s*正文|<content>/);
