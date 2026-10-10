@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.36.1';
+const VERSION = '0.37.0';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -374,7 +374,8 @@ const DEFAULT = {
      *
      * 为什么需要：插件原来只在「世界书缺失」时才安装 —— 我们自己改了世界书（加纪律、改变量契约），
      * 已经装过的人**永远拿不到新内容**，只能靠人手动点「安装／重装」。
-     * 开这个之后会拿带版本标记的那份比对，发现旧了就自动更新（**旧内容先备份**，不动用户原有的书）。
+     * 开这个之后会拿带版本标记的那份比对，发现旧了就自动更新（★ 0.37.0 起**不再留本地备份**：
+ * 旧版本在仓库里有 tag，要回退就装那一版的扩展包 —— 见「关于」页的「版本与回退」）。
      */
     autoUpdateBook: true,
     autoMountBook: true,
@@ -1505,23 +1506,10 @@ async function fetchBundledWorldbook() {
     }
 }
 
-/** 更新前先把旧内容备份成「原名 + 后缀」，绝不覆盖掉用户手里的那份。 */
-async function backupWorldbook(suffix) {
-    try {
-        const load = window.SillyTavern?.getContext?.()?.loadWorldInfo;
-        if (typeof load !== 'function') return '';
-        const current = await load(PLUGIN_WORLD);
-        if (!isPlainObject(current?.entries)) return '';
-        const name = `${PLUGIN_WORLD}${suffix}`;
-        await saveWorldInfo(name, current, true);
-        try { await updateWorldInfoList(); } catch { /* 刷新失败不影响备份本身 */ }
-        return name;
-    } catch (error) {
-        console.debug('[故事导演] 备份世界书失败', error);
-        return '';
-    }
-}
-
+// ★ 0.37.0：**不再给世界书留本地备份**（用户提的）。
+//   理由：每一次自动更新都会在「世界书」列表里多塞一本「故事导演（更新前备份 x.y.z）」，
+//   装十几次就是十几本垃圾；而**存档本来就在仓库里** —— 每个版本都打了 tag，
+//   想回到哪一版就下那一版的扩展包重装（那一版自带的世界书就是那一版的）。
 /**
  * 把插件自带的 worldbook/story-director.json 装进酒馆。
  *
@@ -1578,7 +1566,6 @@ async function installBundledWorldbook({ notify = true, mount = null, ifMissing 
             console.debug('[故事导演] 自带世界书没有版本标记，跳过自动更新。');
             return 'no-version';
         }
-        const backup = await backupWorldbook(`（更新前备份 ${installed || '无版本'}）`);
         try {
             await saveWorldInfo(PLUGIN_WORLD, data0, true);
         } catch (error) {
@@ -1588,12 +1575,13 @@ async function installBundledWorldbook({ notify = true, mount = null, ifMissing 
         }
         try { await updateWorldInfoList(); } catch (error) { console.debug('[故事导演] 刷新世界书列表失败', error); }
         if (panel && !panel.hidden) render();
-        console.info(`[故事导演] 自带世界书已更新：${installed || '(无版本)'} → ${bundled}` + (backup ? `；旧内容备份为「${backup}」` : ''));
+        // ★ 0.37.0：不备份了。旧版本要留档的话，仓库里一版一个 tag（见「关于」页的「版本与回退」）。
+        console.info(`[故事导演] 自带世界书已更新：${installed || '(无版本)'} → ${bundled}（未留本地备份；要回退就装 v${installed || '?'} 那一版）`);
         if (notify) {
             toastOnce(
                 `book:updated:${bundled}`,
                 `自带世界书「${PLUGIN_WORLD}」已更新到 ${bundled}` +
-                (backup ? `（旧内容备份成「${backup}」，可以随时对照或删掉）` : '') + '。',
+                (installed ? `（没留备份 —— 想回到 v${installed} 就重装那一版的扩展包，见「关于」页）` : '') + '。',
                 'success',
             );
         }
@@ -1605,8 +1593,7 @@ async function installBundledWorldbook({ notify = true, mount = null, ifMissing 
         if (notify) toast('读不到插件自带的世界书文件（worldbook/story-director.json）——手动拷扩展目录时别漏掉 worldbook 子目录。', 'error');
         return 'failed';
     }
-    // 真·重装：也给旧内容留一份备份
-    if (exists) await backupWorldbook('（重装前备份）');
+    // ★ 0.37.0：重装同样不留备份（旧版本在仓库 tag 里）。
     try {
         await saveWorldInfo(PLUGIN_WORLD, data, true);
     } catch (error) {
@@ -5195,6 +5182,12 @@ const TABS = [['now', '当前'], ['epic', '篇章'], ['main', '主线'], ['side'
  * 「关于」页：头像 + 作者 + 版本 + 出处。
  * 刻意做得**简洁**（用户的要求）：不放说明文档（那些在 README 与「设定」页里）。
  */
+/** 「关于」页上那一行：当前插件版本 + 自带世界书的版本标记（读不到就说未标记）。 */
+function bundledWorldVersionLabel() {
+    const world = String(BUNDLED_WORLD_VERSION || '').trim();
+    return world ? `插件 v${VERSION} · 世界书 ${world}` : `插件 v${VERSION}`;
+}
+
 function renderAboutTab() {
     const host = panel?.querySelector('.sd-about-tab');
     if (!host) return;
@@ -5209,14 +5202,24 @@ function renderAboutTab() {
         </div>
         <div class="sd-card">
             <div class="sd-card-head"><span class="sd-card-title">这个插件</span><span class="sd-chip">v${esc(version || '?')}</span></div>
-            <p class="sd-note">让故事**自己往下走**：自动定篇章、开章、按拍推进，间隙用间章 / 支线 / 插曲填上。<br>
-            设计规则与提示词全文都在仓库里（<code>model/</code>），改了什么、为什么改，更新记录里都写了。</p>
+            <p class="sd-note">让故事**自己往下走**：自动定篇章、开章、按拍推进，间隙用间章 / 支线 / 插曲填上；设计与提示词全文在仓库 <code>model/</code> 里。</p>
             <div class="sd-row">
                 <a class="sd-btn sd-about-link" href="https://github.com/SnowIII/story-director" target="_blank" rel="noreferrer">GitHub 仓库</a>
                 <a class="sd-btn sd-about-link" href="${esc(m)}" target="_blank" rel="noreferrer">manifest.json</a>
             </div>
-            <p class="sd-note sd-dim">代码部分 <b>100% AI 生成</b> —— 不成熟的作者及其产品会带来一定的风险。<br>
-            底座与致谢：故事神谕 Story Oracle · 酒馆助手 JS-Slash-Runner · MagVarUpdate（MVU） · ST-Prompt-Template。</p>
+            <p class="sd-note sd-dim">代码部分 <b>100% AI 生成</b>（不成熟，风险自担）。底座与致谢：故事神谕 Story Oracle · 酒馆助手 JS-Slash-Runner · MagVarUpdate（MVU） · ST-Prompt-Template。</p>
+        </div>
+        <div class="sd-card">
+            <div class="sd-card-head"><span class="sd-card-title">版本与回退</span>
+                <span class="sd-chip">${esc(bundledWorldVersionLabel())}</span></div>
+            <p class="sd-note"><b>不留本地备份</b>：更新世界书不再多塞一本「更新前备份」——
+            <b>每一版的扩展包就是那一版世界书的存档</b>。</p>
+            <div class="sd-row">
+                <a class="sd-btn sd-about-link" href="https://github.com/SnowIII/story-director/tags" target="_blank" rel="noreferrer">版本列表（Tags）</a>
+                <a class="sd-btn sd-about-link" href="https://github.com/SnowIII/story-director/releases" target="_blank" rel="noreferrer">发行版</a>
+                <a class="sd-btn sd-about-link" href="https://github.com/SnowIII/story-director/commits/main" target="_blank" rel="noreferrer">提交历史</a>
+            </div>
+            <p class="sd-note sd-dim">不再留本地备份；回退就在 Tags 里选一版重装。</p>
         </div>`;
 }
 
@@ -5638,9 +5641,9 @@ function renderSetTab() {
                 ${Object.entries(BOOK_MODES).map(([key, item]) => `<option value="${key}">${esc(item.label)}</option>`).join('')}
             </select></label>
             <label class="sd-switch"><input name="auto-install-book" type="checkbox"> 缺失时自动安装自带世界书</label>
-            <label class="sd-switch"><input name="auto-update-book" type="checkbox"> <b>内容有更新时自动重装</b>（按版本标记比对；<b>旧内容会先备份</b>）</label>
+            <label class="sd-switch"><input name="auto-update-book" type="checkbox"> <b>内容有更新时自动重装</b>（按版本标记比对；<b>不留本地备份</b>）</label>
             <p class="sd-note">规则与变量契约都在自带世界书里，我们改了它就会升版本号 —— 开着这项就不用每次手点「安装／重装」。
-            更新前会把酒馆里那份**原样备份**成「${esc(PLUGIN_WORLD)}（更新前备份 …）」，你可以随时对照或删掉。</p>
+            **不再留备份**：回退见「关于」页。</p>
             <label class="sd-switch"><input name="auto-mount-book" type="checkbox"> 安装后挂到全局世界书</label>
             <label class="sd-switch"><input name="book-unmount-on-off" type="checkbox"> <b>关总开关时顺手摘掉全局挂载</b>（开回来时自动挂回去）</label>
             <p class="sd-note">世界书是**酒馆**在注入的，不归插件管：总开关关掉后，那本契约还会每轮塞「你会收到幕后演出计划」，
@@ -5733,7 +5736,7 @@ function renderSetTab() {
         bm.addEventListener('change', () => { s.bookMode = bm.value; save(); void applyBookMode(); });
     }
     host.querySelector('.sd-install-book')?.addEventListener('click', () => {
-        // 手动点 = 明确的重装意图：不管版本标记，直接把自带那份写回去（旧内容会先备份）
+        // 手动点 = 明确的重装意图：不管版本标记，直接把自带那份写回去（0.37.0 起不留备份）
         void installBundledWorldbook({ notify: true, mount: settings().autoMountBook, ifMissing: false });
     });
     host.querySelector('.sd-mount-book')?.addEventListener('click', () => {
