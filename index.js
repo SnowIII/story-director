@@ -55,7 +55,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.38.6';
+const VERSION = '0.38.7';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -6961,6 +6961,46 @@ function placeWindow() {
 function open() { panel.hidden = false; placeWindow(); render(); }
 function close() { panel.hidden = true; persistChatSlice(); }
 
+/**
+ * ★ 0.38.7（用户提的）：**魔棒菜单里加一个「故事导演」入口**。
+ *
+ * 为什么还要这个门：左下角那个悬浮球是能拖的 —— 拖到屏外 / 拖丢了，导演界面就进不去了
+ * （手机尤其容易）。魔棒菜单是 ST 常驻的，它才是「永远够得着」的那个入口。
+ *
+ * 抄的是神谕那套成熟做法（它在真机上踩过坑，这里照抄）：
+ *   · 容器是 `#extensionsMenu`，条目用 ST 自己的 `list-group-item flex-container flexGap5 interactable`；
+ *   · **点完不要**给菜单加 `.displayNone` —— 那会永久破坏 ST 的淡入，菜单再也打不开；
+ *   · 菜单被 ST 重建 / 条目被克隆时，JS 属性**不会**跟着复制 → 用一个私有标记判断
+ *     「这颗还是不是活着的那颗」，不活就整颗重建（0 份 = 没了；>1 份 = 被搬动时重复插入，收敛成 1 份）。
+ *     不这么判的话，会出现「按钮在、点了没反应」的哑巴（克隆体没有监听器）。
+ */
+const WAND_ENTRY_ID = 'story-director-wand-entry';
+const WAND_LIVE_FLAG = '__sdWandLive';
+
+function injectWandEntry() {
+    try {
+        const menu = document.getElementById('extensionsMenu');
+        if (!menu) return false;
+        const found = document.querySelectorAll(`#${WAND_ENTRY_ID}`);
+        if (found.length === 1 && found[0][WAND_LIVE_FLAG] && menu.contains?.(found[0])) return true;
+        found.forEach((node) => node.remove?.());
+        const item = document.createElement('div');
+        item.id = WAND_ENTRY_ID;
+        item.className = 'list-group-item flex-container flexGap5 interactable';
+        item.tabIndex = 0;
+        item.title = '打开 故事导演面板';
+        item.innerHTML = '<i class="fa-solid fa-clapperboard"></i><span>故事导演</span>';
+        // 这里是「进入」，不是开关：面板已经开着的时候再点，不该把它关掉。
+        item.addEventListener('click', () => { open(); });
+        item[WAND_LIVE_FLAG] = true;
+        menu.appendChild(item);
+        return true;
+    } catch (error) {
+        console.debug('[故事导演] 魔棒菜单入口注入失败', error);
+        return false;
+    }
+}
+
 function makePanel() {
     panel = document.createElement('aside');
     panel.id = 'story-director-panel';
@@ -7028,6 +7068,10 @@ function init() {
     if (!document.body) { window.setTimeout(init, 500); return; }
     makeBubble();
     makePanel();
+    // ★ 0.38.7：魔棒菜单入口。ST 可能在扩展之后才把菜单建好，所以几拍重试（幂等，重复调只有一颗）。
+    injectWandEntry();
+    window.setTimeout(() => injectWandEntry(), 600);
+    window.setTimeout(() => injectWandEntry(), 2600);
     exposeDiagnostics();
     connectOracle();
     bindVariableInterception();
@@ -7058,6 +7102,7 @@ function init() {
             const s = settings();
             if (s.run.chatId !== chatKey()) { s.run.chatId = chatKey(); save(); }
             void ensureNamespace();
+            injectWandEntry();          // 换聊天时菜单可能被 ST 重建过：顺手补一颗（幂等）
             window.setTimeout(() => { void evaluateDirector(); }, AFTER_MVU_DELAY);
             window.setTimeout(() => cleanupStatusEchoInChat({ notify: true }), 2500);
             if (!panel.hidden) render();
