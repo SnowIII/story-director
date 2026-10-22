@@ -761,6 +761,13 @@ export function parseBlocks(text, tag) {
 /**
  * 逐字段拆一个区块。属性行写法：`标题: xxx` / `标题：xxx` / `标题="xxx"`，
  * 值可以跨行，直到下一个 `字段:` 或 `字段=` 行出现。
+ *
+ * ★ 0.38.8（别人报的「没解析到 <StoryEpic> 区块，换什么都没用」）：
+ *   **字段名上那些 markdown 装饰一律先扒掉再认。** 原来只认「行首就是字段名」，
+ *   于是下面这些写法全都解析不出来 —— 而它们在实际模型输出里非常常见：
+ *     `**标题**: …`   `- 标题: …`   `### 标题：…`   `> 标题: …`
+ *   区块明明在、字段明明在，只是多了层装饰；报出来却是「没解析到区块」，
+ *   把排查方向整个带偏（用户换模型、换预设，当然都没用）。
  */
 export function parseAttributes(raw) {
   let text = String(raw ?? '').replace(/\r/g, '');
@@ -770,12 +777,15 @@ export function parseAttributes(raw) {
   // 字段值可以跨行：终止于「下一行的字段名」或「真正的字符串结尾」。
   // ⚠ 这里不能用 `\n*$`——正则带 m 标志时 `$` 会匹配每一个行尾，值会在第一行就被截断
   //（模型把 `拍` 写成多行编号列表时，那样只会留下第一拍）。
-  const re = /^[ \t]*([\p{Script=Han}A-Za-z_]{1,12})[ \t]*[:：=][ \t]*([\s\S]*?)(?=\n[ \t]*[\p{Script=Han}A-Za-z_]{1,12}[ \t]*[:：=]|(?![\s\S]))/gmu;
+  // 行首允许的装饰：列表符 / 引用符 / 标题井号 / 加粗星号（顺序不敏感，叠着写也认）。
+  const DECOR = '(?:[-*+][ \\t]+|>+[ \\t]*|#{1,6}[ \\t]*|\\*{1,3}[ \\t]*|[ \\t])*';
+  const re = new RegExp(`^${DECOR}([\\p{Script=Han}A-Za-z_]{1,12})\\*{0,3}[ \\t]*[:：=][ \\t]*([\\s\\S]*?)(?=\\n${DECOR}[\\p{Script=Han}A-Za-z_]{1,12}\\*{0,3}[ \\t]*[:：=]|(?![\\s\\S]))`, 'gmu');
   const out = {};
   for (const match of text.matchAll(re)) {
     const key = match[1].trim();
     let value = String(match[2] ?? '').trim();
-    value = value.replace(/^["'「『]/, '').replace(/["'」』]$/, '').trim();
+    // 值上的装饰也扒掉：包裹的引号 / 加粗星号 / 行内反引号。
+    value = value.replace(/^["'「『`*]+/, '').replace(/["'」』`*]+$/, '').trim();
     if (!key) continue;
     out[key] = value;
     out[key.toLowerCase()] = value;
@@ -1870,6 +1880,40 @@ export function landingOpsInReply(text) {
     mark(m[1], m[2].trim(), value[1] === 'true');
   }
   return out;
+}
+
+/**
+ * ★ 0.38.8（别人报的「没解析到 <StoryEpic> 区块，换什么都没用」）：
+ * **说清到底是哪一种失败** —— 这一句报错以前把四种完全不同的原因揉成了一句，
+ * 于是用户只会去换模型、换预设（当然都没用）。
+ *
+ *   ① `truncated` —— 区块**开了头没闭合**：这条回复被截断了（长度上限 / 上游掐断）。
+ *      换哪个模型都一样，得把长度上限调大，或让它写短。
+ *   ② `wrong-tag` —— 它输出的是**别的区块**（比如要 `<StoryEpic>` 却给了 `<StoryChapters>`）：
+ *      入口点错了，或者模型没照这次任务的格式走。
+ *   ③ `no-block` —— 回复里**压根没有**我们的区块：多半被卡片的预设 / 破限盖掉了。
+ *   ④ `no-fields` —— 区块在，但字段认不出来（名字对不上 / 值是空的）。调用方拿
+ *      `recognizedFieldNames()` 把它实际用的字段名列出来。
+ *
+ * @returns {{kind:'ok'|'truncated'|'wrong-tag'|'no-block'|'no-fields', hint:string, saw:string}}
+ */
+export function storyBlockFailure(text, tag) {
+  const s = String(text ?? '');
+  const name = String(tag ?? '');
+  if (parseBlocks(s, name).length) return { kind: 'ok', hint: '', saw: name };
+  if (new RegExp(`<${name}[^>]*>`, 'i').test(s)) {
+    return { kind: 'truncated', hint: `<${name}> 开了头却没有闭合 —— 这次回复**被截断了**（长度上限不够，或上游掐断）`, saw: name };
+  }
+  const other = s.match(/<Story([A-Za-z]+)[\s>]/);
+  if (other) {
+    return { kind: 'wrong-tag', hint: `它输出的是 <Story${other[1]}>，不是这次要的 <${name}>`, saw: `Story${other[1]}` };
+  }
+  return { kind: 'no-block', hint: `回复里压根没有 <${name}> 区块（多半被卡片的预设 / 破限盖掉了，或者模型没照格式来）`, saw: '' };
+}
+
+/** 区块在、但字段认不出来时：把**它实际用的字段名**列出来，方便一眼看出差在哪。 */
+export function recognizedFieldNames(blockText) {
+  return Object.keys(parseAttributes(blockText || '')).filter((key) => String(key).trim());
 }
 
 /**

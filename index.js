@@ -44,7 +44,8 @@ import {
     renderMainSection, renderThreadsSection, renderInterludeSection, renderContractSection, renderInjectionHeader,
     renderInterludeChapterSection, renderStoryLog, stripScriptChunks, transportErrorOf,
     chapterFromBlock, threadFromBlock, interludeFromBlock, interludeChapterFromBlock,
-    applyNsCommands, extractNsCommands, landingOpsInReply, worldbookDigest, setInterludeWritesAllowed, beatOrderSkipsRead,
+    applyNsCommands, extractNsCommands, landingOpsInReply, storyBlockFailure, recognizedFieldNames,
+    worldbookDigest, setInterludeWritesAllowed, beatOrderSkipsRead,
     mergeBeats, remainingBeatBudget, worldbookUpdateDecision,
 } from './model.js';
 
@@ -55,7 +56,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.38.7';
+const VERSION = '0.38.8';
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -524,6 +525,12 @@ const DEFAULT = {
          * 这是「让它把推理输出出来」这套机制唯一的可查凭据（用户点名的做法）。
          */
         reviewThinking: '',
+        /**
+         * ★ 0.38.8（别人报的「没解析到 <StoryEpic> 区块」）：**上一次生成失败时神谕的原始回复**。
+         * 以前只 `console.info` —— 普通用户根本不会打开控制台，于是只能来问我「这是什么」。
+         * 存一份（截断 4000 字）在 `__storyDirector.state().上次原始回复` 里，谁都能贴出来。
+         */
+        lastRawReply: null,
         epicRewroteFor: '',
         redesignAt: 0,
         /** 上一段间章的标题（防重复用；间章本身不留在注入里）。 */
@@ -3588,6 +3595,24 @@ function providerErrorOf(text) {
 }
 
 /**
+ * ★ 0.38.8（别人报的「没解析到 <StoryEpic> 区块，换什么都没用」）：
+ * 失败时**说清是哪一种**，并把原文存档 —— 以前四种原因共用一句「没解析到区块」。
+ *
+ * 收口处（只此一处）：四个生成器（篇章 / 章 / 支线 / 插曲 / 间章）失败时都调它。
+ * `extra` 用来补「区块在、但字段对不上」时那句细节（把认出的字段名列给用户看）。
+ */
+function reportBlockFailure(tag, raw, extra = '') {
+    const s = settings();
+    s.run.lastRawReply = { tag, at: aiMessageCount(), text: String(raw ?? '').slice(0, 4000) };
+    save();
+    const info = storyBlockFailure(raw, tag);
+    const reason = extra || info.hint || `回复里没有可用的 <${tag}> 区块`;
+    console.info(`[故事导演] 没拿到可用的 <${tag}>（${info.kind}）：${reason}\n原始回复：\n${raw}`);
+    toast(`没拿到 <${tag}>：${reason}。原文已存进诊断（控制台 / __storyDirector.state().上次原始回复）。`, 'warning');
+    return info.kind;
+}
+
+/**
  * 解析并采用一条主线。
  *
  * ★ `keep` 的语义（这一条是补事故的）：
@@ -3744,8 +3769,7 @@ async function generateInterludeChapter({ quiet = true, userText = '', force = f
             ? interludeChapterFromBlock(blocks[blocks.length - 1], { beatBudget: Math.max(1, Math.round(toNumber(settings().interludeBeats, 3))) })
             : null;
         if (!chapter) {
-            console.info('[故事导演] 神谕没有返回 <StoryInterludeChapter> 区块，原始回复：\n' + raw);
-            toast('没解析到 <StoryInterludeChapter> 区块，原始回复已打印到控制台。', 'warning');
+            reportBlockFailure('StoryInterludeChapter', raw);
             markFailed(key);
             return false;
         }
@@ -4065,8 +4089,12 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
             if (keepTitle) epic[EP.title] = keepTitle;
         }
         if (!epic || !epicStarted(epic)) {
-            console.info('[故事导演] 神谕没有返回可用的 <StoryEpic> 区块，原始回复：\n' + raw);
-            toast('没解析到 <StoryEpic> 区块，原始回复已打印到控制台。', 'warning');
+            // ★ 0.38.8：区块在、字段对不上时，把**它实际用的字段名**一并报出来（别只说「没解析到」）。
+            const last = blocks.length ? blocks[blocks.length - 1] : '';
+            const names = last ? recognizedFieldNames(last) : [];
+            reportBlockFailure('StoryEpic', raw, names.length
+                ? `区块在，但字段名/内容对不上 —— 我认出的字段是【${names.slice(0, 8).join('、')}】；这次要的是 \`标题:\` \`篇章:\` \`章内容:\``
+                : '');
             markFailed(key);
             return false;
         }
@@ -4156,8 +4184,9 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
         const blocks = parseBlocks(raw, 'StoryChapters');
         const chapter = blocks.length ? chapterFromBlock(blocks[blocks.length - 1], { index: Object.keys(settings().chapters || {}).length }) : null;
         if (!chapter || (!chapter[MAIN_BEATS].length && keep <= 0)) {
-            console.info('[故事导演] 神谕没有返回可用的 <StoryChapters> 区块，原始回复：\n' + raw);
-            toast('没解析到 <StoryChapters> 或拍列表为空，原始回复已打印到控制台。', 'warning');
+            reportBlockFailure('StoryChapters', raw, chapter && !chapter[MAIN_BEATS].length
+                ? '区块在，但**拍列表是空的** —— `拍:` 那一行没写出来（或写得认不出来）'
+                : '');
             markFailed(key);
             return false;
         }
@@ -4194,7 +4223,7 @@ async function generateThread({ quiet = true, userText = '', force = false, crit
         }
         const blocks = parseBlocks(raw, 'StoryThreads');
         const thread = blocks.length ? threadFromBlock(blocks[blocks.length - 1], {}) : null;
-        if (!thread) { toast('没解析到 <StoryThreads> 区块，原始回复已打印到控制台。', 'warning'); markFailed(key); return false; }
+        if (!thread) { reportBlockFailure('StoryThreads', raw); markFailed(key); return false; }
         clearFailed(key);
         // ★ 0.33.0：重生成 = **替换那一条**（同一个 id），不是再挂一条。
         thread.id = replaceId || nextId(threadsState().map((item) => item.id), 't');
@@ -4231,7 +4260,7 @@ async function generateInterlude({ quiet = true, userText = '', force = false, c
         }
         const blocks = parseBlocks(raw, 'StoryInterlude');
         const interlude = blocks.length ? interludeFromBlock(blocks[blocks.length - 1], {}) : null;
-        if (!interlude) { toast('没解析到 <StoryInterlude> 区块，原始回复已打印到控制台。', 'warning'); markFailed(key); return false; }
+        if (!interlude) { reportBlockFailure('StoryInterlude', raw); markFailed(key); return false; }
         clearFailed(key);
         // ★ 0.33.0：重生成 = **替换那一条**（同一个 id），不是再挂一条。
         interlude.id = replaceId || nextId(interludesState().map((item) => item.id), 'i');
@@ -6448,6 +6477,8 @@ function exposeDiagnostics() {
                     上一轮的微调回执: settings().run.beatNote || '',
                     // ★ 0.38.4：正文模型最近一次**自检原文**（它到底判断了没，看这格）
                     本轮自检: settings().run.reviewThinking || '',
+                    // ★ 0.38.8：上一次生成失败时神谕的原始回复（不需要开控制台就能贴出来）
+                    上次原始回复: settings().run.lastRawReply || null,
                     篇章检查: settings().run.lastAudit || null,
                     定篇章已试: Math.round(toNumber(settings().run.epicTries, 0)),
                     // ★ 审查升级梯的记账（用户报「大纲自己变了」时，先看这三个数）：
