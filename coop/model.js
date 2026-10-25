@@ -1,5 +1,6 @@
 /** Pure Coop rules. Model reports are proposals; only these transitions own progress. */
 import {parseAliases} from './identity.js';
+import {hasEvidence} from './body.js';
 export const SCHEMA = 2;
 export const MODES = ['off', 'affinity', 'coop'];
 export const THRESHOLDS = Object.freeze([30,60,90,100]);
@@ -166,7 +167,7 @@ export function acceptBeat(state,input) {
     const {p,e}=eventOf(state,input.characterId,input.eventId), s=input.source;
     if(p.mode!=='coop' || e.paused || state.activeEventId!==e.id) fail('NOT_ACTIVE');
     if(e.version!==input.eventVersion || input.phase!==e.phase) fail('STALE_EVENT');
-    if(!s || s.isUser || !s.userId || !text(input.evidence) || !s.body.includes(text(input.evidence))) fail('INVALID_EVIDENCE');
+    if(!s || s.isUser || !s.userId || !hasEvidence(s.body,text(input.evidence))) fail('INVALID_EVIDENCE');
     if(e.playedUsers.includes(s.userId)) fail('WAITING_USER','同一用户互动只能完成一个演出阶段');
     if(e.phase==='resolution') return completeEvent(state,input);
     if(!['hook','dilemma'].includes(e.phase)) fail('WAITING_USER');
@@ -185,8 +186,8 @@ export function completeEvent(state,input) {
     if(!object(report)) fail('SUMMARY_MISSING');
     const outcome=text(report.outcome,600), choice=text(report.choice,600);
     const choiceSource=e.targetRank===RELATIONSHIP_RANK?e.routeSource:e.answerSource;
-    if(!outcome || !choice || !text(report.outcomeEvidence) || !s.body.includes(text(report.outcomeEvidence)) ||
-        !text(report.choiceEvidence) || !choiceSource?.body.includes(text(report.choiceEvidence))) fail('INVALID_EVIDENCE');
+    if(!outcome || !choice || !hasEvidence(s.body,text(report.outcomeEvidence)) ||
+        !hasEvidence(choiceSource?.body,text(report.choiceEvidence))) fail('INVALID_EVIDENCE');
     let summary=text(report.summary,1200);
     const traits=lines(report.traits), facts=lines(report.facts), boundaries=lines(report.boundaries);
     const openHooks=lines(report.openHooks), closedHooks=lines(report.closedHooks);
@@ -197,7 +198,7 @@ export function completeEvent(state,input) {
     if(Array.isArray(report.conflicts) && report.conflicts.length) fail('CONTINUITY_CONFLICT');
     const shared=[];
     for(const item of (Array.isArray(report.sharedFacts)?report.sharedFacts:[]).slice(0,12)) {
-        if(!object(item) || !text(item.entityId) || !text(item.fact) || !text(item.evidence) || !s.body.includes(text(item.evidence))) fail('INVALID_EVIDENCE');
+        if(!object(item) || !text(item.entityId) || !text(item.fact) || !hasEvidence(s.body,text(item.evidence))) fail('INVALID_EVIDENCE');
         const key=id(item.entityId), old=state.sharedFacts[key];
         if(old && old.fact!==text(item.fact,600) && item.previousFact!==old.fact) fail('CONTINUITY_CONFLICT','共享实体状态发生冲突：'+key);
         shared.push({entityId:key,name:text(item.name,120),fact:text(item.fact,600),knownBy:lines(item.knownBy,30),

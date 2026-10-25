@@ -1,0 +1,92 @@
+/** Story evidence must survive display-only decoration and director cleanup. */
+export function stripReport(body) {
+    return String(body || '').replace(/<CoopReport\b[^>]*>[\s\S]*?<\/CoopReport>/gi,'')
+        .replace(/<CoopReport\b[^>]*>[\s\S]*$/gi,'').trim();
+}
+
+export function legacyVisibleBody(body) {
+    return stripReport(body).replace(/<UpdateVariable>[\s\S]*?<\/UpdateVariable>/gi,'')
+        .replace(/<story_director_status>[\s\S]*?<\/story_director_status>/gi,'')
+        .replace(/<!--\s*故事导演自检[\s\S]*?-->/g,'')
+        .replace(/<故事导演(?:自检|审查|审查说明)>[\s\S]*?<\/故事导演(?:自检|审查|审查说明)>/g,'').trim();
+}
+
+function stripVariables(body) {
+    const ranges=[];
+    let start=null, contentDepth=0;
+    const payloadAt=to=>start!==null && /^\s*(?:<(?:Analysis|JSONPatch)\b|_\.(?:set|add|assign|insert)\s*\(|\[\s*\{)/i.test(body.slice(start,to).replace(/^<UpdateVariable\b[^>]*>/i,''));
+    // A new opener supersedes an earlier mention. A story boundary cancels it.
+    for(const match of body.matchAll(/<\/?(UpdateVariable|content)\b[^>]*>/gi)) {
+        const closing=/^<\//.test(match[0]), name=match[1].toLowerCase();
+        if(name==='content') {
+            if(payloadAt(match.index)) continue; // A quoted content tag inside JSON is still variable data.
+            start=null;
+            contentDepth=Math.max(0,contentDepth+(closing?-1:1));
+        } else if(!contentDepth) {
+            if(!closing) {if(!payloadAt(match.index)) start=match.index;}
+            else if(start!==null) {ranges.push([start,match.index+match[0].length]);start=null;}
+        }
+    }
+    // Incomplete variable payloads are not narrative evidence either.
+    if(start!==null && /^\s*(?:<(?:Analysis|JSONPatch)\b|_\.(?:set|add|assign|insert)\s*\(|\[\s*\{)/i.test(body.slice(start).replace(/^<UpdateVariable\b[^>]*>/i,''))) ranges.push([start,body.length]);
+    for(const [from,to] of ranges.reverse()) body=body.slice(0,from)+body.slice(to);
+    return body;
+}
+
+export function visibleBody(body) {
+    let result=stripReport(body).replace(/<(build|think|thinking|analysis)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,'');
+    // An unfinished analysis block cannot consume a following explicit story.
+    result=result.replace(/<(?:build|think|thinking|analysis)\b[^>]*>([\s\S]*)$/gi,(_all,tail)=>{
+        const story=tail.search(/<content\b|###\s*正文/i);
+        return story<0?'':tail.slice(story);
+    });
+    result=stripVariables(result)
+        .replace(/<story_director_status\b[^>]*>[\s\S]*?<\/story_director_status\s*>/gi,'')
+        .replace(/<!--\s*故事导演自检[\s\S]*?-->/gi,'')
+        .replace(/<(故事导演(?:自检|审查|审查说明))>[\s\S]*?<\/\1>/gi,'')
+        .replace(/(\r?\n)?\[igs-img:\d+\](\r?\n)?/gi,(_all,before,after)=>before && after?'\n':'');
+    return result.replace(/\r\n?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+}
+
+export function evidenceText(body) {
+    return visibleBody(body).replace(/\s+/gu,' ').trim();
+}
+export function hasEvidence(body,quote) {
+    const expected=evidenceText(quote);
+    return !!expected && evidenceText(body).includes(expected);
+}
+export function fingerprintBody(body) {
+    return evidenceText(body).replace(/\s*(<\/?[\p{L}_][^>]*>)\s*/gu,'$1');
+}
+
+/** Reconstruct only known presentation edits; never trust a claimed old hash. */
+export function legacyBodyVariants(raw,limit=128) {
+    const original=legacyVisibleBody(raw), result=new Set([original]);
+    let variants=[original];
+    for(let n=0;n<24 && variants.some(value=>/\[igs-img:\d+\]/i.test(value));n++) {
+        const next=new Set();
+        for(const value of variants) {
+            const match=/(\r?\n)?\[igs-img:\d+\](\r?\n)?/i.exec(value);
+            if(!match) {next.add(value);continue;}
+            const before=match[1] || '',after=match[2] || '',left=value.slice(0,match.index),right=value.slice(match.index+match[0].length);
+            for(const replacement of [before+after,before,after,'']) {
+                if(next.size<64) next.add(left+replacement+right);
+            }
+        }
+        variants=[...next];
+    }
+    for(const value of variants) {
+        result.add(value);
+        result.add(value.replace(/\n{3,}/g,'\n\n').trim());
+    }
+    // Old director cleanup collapsed the gaps left by a removed self-check.
+    for(const value of [...result]) {
+        for(const match of value.matchAll(/\n{2}(?!\n)/g)) {
+            for(const count of [3,4]) {
+                if(result.size>=limit) return [...result].slice(0,limit);
+                result.add(value.slice(0,match.index)+'\n'.repeat(count)+value.slice(match.index+2));
+            }
+        }
+    }
+    return [...result].slice(0,limit);
+}

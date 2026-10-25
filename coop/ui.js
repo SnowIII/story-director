@@ -91,6 +91,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         const p=state.profiles[chosen] || profiles[0];
         if(!p) return '<p>尚无角色档案。</p>';
         chosen=p.id;
+        const activity=runtime.affinityActivity(p.id);
         return '<label>查看角色<select id="sdc-history-role">'+profiles.map(item=>'<option value="'+esc(item.id)+'"'+(item.id===p.id?' selected':'')+'>'+esc(item.name)+'</option>').join('')+'</select></label>'+
             '<p>路线：'+esc(p.route==='romance'?'恋人':p.route==='friendship'?'挚友／伙伴':'尚未确认')+'</p>'+
             '<p>已公开人物细节：'+esc([...p.traits,...p.facts,...p.boundaries].join('；') || '尚无')+'</p>'+
@@ -102,7 +103,10 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
                 '<textarea name="summary" aria-label="本阶经历摘要" placeholder="概括本阶实际发生的矛盾、用户选择、结果、人物变化和未解决伏笔，建议 100～200 字。" rows="4" minlength="20" maxlength="1200">'+esc(h.summary)+'</textarea><p class="sdc-field-help">后续事件会读取这份摘要。只修正有依据的概括，不改写已发生的选择，并核对后续经历是否仍一致。</p><button type="submit">确认修正并保存</button></form></details></article>').join(''):'<p>尚未完成 Rank 事件。完成后会在这里逐阶保存摘要。</p>')+
             '<details><summary>好感变化记录（最近 30 次）</summary>'+p.scoreLog.slice(-30).reverse().map(log=>
                 '<p>'+esc((log.actual>=0?'+':'')+log.actual)+' · '+esc(log.reasonCode==='AFFINITY_LOCKED'?'未完成事件，好感锁定':log.reason)+
-                ' · '+log.before+' → '+log.after+'</p>').join('')+'</details>';
+                ' · '+log.before+' → '+log.after+'</p>').join('')+'</details>'+
+            '<details open><summary>最近互动处理</summary><p class="sdc-field-help">查看本轮是否已计分、正常没有变化、被好感锁定，或因依据和来源变化而未结算。</p>'+
+            (activity.length?activity.map(item=>'<p>第 '+(item.index+1)+' 条消息 · '+esc(item.label)+'</p>').join(''):
+                '<p>尚无可核对的互动回报。</p>')+'</details>';
     }
     function diagnostics() {
         const state=runtime.state(),store=runtime.store,profiles=Object.values(state.profiles);

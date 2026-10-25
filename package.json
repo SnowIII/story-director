@@ -1,6 +1,6 @@
 {
   "name": "story-director",
-  "version": "0.39.4",
+  "version": "0.39.5",
   "private": true,
   "type": "module",
   "scripts": { "test": "node --test tests/*.test.js" }

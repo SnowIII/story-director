@@ -221,3 +221,25 @@ test('archive recovery rejects a reply that the model confirms was not complete'
     await assert.rejects(h.runtime.recoverArchive(),{code:'NOT_COMPLETE'});
     assert.equal(h.runtime.state().profiles.a.rank,0);assert.ok(h.runtime.state().profiles.a.lock);
 });
+
+test('display decoration after completion preserves Rank, archive and the unlock across reload',async t=>{
+    const h=await setup(t);await completeFirst(h);
+    const message=h.messages.at(-1), eventId=h.runtime.state().profiles.a.history[0].eventId;
+    message.mes='[igs-img:3]\n'+message.mes+'\n[igs-img:4]';
+    h.runtime.store.reconcile();
+    assert.equal(h.runtime.state().profiles.a.rank,1);assert.equal(h.runtime.state().profiles.a.lock,null);
+    await h.runtime.load();
+    assert.equal(h.runtime.state().profiles.a.history[0].eventId,eventId);
+    assert.equal(h.runtime.state().profiles.a.rank,1);
+});
+
+test('points earned after an invalidated Rank keep their actual arc dependency',async t=>{
+    const h=await setup(t);await completeFirst(h);
+    const resolution=h.messages.at(-1);
+    await h.send('我继续帮你。','她放松了。',h.score(2));
+    const scoreId=h.runtime.store.document.journal.at(-1).id;
+    assert.equal(h.runtime.state().profiles.a.affinity,32);
+    resolution.mes='这次事件尚未收束。';h.runtime.store.reconcile();
+    assert.equal(h.runtime.state().profiles.a.rank,0);assert.equal(h.runtime.state().profiles.a.affinity,30);
+    assert.equal(h.runtime.state().skipped.find(op=>op.id===scoreId).code,'STALE_DEPENDENCY');
+});

@@ -4,15 +4,17 @@ import {configureRoster} from './roster.js';
 import {appendOperation,project,readDocument} from './timeline.js';
 import {validateAffinityProposal} from './affinity.js';
 import {continuity,publicMemory} from './history.js';
-import {ensureMessageIds,sourceMap,sourceForId,ref,references,parseReports,stripReport,uuid,modelJson} from './messages.js';
+import {ensureMessageIds,sourceMap,sourceForId,ref,references,parseReports,stripReport,uuid,modelJson,matchesSourceVersion,matchesUserVersion} from './messages.js';
 import {designMessages,renderScene,reportContract} from './prompts.js';
 import {extraModel,readMvuReport} from './mvu.js';
+import {affinityActivity} from './activity.js';
 
 export class CoopRuntime {
     constructor(host) {
         this.host=host;this.store=new CoopStore(host);this.snapshot=null;this.snapshots=new Map();
         this.job=null;this.notices=[];this.listeners=new Set();this.scene=false;this.lease=null;
         this.disposed=false;this.queue=Promise.resolve();this.lastAutoFailure=0;this.pendingMvuReports=new Map();
+        this.affinityOutcomes=new Map();
         const broadcast=host.broadcast;
         host.broadcast=document=>{
             broadcast?.(document);
@@ -39,6 +41,15 @@ export class CoopRuntime {
         this.notices=this.notices.slice(0,25);this.changed();
     }
     state() {return this.store.state;}
+    affinityActivity(characterId) {
+        return affinityActivity({document:this.store.document,pending:this.store.pending,state:this.state(),
+            sources:this.store.sources(),messages:this.host.messages(),outcomes:this.affinityOutcomes},characterId);
+    }
+    affinityOutcome(source,characterId,code) {
+        if(!this.state()?.profiles[characterId]) return;
+        this.affinityOutcomes.set(source.id+':'+characterId,{version:source.version,code});
+        while(this.affinityOutcomes.size>200) this.affinityOutcomes.delete(this.affinityOutcomes.keys().next().value);
+    }
     event() {return this.state()?activeEvent(this.state()):null;}
     occupies() {return !!this.event() || !!this.job;}
     load() {
@@ -47,7 +58,7 @@ export class CoopRuntime {
     }
     async loadNow() {
         this.abort();
-        this.snapshot=null;this.snapshots.clear();this.pendingMvuReports.clear();
+        this.snapshot=null;this.snapshots.clear();this.pendingMvuReports.clear();this.affinityOutcomes.clear();
         this.channel?.close();this.channel=null;
         await this.releaseLease();
         try {this.store.load();} catch(error) {this.store.state=null;this.notice(error);return;}
@@ -268,20 +279,25 @@ export class CoopRuntime {
         if(!source?.userId) return;
         const reports=external?[external]:parseReports(message.mes);
         const saved=message.extra?.sdCoopReports;
-        const parsed=reports.length?reports:(saved?.version===source.version?saved.reports:[]);
-        if(!external && reports.length) {
+        const parsed=reports.length?reports:(matchesSourceVersion(source,saved?.version)?saved.reports:[]);
+        if(reports.length) {
             message.extra=message.extra || {};
-            message.extra.sdCoopReports={version:source.version,reports};
-            message.mes=stripReport(message.mes);
-            this.host.renderMessage?.(messageIndex);
+            message.extra.sdCoopReports={version:source.version,reports,byExtra:!!external};
+            if(!external) {
+                message.mes=stripReport(message.mes);
+                this.host.renderMessage?.(messageIndex);
+            }
         }
         for(const report of parsed) {
             const snapshot=this.snapshots.get(report.nonce) || message.extra?.sdCoopSnapshot;
             if(!snapshot || snapshot.nonce!==report.nonce || snapshot.scope!==this.store.scope ||
-                snapshot.userId!==source.userId || snapshot.userVersion!==source.userVersion) continue;
+                snapshot.userId!==source.userId || !matchesUserVersion(source,snapshot.userVersion)) {
+                for(const p of (Array.isArray(report.affinity)?report.affinity:[]).slice(0,20)) this.affinityOutcome(source,p.characterId,'INVALID_REQUEST');
+                continue;
+            }
             if(!!external!==snapshot.byExtra) continue;
-            message.extra=message.extra || {};message.extra.sdCoopSnapshot=clone(snapshot);
             snapshot.messageId=source.id;snapshot.messageVersion=source.version;
+            message.extra=message.extra || {};message.extra.sdCoopSnapshot=clone(snapshot);
             for(const proposal of (Array.isArray(report.affinity)?report.affinity:[]).slice(0,20)) {
                 try {
                     const p=this.state().profiles[proposal.characterId];
@@ -290,7 +306,7 @@ export class CoopRuntime {
                         fail('STALE_SOURCE','更晚的互动已经结算，这份过期计分未采用');
                     }
                     await this.store.operation('affinity',p.id,data,references(source),'score:'+p.id+':'+source.userId+':'+source.id+':'+source.version);
-                } catch(error) {this.notice(error);}
+                } catch(error) {this.affinityOutcome(source,proposal.characterId,error.code || 'INVALID_EVIDENCE');this.notice(error);}
             }
             if(report.event && snapshot.event) {
                 try {
@@ -318,14 +334,21 @@ export class CoopRuntime {
         if(this.host.messages()[index] && !this.host.messages()[index].is_user) {
             ensureMessageIds(this.host.messages());
             const source=sourceForId(this.host.messages(),index);
-            const nonce=parseReports(this.host.messages()[index].mes)[0]?.nonce;
-            assigned=(nonce && this.snapshots.get(nonce)) ||
+            const message=this.host.messages()[index], saved=message.extra?.sdCoopReports;
+            const nonce=parseReports(message.mes)[0]?.nonce;
+            const persisted=message.extra?.sdCoopSnapshot;
+            const reusable=persisted?.scope===this.store.scope && persisted.userId===source?.userId && matchesUserVersion(source,persisted.userVersion) &&
+                (matchesSourceVersion(source,persisted.messageVersion) || matchesSourceVersion(source,saved?.version));
+            assigned=(nonce && this.snapshots.get(nonce)) || (reusable?persisted:null) ||
                 [...this.snapshots.values()].findLast(s=>s.userId===source?.userId && (!s.messageId || s.messageId===source.id));
             if(assigned && source?.userId===assigned.userId) {
-                const message=this.host.messages()[index];
                 message.extra=message.extra || {};
-                message.extra.sdCoopSnapshot=clone(assigned);
                 assigned.messageId=source.id;assigned.messageVersion=source.version;
+                message.extra.sdCoopSnapshot=clone(assigned);
+                for(const characterId of Object.keys(assigned.roles)) {
+                    const key=source.id+':'+characterId;
+                    if(!this.affinityOutcomes.has(key)) this.affinityOutcome(source,characterId,assigned.byExtra?'WAITING_MVU':'NO_REPORT');
+                }
             }
         }
         await this.receive(index);

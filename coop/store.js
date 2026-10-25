@@ -1,6 +1,6 @@
 import {clone,fail} from './model.js';
 import {newDocument,readDocument,project,appendOperation} from './timeline.js';
-import {sourceMap,uuid} from './messages.js';
+import {sourceMap,uuid,matchesSourceVersion} from './messages.js';
 export const STORAGE_KEY='storyDirectorCoop';
 
 export class CoopStore {
@@ -17,7 +17,7 @@ export class CoopStore {
     }
     sources() {
         const map=sourceMap(this.host.messages());
-        for(const [key,version] of this.excluded) if(map.get(key)?.version===version) map.delete(key);
+        for(const [key,version] of this.excluded) if(matchesSourceVersion(map.get(key),version)) map.delete(key);
         return map;
     }
     reconcile() {

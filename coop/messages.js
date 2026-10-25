@@ -1,15 +1,10 @@
 import {hash,object} from './model.js';
+import {visibleBody,fingerprintBody,legacyBodyVariants} from './body.js';
+export {visibleBody,stripReport} from './body.js';
 export const REPORT_TAG='CoopReport';
-export function stripReport(body) {
-    return String(body || '').replace(/<CoopReport\b[^>]*>[\s\S]*?<\/CoopReport>/gi,'')
-        .replace(/<CoopReport\b[^>]*>[\s\S]*$/gi,'').trim();
-}
-export function visibleBody(body) {
-    return stripReport(body).replace(/<UpdateVariable>[\s\S]*?<\/UpdateVariable>/gi,'')
-        .replace(/<story_director_status>[\s\S]*?<\/story_director_status>/gi,'')
-        .replace(/<!--\s*故事导演自检[\s\S]*?-->/g,'')
-        .replace(/<故事导演(?:自检|审查|审查说明)>[\s\S]*?<\/故事导演(?:自检|审查|审查说明)>/g,'').trim();
-}
+const sourceCache=new WeakMap();
+export const matchesSourceVersion=(source,version)=>!!source && (source.version===version || source.versions?.includes(version));
+export const matchesUserVersion=(source,version)=>source?.userVersion===version || !!source?.userVersions?.includes(version);
 export function uuid() { return globalThis.crypto?.randomUUID?.() || 'c-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2); }
 export function ensureMessageIds(messages) {
     for(const message of messages) if(message && !message.sd_coop_id) message.sd_coop_id=uuid();
@@ -18,11 +13,17 @@ export function sourceMap(messages) {
     const sources=new Map();let user=null;
     messages.forEach((message,index)=>{
         if(!message || !message.sd_coop_id) return;
-        const body=visibleBody(message.mes);
-        const source={id:message.sd_coop_id,version:hash(body+'|'+(message.swipe_id ?? 0)+'|'+!!message.is_user),
-            index,body,isUser:!!message.is_user,isSystem:!!message.is_system};
+        const salt='|'+(message.swipe_id ?? 0)+'|'+!!message.is_user;
+        let cached=sourceCache.get(message);
+        if(!cached || cached.raw!==message.mes || cached.salt!==salt) {
+            const body=visibleBody(message.mes), version='v2:'+hash(fingerprintBody(message.mes)+salt);
+            cached={raw:message.mes,salt,body,version,versions:[...new Set(legacyBodyVariants(message.mes).map(value=>hash(value+salt)))]};
+            sourceCache.set(message,cached);
+        }
+        const source={id:message.sd_coop_id,version:cached.version,versions:cached.versions,
+            index,body:cached.body,isUser:!!message.is_user,isSystem:!!message.is_system};
         if(source.isUser) user=source;
-        if(user) Object.assign(source,{userId:user.id,userVersion:user.version,userIndex:user.index,userBody:user.body});
+        if(user) Object.assign(source,{userId:user.id,userVersion:user.version,userVersions:user.versions,userIndex:user.index,userBody:user.body});
         sources.set(source.id,source);
     });
     return sources;

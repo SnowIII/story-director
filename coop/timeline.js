@@ -1,5 +1,6 @@
 import {SCHEMA,MODES,clone,fail,hash,object,thresholds,id,initialState,applyAffinity,activateGate,adoptPlan,pauseEvent,resumeEvent,
     acceptAnswer,chooseRoute,acceptBeat,replanEvent,assertState,activeEvent} from './model.js';
+import {matchesSourceVersion} from './messages.js';
 export function newDocument(scope) {
     return {schemaVersion:SCHEMA,scope,revision:0,roster:{},journal:[],settings:{autoStart:false,eventRounds:3},updatedAt:null};
 }
@@ -25,7 +26,7 @@ export function readDocument(raw,scope) {
     return document;
 }
 export function validRefs(refs,sources) {
-    return (refs || []).every(ref=>sources.has(ref.id) && sources.get(ref.id).version===ref.version);
+    return (refs || []).every(ref=>matchesSourceVersion(sources.get(ref.id),ref.version));
 }
 export function roleSignature(state,characterId) {
     const p=state.profiles[characterId];
@@ -56,12 +57,22 @@ export function applyOperation(state,op) {
 }
 export function project(document,sources) {
     const state=initialState(document.roster), skipped=[];
-    const ids=new Set();
+    const ids=new Set(), priorCompletions=new Set();
     for(const op of document.journal) {
         if(ids.has(op.id)) continue;
         ids.add(op.id);
+        const hadCompletion=priorCompletions.has(op.characterId);
+        if(op.kind==='beat' && op.data?.phase==='resolution') priorCompletions.add(op.characterId);
         if(!validRefs(op.refs,sources)) {skipped.push({id:op.id,code:'STALE_SOURCE'});continue;}
-        if(op.precondition && op.precondition!==roleSignature(state,op.characterId)) {
+        const p=state.profiles[op.characterId];
+        const history=p?.history.map(h=>h.eventId) || [];
+        // Points depend on their actual interaction and completed arc, not the old total.
+        // Legacy hashes can be rebased before any completion; later ambiguous branches stay protected.
+        const dependencyValid=op.kind==='affinity' ?
+            (op.affinityHistory!==undefined ? Array.isArray(op.affinityHistory) && JSON.stringify(op.affinityHistory)===JSON.stringify(history) :
+                !op.precondition || op.precondition===roleSignature(state,op.characterId) || !hadCompletion && !history.length) :
+            !op.precondition || op.precondition===roleSignature(state,op.characterId);
+        if(!dependencyValid) {
             skipped.push({id:op.id,code:'STALE_DEPENDENCY'});continue;
         }
         const before=clone(state);
@@ -69,12 +80,12 @@ export function project(document,sources) {
             const hydrated=clone(op);
             if(hydrated.data?.source?.id) {
                 const source=sources.get(hydrated.data.source.id);
-                if(source && source.version===hydrated.data.source.version) hydrated.data.source=clone(source);
+                if(matchesSourceVersion(source,hydrated.data.source.version)) hydrated.data.source=clone(source);
             }
             applyOperation(state,hydrated);
             for(const p of Object.values(state.profiles)) for(const h of p.history) {
                 const edit=document.summaryEdits?.[h.eventId];
-                if(edit && edit.sourceVersion===h.source.version && typeof edit.summary==='string' && edit.summary.length>=20) {
+                if(edit && matchesSourceVersion(sources.get(h.source.id),edit.sourceVersion) && typeof edit.summary==='string' && edit.summary.length>=20) {
                     h.summary=edit.summary.slice(0,1200);h.summaryVersion=edit.version;h.manuallyReviewed=true;
                 }
             }
@@ -98,6 +109,7 @@ export function appendOperation(document,state,op,sources) {
     applyOperation(candidate,op);assertState(candidate);
     const durable=clone(op);
     durable.precondition=roleSignature(state,op.characterId);
+    if(op.kind==='affinity') durable.affinityHistory=state.profiles[op.characterId].history.map(h=>h.eventId);
     if(durable.data?.source?.id) durable.data.source={id:durable.data.source.id,version:durable.data.source.version};
     document.journal.push(durable);
     return candidate;
