@@ -1,3 +1,5 @@
+let coopScene = false;
+export function setCoopScene(value) { coopScene = !!value; }
 /**
  * 故事导演 · 纯逻辑层
  *
@@ -1230,6 +1232,7 @@ export function renderInterludeChapterSection(chapter, { maxBeats = 6, banUserAc
  *   整段「怎么回报」的规矩仍然只有这一处 + 世界书那三条常驻条目（不给两份，免得互相打架）。
  */
 export function renderContractSection({ banUserAction = true, mode = 'main', beat = '', landingBy = '' } = {}) {
+  if (mode === 'coop') return ['【当前演出为 Coop】只按 Coop 专用契约回报，主线、间章及普通支线均暂停，不写它们的落拍命令。'];
   const inInterlude = mode === 'interlude';
   const byExtra = landingBy === 'extra';
   const flag = inInterlude ? `${PATH.interlude}.${IL.beatDone}` : `${PATH.main}.${KEY_BEAT_DONE}`;
@@ -1668,6 +1671,11 @@ export function applyNsCommand(statData, command, path) {
   const args = Array.isArray(command?.args) ? command.args : [];
   const target = String(path ?? '');
   const owned = ownedPathOf(target);
+  if (owned === NS) return true;
+  if (coopScene && owned !== NS + '.Coop.回报') return true;
+  if (owned === NS + '.Coop' || owned.startsWith(NS + '.Coop.')) {
+    if (owned !== NS + '.Coop.回报') return true;
+  }
   // 间章时段之外，模型写 `间章.*` 一律忽略：那些字段只在这段幕里有效，别让它留下脏状态。
   if (!interludeWritesAllowed && (owned === `${NS}.${INTERLUDE}` || owned.startsWith(`${NS}.${INTERLUDE}.`))) {
     return true;

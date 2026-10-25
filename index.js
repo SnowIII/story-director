@@ -16,6 +16,8 @@
  * 规则文本在插件自带的世界书「故事导演」里（缺失时自动安装）。
  */
 
+import { createCoopSystem } from './coop/bootstrap.js';
+import { createMessageRefreshQueue } from './message-render.js';
 import { extension_settings } from '../../../extensions.js';
 import {
     eventSource, event_types, saveSettingsDebounced, saveSettings,
@@ -46,7 +48,7 @@ import {
     chapterFromBlock, threadFromBlock, interludeFromBlock, interludeChapterFromBlock,
     applyNsCommands, extractNsCommands, landingOpsInReply, storyBlockFailure, recognizedFieldNames,
     worldbookDigest, setInterludeWritesAllowed, beatOrderSkipsRead,
-    mergeBeats, remainingBeatBudget, worldbookUpdateDecision,
+    mergeBeats, remainingBeatBudget, worldbookUpdateDecision, setCoopScene,
 } from './model.js';
 
 const ID = 'story-director';
@@ -56,7 +58,8 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.38.8';
+const VERSION = '0.39.4';
+let coop = null;
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -64,6 +67,7 @@ const SLOT = {
     threads: 'story-director-threads',
     interludes: 'story-director-interludes',
     contract: 'story-director-contract',
+    coop: 'story-director-coop',
 };
 /**
  * 与原版「故事神谕」的**能力探测**结果（只探测它真的提供了什么，不看版本号）。
@@ -251,6 +255,7 @@ const DEFAULT = {
     winY: null,
     bubbleIcon: '',
     bubbleSize: 52,
+    showBubble: true,
 
     /** 自动化总闸。关掉＝只手动生成与采用，插件不自己推进也不自己开新线。 */
     autoDirector: true,
@@ -791,6 +796,7 @@ async function pruneMvuToTokens() {
     const ns = d.stat_data[NS];
     if (!isPlainObject(ns)) return false;
     const kept = {};
+    if (isPlainObject(ns.Coop)) kept.Coop = ns.Coop;
     for (const path of TOKEN_PUSH) {
         const value = getPath(ns, path);
         if (value !== undefined) setPath(kept, path, value);
@@ -995,6 +1001,7 @@ function liveThreads(live = null) {
 
 /** 当前是哪种幕：'main' 主线章 / 'interlude' 间章。以 MVU 里的状态为准，run 只是镜像。 */
 function currentMode(live = null) {
+    if (coop?.occupies()) return 'coop';
     return interludeActive(rootOf(live)) ? 'interlude' : 'main';
 }
 
@@ -1049,6 +1056,7 @@ async function patchInterlude(fields, _opts = {}) {
 
 /** 同步「间章时段之外不许写间章变量」这个开关（模型只能在自己那段幕里动它）。 */
 function syncInterludeWrites() {
+    setCoopScene(currentMode() === 'coop');
     setInterludeWritesAllowed(currentMode() === 'interlude');
 }
 
@@ -1727,6 +1735,7 @@ function substitute(text) {
  * 支线/插曲按开关与数量注入，位置都在主线之后 —— 冲突时以主线为准。
  */
 function buildInjection(live = null) {
+    if (coop?.occupies()) return '';
     const s = settings();
     const root = rootOf(live);
     const main = mainOf(root);
@@ -1817,6 +1826,7 @@ function landingByExtraModel() {
  * 也就是说契约是唯一能让额外模型知道"这一拍是什么"的通道。没有它，「确认演完了再落拍」无从谈起。
  */
 function currentBeatLine() {
+    if (coop?.occupies()) return '';
     try {
         const root = rootOf();
         if (currentMode() === 'interlude') {
@@ -1838,6 +1848,7 @@ function currentBeatLine() {
 function syncMainInjection() {
     try {
         const s = settings();
+        syncInterludeWrites();
         const text = buildInjection();
         const depth = Math.max(0, Math.round(toNumber(s.injectDepth, 4)));
         // text 为空时 setExtensionPrompt 会写入空串 = 这一轮什么都不注入（ST 不会渲染空块）
@@ -1860,6 +1871,7 @@ function syncMainInjection() {
             : '';
         setExtensionPrompt(SLOT.contract, contract, extension_prompt_types.IN_CHAT, depth, false, extension_prompt_roles.SYSTEM);
 
+        setExtensionPrompt(SLOT.coop, coop?.injection() || '', extension_prompt_types.IN_CHAT, depth, false, extension_prompt_roles.SYSTEM);
         if (panel && !panel.hidden) renderDiagnostics(text, contract);
     } catch (error) {
         console.debug('[故事导演] 主提示词注入失败', error);
@@ -1912,6 +1924,15 @@ function renderDiagnostics(text = null, contract = null) {
 
 // 阶段七：状态块剥离
 
+// updateMessageBlock only formats HTML. The helper needs MESSAGE_UPDATED to rebuild HTML-code iframes.
+const refreshCleanedMessage = createMessageRefreshQueue({
+    getMessages: () => chat,
+    getScope: chatKey,
+    render: (messageId, message) => updateMessageBlock(messageId, message),
+    notify: (messageId) => eventSource.emit(event_types.MESSAGE_UPDATED || 'message_updated', messageId),
+    onError: (error) => console.debug('[故事导演] 刷新清理后的消息失败', error),
+});
+
 /** 模型有时会把注入的状态块抄进正文：确定性剥离（只动我们自己那个标签）。 */
 function stripStatusEcho(messageId) {
     try {
@@ -1928,7 +1949,7 @@ function stripStatusEcho(messageId) {
         after = after.replace(new RegExp(`<\\/?${STATUS_TAG}>`, 'gi'), '').replace(/\n{3,}/g, '\n\n').trimEnd();
         if (after === before) return false;
         msg.mes = after;
-        try { updateMessageBlock(messageId, msg); } catch { /* 老版本 ST 可能没有这个导出 */ }
+        refreshCleanedMessage(messageId);
         try { saveChatDebounced(); } catch { /* ignore */ }
         console.debug(`[故事导演] 已从第 ${messageId} 楼剥掉被误输出的导演状态块（-${before.length - after.length} 字符）`);
         return true;
@@ -2030,7 +2051,7 @@ function harvestReviewTag(messageId) {
         cleaned = cleaned.replace(/\n{3,}/g, '\n\n').trimEnd();
         if (cleaned !== before) {
             msg.mes = cleaned;
-            try { updateMessageBlock(messageId, msg); } catch { /* 老版本 ST 可能没有这个导出 */ }
+            refreshCleanedMessage(messageId);
             try { saveChatDebounced(); } catch { /* ignore */ }
             console.debug(`[故事导演] 已从第 ${messageId} 楼剥掉审查标签（-${before.length - cleaned.length} 字符）`);
         }
@@ -3349,6 +3370,7 @@ function justAborted(ms = 10000) {
 
 /** 开始一次生成：顺带做看门狗检查（超时就当上一次已经死了）。 */
 function beginGenerate(label = '剧情') {
+    if (coop?.occupies() && !String(label).startsWith('Coop')) return false;
     if (storyGenerating) {
         const hung = storyGeneratingSince && Date.now() - storyGeneratingSince > GENERATE_WATCHDOG;
         if (!hung) return false;
@@ -3367,10 +3389,11 @@ function beginGenerate(label = '剧情') {
     if (genTicker) { clearInterval(genTicker); genTicker = null; }
     genTicker = setInterval(() => { renderBusyBar(); }, 1000);
     renderBusyBar();
-    return true;
+    return genId;
 }
 
-function endGenerate() {
+function endGenerate(ownerToken) {
+    if (ownerToken !== genId) return;
     storyGenerating = false;
     storyGeneratingSince = 0;
     if (genTicker) { clearInterval(genTicker); genTicker = null; }
@@ -3752,8 +3775,9 @@ async function generateInterludeChapter({ quiet = true, userText = '', force = f
         return false;
     }
     const key = `interlude-chapter:${chatKey()}`;
-    if (!beginGenerate('间章')) return false;
     if (!force && isBackingOff(key)) return false;
+    const generateToken = beginGenerate('间章');
+    if (!generateToken) return false;
     if (quiet) toast('正在请故事神谕设计一段间章…');
     const origin = chatKey();
     try {
@@ -3783,7 +3807,7 @@ async function generateInterludeChapter({ quiet = true, userText = '', force = f
         markFailedFromError(key, error);
         return false;
     } finally {
-        endGenerate();
+        endGenerate(generateToken);
         if (panel && !panel.hidden) render();
     }
 }
@@ -4042,8 +4066,9 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
         return false;
     }
     const key = `epic:${chatKey()}`;
-    if (!beginGenerate(mode === 'audit' ? '篇章检查' : '篇章')) return false;
     if (!force && isBackingOff(key)) return false;
+    const generateToken = beginGenerate(mode === 'audit' ? '篇章检查' : '篇章');
+    if (!generateToken) return false;
     if (quiet) toast(mode === 'establish' ? '正在请故事神谕定下一部篇章（一部完整的大故事）…' : '正在按他实际做的事重新校准篇章…');
     const origin = chatKey();
     // establish = 换新的一部 → 进度归零；evolve = 校准 → 不动进度
@@ -4127,7 +4152,7 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
         markFailedFromError(key, error);
         return false;
     } finally {
-        endGenerate();
+        endGenerate(generateToken);
         // pending 由本函数独家负责：无论成功、失败还是中途换了聊天，结束就放开
         clearPending(key);
         if (panel && !panel.hidden) render();
@@ -4155,8 +4180,9 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
         return false;
     }
     const key = `chapter:${chatKey()}:${regenerate ? 're' : 'new'}`;
-    if (!beginGenerate(regenerate ? '重写这一章' : '下一章')) return false;
     if (!force && isBackingOff(key)) return false;
+    const generateToken = beginGenerate(regenerate ? '重写这一章' : '下一章');
+    if (!generateToken) return false;
     const button = panel?.querySelector('.sd-generate-chapter');
     const label = button?.textContent || '';
     if (button && !quiet) { button.disabled = true; button.textContent = '生成中…'; }
@@ -4200,7 +4226,7 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
         markFailedFromError(key, error);
         return false;
     } finally {
-        endGenerate();
+        endGenerate(generateToken);
         if (button && !quiet) { button.disabled = false; button.textContent = label; }
         // 让面板上的「神谕生成中…」及时消失（成功时 applyChapter 已经重画过，这里是失败/静默路径的兜底）
         if (panel && !panel.hidden) render();
@@ -4208,9 +4234,10 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
 }
 
 async function generateThread({ quiet = true, userText = '', force = false, critique = '', replaceId = '' } = {}) {
-    if (!beginGenerate('支线')) return false;
     const key = `thread:${chatKey()}`;
     if (!force && isBackingOff(key)) return false;
+    const generateToken = beginGenerate('支线');
+    if (!generateToken) return false;
     if (quiet) toast('正在请故事神谕设计一条支线…');
     const origin = chatKey();
     try {
@@ -4237,15 +4264,16 @@ async function generateThread({ quiet = true, userText = '', force = false, crit
         markFailedFromError(key, error);
         return false;
     } finally {
-        endGenerate();
+        endGenerate(generateToken);
         if (panel && !panel.hidden) render();
     }
 }
 
 async function generateInterlude({ quiet = true, userText = '', force = false, critique = '', replaceId = '' } = {}) {
-    if (!beginGenerate('插曲')) return false;
     const key = `interlude:${chatKey()}`;
     if (!force && isBackingOff(key)) return false;
+    const generateToken = beginGenerate('插曲');
+    if (!generateToken) return false;
     if (quiet) toast('正在请故事神谕设计一条插曲…');
     const origin = chatKey();
     try {
@@ -4273,7 +4301,7 @@ async function generateInterlude({ quiet = true, userText = '', force = false, c
         markFailedFromError(key, error);
         return false;
     } finally {
-        endGenerate();
+        endGenerate(generateToken);
         if (panel && !panel.hidden) render();
     }
 }
@@ -4546,6 +4574,7 @@ function noteAttempt(ok, error) {
  *   4. 自动续支线 / 插曲：按回复数节奏补充（有并发上限）。
  */
 async function evaluateDirector({ live = null } = {}) {
+    if (coop?.occupies()) { syncMainInjection(); return; }
     if (evaluating) return;
     evaluating = true;
     try {
@@ -5375,7 +5404,7 @@ let panel = null;
 let bubble = null;
 let dragging = false;
 
-const TABS = [['now', '当前'], ['epic', '篇章'], ['main', '主线'], ['side', '支线/插曲'], ['set', '设定'], ['about', '关于']];
+const TABS = [['now', '当前'], ['epic', '篇章'], ['main', '主线'], ['side', '支线/插曲'], ['coop', 'Coop'], ['set', '设定'], ['about', '关于']];
 
 /**
  * 「关于」页：头像 + 作者 + 版本 + 出处。
@@ -5865,6 +5894,8 @@ function renderSetTab() {
         </div>
         <div class="sd-card">
             <div class="sd-card-head"><span class="sd-card-title">外观</span></div>
+            <label class="sd-switch"><input name="show-bubble" type="checkbox"> 显示悬浮窗入口</label>
+            <p class="sd-note">关闭后隐藏悬浮球，仍可从扩展菜单中的「故事导演」打开面板。</p>
             <div class="sd-row">
                 <label class="sd-field"><span>悬浮球大小（px）</span><input name="bubble-size" type="number" min="28" max="120" step="1"></label>
                 <label class="sd-field"><span>自定义图标（留空＝自带）</span><input name="bubble-icon" placeholder="https://… 或 icon.svg"></label>
@@ -5885,7 +5916,7 @@ function renderSetTab() {
             else s[key] = node.value;
             save();
             syncMainInjection();
-            if (key === 'bubbleSize' || key === 'bubbleIcon') applyBubbleLook();
+            if (key === 'showBubble' || key === 'bubbleSize' || key === 'bubbleIcon') applyBubbleLook();
         });
     };
     bind('auto-director', 'autoDirector');
@@ -5921,6 +5952,7 @@ function renderSetTab() {
     bind('auto-update-book', 'autoUpdateBook');
     bind('auto-mount-book', 'autoMountBook');
     bind('book-unmount-on-off', 'bookUnmountOnOff');
+    bind('show-bubble', 'showBubble');
     bind('bubble-size', 'bubbleSize', 'value');
     bind('bubble-icon', 'bubbleIcon', 'value');
 
@@ -6913,6 +6945,7 @@ async function saveEpicFromForm() {
 function applyBubbleLook(node = bubble) {
     if (!node) return;
     const s = settings();
+    node.hidden = s.showBubble === false;
     const size = Math.max(28, Math.min(120, Math.round(Number(s.bubbleSize) || 52)));
     node.style.setProperty('--sd-bubble-size', `${size}px`);
     const custom = String(s.bubbleIcon || '').trim();
@@ -7051,6 +7084,7 @@ function makePanel() {
             <section class="sd-page sd-epic-tab" data-tab="epic" hidden></section>
             <section class="sd-page sd-main-tab" data-tab="main" hidden></section>
             <section class="sd-page sd-side-tab" data-tab="side" hidden></section>
+            <section class="sd-page sd-coop-tab" data-tab="coop" hidden></section>
             <section class="sd-page sd-set-tab" data-tab="set" hidden></section>
             <section class="sd-page sd-about-tab" data-tab="about" hidden></section>
         </div>`;
@@ -7092,6 +7126,42 @@ function toast(message, type = 'info') {
     console.info(`[故事导演] ${message}`);
 }
 
+/** Coop shares the model connection and task gate, with a separate context and cancellation. */
+async function askCoop(messages, signal) {
+    const owner = beginGenerate('Coop 羁绊事件');
+    if (!owner) throw new Error('故事导演正在生成，请稍后开始 Coop');
+    const cancel = () => { if (owner === genId) abortGenerate(); };
+    signal.addEventListener('abort', cancel, { once: true });
+    try {
+        if (signal.aborted) throw Object.assign(new Error('CANCELLED'), {code:'CANCELLED'});
+        const api = oracleApi();
+        if (typeof api?.run !== 'function') throw new Error('请先启用故事神谕并配置模型连接');
+        const result = await api.run(messages.map(m => ({...m, content: substitute(m.content)})), {
+            signal: genCtl?.signal,
+            onDelta: full => { if (owner === genId) genChars = String(full || '').length; },
+        });
+        if (signal.aborted || owner !== genId || genAborted) throw Object.assign(new Error('CANCELLED'), {code:'CANCELLED'});
+        return result;
+    } finally {
+        signal.removeEventListener('abort', cancel);
+        endGenerate(owner);
+    }
+}
+function coopSceneChanged(occupied) {
+    const s = settings(), count = aiMessageCount(), rt = s.run;
+    if (occupied) {
+        if (!Number.isFinite(rt.coopPausedAt)) rt.coopPausedAt = count;
+    } else if (Number.isFinite(rt.coopPausedAt)) {
+        const delta = Math.max(0, count - rt.coopPausedAt);
+        for (const key of ['beatAt','chapterOpenedAt','threadAt','interludeAt','aftermathAt','lastGenerateAt','armedAt','focusBeatSince','focusInterludeSince']) {
+            if (Number.isFinite(rt[key]) && rt[key] > 0) rt[key] += delta;
+        }
+        rt.lastCount = count;
+        delete rt.coopPausedAt;
+    }
+    save();
+}
+
 // 阶段十六：启动
 
 function init() {
@@ -7099,6 +7169,15 @@ function init() {
     if (!document.body) { window.setTimeout(init, 500); return; }
     makeBubble();
     makePanel();
+    coop = createCoopSystem({
+        uiContainer: panel.querySelector('.sd-coop-tab'),
+        openPanel: () => { settings().tab = 'coop'; save(); open(); },
+        ask: askCoop,
+        autoAllowed: () => settings().enabled && settings().autoDirector && !storyGenerating,
+        sceneChanged: coopSceneChanged,
+        syncPrompts: () => syncMainInjection(),
+        renderMessage: refreshCleanedMessage,
+    });
     // ★ 0.38.7：魔棒菜单入口。ST 可能在扩展之后才把菜单建好，所以几拍重试（幂等，重复调只有一颗）。
     injectWandEntry();
     window.setTimeout(() => injectWandEntry(), 600);
