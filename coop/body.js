@@ -11,7 +11,7 @@ export function legacyVisibleBody(body) {
         .replace(/<故事导演(?:自检|审查|审查说明)>[\s\S]*?<\/故事导演(?:自检|审查|审查说明)>/g,'').trim();
 }
 
-function stripVariables(body) {
+function variableRanges(body) {
     const ranges=[];
     let start=null, contentDepth=0;
     const payloadAt=to=>start!==null && /^\s*(?:<(?:Analysis|JSONPatch)\b|_\.(?:set|add|assign|insert)\s*\(|\[\s*\{)/i.test(body.slice(start,to).replace(/^<UpdateVariable\b[^>]*>/i,''));
@@ -29,18 +29,26 @@ function stripVariables(body) {
     }
     // Incomplete variable payloads are not narrative evidence either.
     if(start!==null && /^\s*(?:<(?:Analysis|JSONPatch)\b|_\.(?:set|add|assign|insert)\s*\(|\[\s*\{)/i.test(body.slice(start).replace(/^<UpdateVariable\b[^>]*>/i,''))) ranges.push([start,body.length]);
-    for(const [from,to] of ranges.reverse()) body=body.slice(0,from)+body.slice(to);
-    return body;
+    return ranges;
 }
 
-export function visibleBody(body,{keepImagePlaceholders=false}={}) {
+function withoutAnalysis(body) {
     let result=stripReport(body).replace(/<(build|think|thinking|analysis)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,'');
     // An unfinished analysis block cannot consume a following explicit story.
     result=result.replace(/<(?:build|think|thinking|analysis)\b[^>]*>([\s\S]*)$/gi,(_all,tail)=>{
         const story=tail.search(/<content\b|###\s*正文/i);
         return story<0?'':tail.slice(story);
     });
-    result=stripVariables(result)
+    return result;
+}
+export function updateVariableBlocks(body) {
+    const clean=withoutAnalysis(body);
+    return variableRanges(clean).map(([from,to])=>clean.slice(from,to)).filter(block=>/<\/UpdateVariable\s*>$/i.test(block));
+}
+export function visibleBody(body,{keepImagePlaceholders=false}={}) {
+    let result=withoutAnalysis(body);
+    for(const [from,to] of variableRanges(result).reverse()) result=result.slice(0,from)+result.slice(to);
+    result=result
         .replace(/<story_director_status\b[^>]*>[\s\S]*?<\/story_director_status\s*>/gi,'')
         .replace(/<!--\s*故事导演自检[\s\S]*?-->/gi,'')
         .replace(/<(故事导演(?:自检|审查|审查说明))>[\s\S]*?<\/\1>/gi,'')

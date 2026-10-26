@@ -24,9 +24,10 @@ export function mergeCoopMvu(variables,state) {
     let ns=unwrap(root['故事导演']),coop=unwrap(ns?.Coop);
     if(!Object.keys(profiles).length && !coop?.角色) return false;
     if(ns!=null && !object(ns) || coop!=null && !object(coop)) fail('INVALID_MVU_NAMESPACE','MVU 的故事导演／Coop 字段不是对象，已停止同步');
-    if(JSON.stringify(coop?.角色)===JSON.stringify(profiles)) return false;
+    if(JSON.stringify(coop?.角色)===JSON.stringify(profiles) && Object.hasOwn(coop,'回报')) return false;
     if(!ns) ns=root['故事导演']={};
     if(!coop) coop=ns.Coop={};
+    if(!Object.hasOwn(coop,'回报')) coop.回报=null;
     coop.角色=profiles;
     return true;
 }

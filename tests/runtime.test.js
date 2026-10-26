@@ -24,7 +24,8 @@ async function setup(t,{extra=false,save=null,locks=null}={}) {
     async function reply(body,proposal={}) {
         const snapshot=runtime.snapshot;
         const report={nonce:snapshot.nonce,affinity:[],...proposal};
-        const message={is_user:false,name:'画家',mes:body+(extra?'':'<CoopReport>'+JSON.stringify(report)+'</CoopReport>')};
+        const variables='<UpdateVariable><JSONPatch>'+JSON.stringify([{op:'add',path:'/故事导演/Coop/回报',value:report}])+'</JSONPatch></UpdateVariable>';
+        const message={is_user:false,name:'画家',mes:body+(extra?'':variables)};
         messages.push(message);const index=messages.length-1;
         await runtime.afterMessage(index);
         if(extra) await runtime.receiveMvu({stat_data:{'故事导演':{Coop:{'回报':report}}}});

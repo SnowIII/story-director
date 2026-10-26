@@ -1,5 +1,6 @@
 import {hash,object} from './model.js';
-import {visibleBody,fingerprintBody,legacyBodyVariants} from './body.js';
+import {visibleBody,fingerprintBody,legacyBodyVariants,updateVariableBlocks} from './body.js';
+import {extractNsCommands,parseCommandLiteral} from '../model.js';
 export {visibleBody,stripReport} from './body.js';
 export const REPORT_TAG='CoopReport';
 const sourceCache=new WeakMap();
@@ -54,8 +55,29 @@ export function modelJson(value) {
 }
 export function parseReports(body) {
     const reports=[];
+    const add=value=>{if(object(value) && !reports.some(report=>JSON.stringify(report)===JSON.stringify(value))) reports.push(value);};
+    let variableReport=null;
+    for(const block of updateVariableBlocks(body)) {
+        for(const match of block.matchAll(/<JSONPatch\b[^>]*>([\s\S]*?)<\/JSONPatch\s*>/gi)) {
+            try {
+                const patches=safeJson(match[1].trim());
+                if(!Array.isArray(patches) || patches.length>128) continue;
+                for(const patch of patches) if(object(patch) && ['add','replace'].includes(patch.op) &&
+                    /^\/(?:stat_data\/)?故事导演\/Coop\/回报$/.test(patch.path) && object(patch.value)) variableReport=patch.value;
+            } catch { /* Malformed or unsafe model JSON is never executed. */ }
+        }
+        for(const command of extractNsCommands(block)) {
+            if(command.type!=='set' || command.args.length<2) continue;
+            const path=parseCommandLiteral(command.args[0]);
+            if(!/^(?:stat_data\.)?故事导演\.Coop\.回报$/.test(String(path))) continue;
+            try {const value=safeJson(command.args.at(-1));if(object(value)) variableReport=value;} catch { /* Only strict JSON report objects are accepted. */ }
+        }
+    }
+    // This is one MVU variable: repeated assignments have last-write semantics.
+    if(variableReport) return [variableReport];
+    // Existing archives and in-flight replies may still contain the old transport.
     for(const match of String(body || '').matchAll(/<CoopReport\b[^>]*>([\s\S]*?)<\/CoopReport>/gi)) {
-        try {const value=safeJson(match[1].trim());if(object(value)) reports.push(value);} catch { /* Never execute model output. */ }
+        try {add(safeJson(match[1].trim()));} catch { /* Never execute model output. */ }
     }
     return reports;
 }

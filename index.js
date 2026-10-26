@@ -58,7 +58,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.39.6';
+const VERSION = '0.39.7';
 let coop = null;
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
@@ -1863,14 +1863,17 @@ function syncMainInjection() {
         // ★ 0.27.11：契约**按幕给示例** —— 间章时段不该再把主线那几条命令摆在模型面前。
         // ★ 0.35.0：把「这一轮那一拍」和「谁来写变量」一起交给契约块 ——
         //   契约是唯一到得了**额外变量模型**的通道（见 landingByExtraModel 的注释）。
-        const contract = s.injectContract
+        const coopContract = coop?.variableContract() || '';
+        const mainContract = s.injectContract
             ? substitute(renderContractSection({
                 banUserAction: settings().banUserAction !== false,
                 mode: currentMode(),
                 beat: currentBeatLine(),
                 landingBy: landingByExtraModel() ? 'extra' : '',
+                hasCoop: !!coopContract,
             }).join('\n'))
             : '';
+        const contract = [mainContract, coopContract].filter(Boolean).join('\n\n');
         setExtensionPrompt(SLOT.contract, contract, extension_prompt_types.IN_CHAT, depth, false, extension_prompt_roles.SYSTEM);
 
         setExtensionPrompt(SLOT.coop, coop?.injection() || '', extension_prompt_types.IN_CHAT, depth, false, extension_prompt_roles.SYSTEM);

@@ -251,7 +251,7 @@ export class CoopRuntime {
         const roster=Object.values(this.state().profiles);
         const profiles=roster.filter(p=>p.mode!=='off' && (this.host.available(p,roster) || p.id===this.event()?.characterId));
         const snapshot={nonce:'turn-'+uuid(),scope:this.store.scope,userId:user.id,userVersion:user.version,
-            byExtra:extraModel(this.host.context()),roles:{},event:null};
+            byExtra:extraModel(this.host.context()),reportChannel:'mvu',roles:{},event:null};
         profiles.forEach(p=>{snapshot.roles[p.id]={policyRevision:p.policyRevision,locked:!!p.lock,thresholds:clone(p.thresholds)};});
         const current=this.event();
         if(current) snapshot.event={id:current.id,characterId:current.characterId,version:current.version,phase:current.phase};
@@ -270,12 +270,18 @@ export class CoopRuntime {
         const profiles=roster.filter(p=>p.mode!=='off' && (this.host.available(p,roster) || p.id===event?.characterId));
         const memories=profiles.map(publicMemory).filter(Boolean);
         if(memories.length) parts.push('【Coop 已确认记忆；仅在场景相关时自然体现】\n'+memories.join('\n'));
-        if(!this.store.readonly && this.snapshot?.scope===this.store.scope) {
-            const selected=profiles.filter(p=>this.snapshot.roles[p.id]);
-            const validEvent=!held && event?.id===this.snapshot.event?.id && event?.version===this.snapshot.event?.version?event:null;
-            parts.push(reportContract(selected,validEvent,this.snapshot,this.snapshot.byExtra));
-        }
         return parts.filter(Boolean).join('\n\n');
+    }
+    variableContract() {
+        if(!this.state() || this.store.readonly || this.snapshot?.scope!==this.store.scope || this.store.scope!==this.host.scope()) return '';
+        const latestUser=this.host.messages().findLast(message=>message?.is_user && !message.is_system);
+        if(latestUser?.sd_coop_id!==this.snapshot.userId) return '';
+        const event=this.event(), user=[...this.store.sources().values()].filter(s=>s.isUser).at(-1);
+        if(this.snapshot.userId!==user?.id || !matchesUserVersion(user,this.snapshot.userVersion)) return '';
+        const held=event && event.playedUsers.includes(user?.id) && !['waiting_user','waiting_route'].includes(event.phase);
+        const profiles=Object.values(this.state().profiles).filter(p=>p.mode!=='off' && this.snapshot.roles[p.id]);
+        const validEvent=!held && event?.id===this.snapshot.event?.id && event?.version===this.snapshot.event?.version?event:null;
+        return reportContract(profiles,validEvent,this.snapshot,this.snapshot.byExtra);
     }
     async receive(messageIndex,external=null) {
         if(!this.store.document || this.store.readonly || this.store.scope!==this.host.scope()) return;
@@ -302,7 +308,7 @@ export class CoopRuntime {
                 for(const p of (Array.isArray(report.affinity)?report.affinity:[]).slice(0,20)) this.affinityOutcome(source,p.characterId,'INVALID_REQUEST');
                 continue;
             }
-            if(!!external!==snapshot.byExtra) continue;
+            if(snapshot.reportChannel!=='mvu' && !!external!==snapshot.byExtra) continue;
             snapshot.messageId=source.id;snapshot.messageVersion=source.version;
             message.extra=message.extra || {};message.extra.sdCoopSnapshot=clone(snapshot);
             for(const proposal of (Array.isArray(report.affinity)?report.affinity:[]).slice(0,20)) {
@@ -328,6 +334,8 @@ export class CoopRuntime {
         this.store.reconcile();
     }
     async receiveMvu(variables) {
+        const latest=this.host.messages().length-1, message=this.host.messages()[latest];
+        if(message && !message.is_user && !message.is_system && parseReports(message.mes).length) await this.receive(latest);
         const report=readMvuReport(variables);
         if(!report) return;
         const snapshot=this.snapshots.get(report.nonce);

@@ -66,7 +66,9 @@ export function reportContract(profiles,event,snapshot,byExtra=false) {
             outcomeEvidence:'正文准确短句',choice:'用户真实选择',choiceEvidence:'用户实际回应准确短句',
             traits:['新增／深化的习惯'],facts:['本阶公开且实际确认的人物事实'],boundaries:['关系边界变化'],
             openHooks:['尚未解决的事项'],closedHooks:['本次实际回收的旧伏笔'],sharedFacts:[],conflicts:[]}}:{})};
-    const lines=['【Coop 受限回报契约】仅处理下列用户已经选中的角色，未选角色不得报分或建个人线：',JSON.stringify(actors),
+    const patch={op:'add',path:'/故事导演/Coop/回报',value:sample};
+    const lines=['【本轮好感／Coop 变量更新契约】与故事导演其他变量一起，在本轮 <UpdateVariable> 中回报。',
+        '仅处理下列用户已经选中的角色，未选角色不得报分或建个人线；affinity 是当前已确认的好感值：',JSON.stringify(actors),
         '只有本次用户实际行动产生影响才建议变化；普通闲聊0，体贴+1，理解／实际帮助+2，重要支持+3～5，冒犯−1～−3，严重背叛−5～−10。',
         '不把重复夸奖或回忆旧行动再加分；不同意见不必扣分。每个角色每次用户互动只计一次。',
         'name 与 aliases 是同一人的不同称呼，只能用其固定 characterId 回报一次，不能为别名另报分或新建人物。结合现场和已有身份仍无法确认指代时，先澄清并保持0，不要仅凭代词或共用姓氏猜测。',
@@ -76,11 +78,14 @@ export function reportContract(profiles,event,snapshot,byExtra=false) {
         'resolution 的 completion 必须包含实际选择、局部结果、人物变化、未解决与已回收伏笔，以及完整简短摘要。不可只写“任务完成”。',
         'completion.choiceEvidence 可引用用户首次或最新回应中的真实选择；普通闲聊不覆盖首次选择。Rank 3 必须引用路线确认时的回应。',
         '若共享 NPC／信物状态实际变化，可在 completion.sharedFacts 填 [{entityId:"稳定英文ID",name:"实体名",fact:"新事实",previousFact:"已有旧事实原文",evidence:"正文准确短句",knownBy:["user","当前角色ID"]}]；没有变化用空数组。',
-        '不要直接修改好感、Rank、锁、路线、管理名单或档案；程序负责校验和保存。JSON 范例的说明文字要换成真实内容；无变化可用空 affinity 数组。',
-        JSON.stringify(sample)];
+        '把本轮变化报告写到 故事导演.Coop.回报。不要直接改写角色最终好感、Rank、锁、路线或档案；程序校验后会将最终结果同步回变量。',
+        '必须使用本轮 nonce，不要引用历史回报。无变化的已选角色用 delta:0，不能把未收到回报当成0分。所有范例说明文字都要换成真实原文。',
+        '与本轮其他变量合用一个 <UpdateVariable> 和一个 <JSONPatch> 数组，把下面这一项追加到数组；不要重复输出变量块，不输出独立 CoopReport：',
+        JSON.stringify([patch],null,2),
+        '如果当前卡片使用 _.set 语法而不是 JSONPatch，在同一个 <UpdateVariable> 内写 _.set(\'故事导演.Coop.回报\', '+JSON.stringify(sample)+');，两种写法只选一种。'];
     if(event?.routeSource) lines.push('本阶 completion.choiceEvidence 应引用路线确认对应回应的准确短句：'+event.routeSource.body,
         '若最新回应明确改变已确认的关系路线，event 使用 routeConflict:true、userEvidence:最新用户原文、evidence:正文接住该变化的原文，省略 completion。程序退回等待面板确认；普通补充不报冲突。');
-    if(byExtra) lines.push('当前采用额外变量模型回填：正文不输出 CoopReport；变量模型把上述完整 JSON 写入 _.set(\'故事导演.Coop.回报\', JSON对象);。必须原样携带 nonce；不要写好感或 Rank。');
-    else lines.push('在正文末尾仅附一个 <CoopReport>完整JSON</CoopReport>，不使用代码围栏。程序采集后移除，不把报告当作正文。');
+    if(byExtra) lines.push('当前采用额外变量模型回填：讲故事的人不写变量命令；负责回填的变量模型按本契约，在它的 <UpdateVariable> 中提交完整报告。');
+    else lines.push('当前随 AI 输出：由你写完正文后，在回复末尾现有的 <UpdateVariable> 中提交上述报告。不要只在 Analysis 中说“增加好感”而省略报告。');
     return lines.join('\n');
 }

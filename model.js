@@ -1231,7 +1231,7 @@ export function renderInterludeChapterSection(chapter, { maxBeats = 6, banUserAc
  *   现在：主线时段给主线示例，间章时段给间章示例，并且明说另一种被忽略。
  *   整段「怎么回报」的规矩仍然只有这一处 + 世界书那三条常驻条目（不给两份，免得互相打架）。
  */
-export function renderContractSection({ banUserAction = true, mode = 'main', beat = '', landingBy = '' } = {}) {
+export function renderContractSection({ banUserAction = true, mode = 'main', beat = '', landingBy = '', hasCoop = false } = {}) {
   if (mode === 'coop') return ['【当前演出为 Coop】只按 Coop 专用契约回报，主线、间章及普通支线均暂停，不写它们的落拍命令。'];
   const inInterlude = mode === 'interlude';
   const byExtra = landingBy === 'extra';
@@ -1263,8 +1263,10 @@ export function renderContractSection({ banUserAction = true, mode = 'main', bea
     return [
       inInterlude ? '【现在这一轮没有要演的画面】' : '【现在这一轮没有要演的拍】',
       '插件还没有给你这一轮的任务（还没排拍，或者本章的拍已经演完了）。',
-      '　· **不要写任何 `故事导演.*` 回报** —— 没有要落的拍，写了只会把状态弄脏；',
-      '　· 也**不要**把 `_.set` / `<UpdateVariable>` / `<故事导演审查>` 这类东西写进正文；',
+      hasCoop ? '　· 不写主线、间章、支线或插曲的落拍回报；好感／Coop 仍按本轮变量更新契约回报。' :
+        '　· **不要写任何 `故事导演.*` 回报** —— 没有要落的拍，写了只会把状态弄脏；',
+      hasCoop ? '　· 好感回报合并到回复末尾的 <UpdateVariable>，不写进故事正文，不输出独立报告标签。' :
+        '　· 也**不要**把 `_.set` / `<UpdateVariable>` / `<故事导演审查>` 这类东西写进正文；',
       '　· 把故事自然地演下去就行：世界照常运转，插件排好拍之后会在注入里告诉你。',
     ];
   }

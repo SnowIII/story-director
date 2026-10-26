@@ -1,4 +1,4 @@
-> v0.39.6 将 Coop 已确认的好感、Rank 和锁定状态同步到 MVU，供状态栏读取；计分和门槛仍由 Coop 校验。同时修复 AI 回复后加 `<IMG>` 数字图片占位块导致旧加分误撤销的问题。路径与同步规则见 [Coop 使用说明](docs/coop.md)。
+> v0.39.7 好感／Coop 改为与其他部分统一的每轮变量注入和 UpdateVariable 回报，支持 JSONPatch／_.set，保留旧档兼容、原文校验、去重及门槛锁。详见 [Coop 使用说明](docs/coop.md)。
 
 本次更新还包括：
 
