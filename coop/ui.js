@@ -53,7 +53,6 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
             (choices.length?choices.map(c=>'<option value="'+esc(c.id)+'"'+(state.profiles[c.id]?' disabled':'')+
                 (c.id===(available[0] || choices[0]).id?' selected':'')+'>'+esc(c.name)+(state.profiles[c.id]?'（已管理）':'')+'</option>').join(''):
                 '<option value="" selected disabled>暂未读取到角色卡／群聊成员</option>')+'</select></label>'+
-            '<label>管理模式<select name="mode"><option value="affinity">仅维护好感</option><option value="coop">好感＋Coop</option></select></label>'+
             '<button type="submit"'+(!available.length?' disabled':'')+'>加入所选角色</button></form>'+
             '<p class="sdc-note">这里读取酒馆当前角色卡或群聊成员，不会自动识别卡内 NPC。整合卡中的具体人物请用下面的「手动添加卡内 NPC」。</p>'+
             (choices.length && !available.length?'<p>当前角色卡／群聊成员均已加入管理，请在下方档案中修改模式。</p>':'')+
@@ -212,7 +211,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
             if(form.id==='sdc-add-card') {
                 const candidate=candidates(runtime.host.context()).find(c=>c.id===data.get('candidate'));
                 if(!candidate || runtime.state().profiles[candidate.id]) throw new Error('该角色已加入管理或当前角色卡已切换，请重新选择。');
-                input={...candidate,mode:data.get('mode')};
+                input={...candidate,mode:'affinity'};
             } else if(form.id==='sdc-add-npc') {
                 if(Object.values(runtime.state().profiles).some(p=>p.name===text(data.get('name'),100))) throw new Error('同名角色已有档案，请在现有行中修改模式或说明。');
                 input={id:'npc:'+uuid(),name:data.get('name'),aliases:data.get('aliases'),description:data.get('description'),
