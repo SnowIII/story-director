@@ -390,3 +390,18 @@ for(const change of ['edit','delete']) test('a resolution source invalidated dur
     assert.ok(h.runtime.state().profiles.a.lock);
     await h.runtime.load();assert.equal(h.runtime.state().profiles.a.rank,0);
 });
+
+test('MVU mirrors confirmed scores, retains the old total on save failure and follows source rollback',async t=>{
+    const h=await setup(t);await h.configure('affinity',0);
+    const tables={message:{stat_data:{生命:11}},chat:{stat_data:{生命:11}}};
+    h.host.mvu=()=>({getMvuData:target=>tables[target.type],replaceMvuData:async(data,target)=>{tables[target.type]=clone(data);}});
+    const affinity=type=>tables[type].stat_data.故事导演.Coop.角色.a.好感度;
+    const persist=h.host.persist;h.host.persist=async()=>{throw new Error('offline');};
+    const index=await h.send('我来帮你。','她放松了。',h.score(1));
+    await h.runtime.syncMvu();assert.equal(affinity('message'),0);assert.equal(affinity('chat'),0);
+    h.host.persist=persist;await h.runtime.store.retrySave();await h.runtime.syncMvu();
+    assert.equal(affinity('message'),1);assert.equal(affinity('chat'),1);
+    h.messages[index].mes='她拒绝了帮助。';h.runtime.store.reconcile();await h.runtime.syncMvu();
+    assert.equal(affinity('message'),0);assert.equal(affinity('chat'),0);
+    assert.equal(tables.message.stat_data.生命,11);assert.equal(tables.chat.stat_data.生命,11);
+});

@@ -16,8 +16,11 @@ export function sourceMap(messages) {
         const salt='|'+(message.swipe_id ?? 0)+'|'+!!message.is_user;
         let cached=sourceCache.get(message);
         if(!cached || cached.raw!==message.mes || cached.salt!==salt) {
-            const body=visibleBody(message.mes), version='v2:'+hash(fingerprintBody(message.mes)+salt);
-            cached={raw:message.mes,salt,body,version,versions:[...new Set(legacyBodyVariants(message.mes).map(value=>hash(value+salt)))]};
+            const options={keepImagePlaceholders:!!message.is_user};
+            const body=visibleBody(message.mes,options), version='v2:'+hash(fingerprintBody(message.mes,options)+salt);
+            cached={raw:message.mes,salt,body,version,versions:[...new Set([
+                'v2:'+hash(fingerprintBody(message.mes,{keepImagePlaceholders:true})+salt),
+                ...legacyBodyVariants(message.mes,128,options).map(value=>hash(value+salt))])]};
             sourceCache.set(message,cached);
         }
         const source={id:message.sd_coop_id,version:cached.version,versions:cached.versions,

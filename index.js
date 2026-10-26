@@ -58,7 +58,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.39.5';
+const VERSION = '0.39.6';
 let coop = null;
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
@@ -945,6 +945,7 @@ async function pushTokens() {
 async function writeMvu(d) {
     const api = mvu();
     if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
+    coop?.syncMvu?.updateLive(d);
     let ok = false;
     try {
         await api.replaceMvuData(d, { type: 'message', message_id: 'latest' });
@@ -955,6 +956,7 @@ async function writeMvu(d) {
         if (isPlainObject(whole)) {
             if (!isPlainObject(whole.stat_data)) whole.stat_data = {};
             whole.stat_data[NS] = d.stat_data[NS];
+            coop?.syncMvu?.updateLive(whole);
             await api.replaceMvuData(whole, { type: 'chat' });
             ok = true;
         }
@@ -7173,6 +7175,7 @@ function init() {
         uiContainer: panel.querySelector('.sd-coop-tab'),
         openPanel: () => { settings().tab = 'coop'; save(); open(); },
         ask: askCoop,
+        mvu,
         autoAllowed: () => settings().enabled && settings().autoDirector && !storyGenerating,
         sceneChanged: coopSceneChanged,
         syncPrompts: () => syncMainInjection(),
@@ -7197,6 +7200,7 @@ function init() {
             });
         }
         await ensureNamespace();
+        void coop.syncMvu();
         // ★ 老存档的旧字段名（`史诗.总纲`）改掉 —— 两个存放位置都过一遍（见 0.21.1 的事故说明）。
         void migrateLegacyKeysBothScopes();
         syncMainInjection();

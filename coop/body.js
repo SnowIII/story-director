@@ -33,7 +33,7 @@ function stripVariables(body) {
     return body;
 }
 
-export function visibleBody(body) {
+export function visibleBody(body,{keepImagePlaceholders=false}={}) {
     let result=stripReport(body).replace(/<(build|think|thinking|analysis)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,'');
     // An unfinished analysis block cannot consume a following explicit story.
     result=result.replace(/<(?:build|think|thinking|analysis)\b[^>]*>([\s\S]*)$/gi,(_all,tail)=>{
@@ -45,28 +45,31 @@ export function visibleBody(body) {
         .replace(/<!--\s*故事导演自检[\s\S]*?-->/gi,'')
         .replace(/<(故事导演(?:自检|审查|审查说明))>[\s\S]*?<\/\1>/gi,'')
         .replace(/(\r?\n)?\[igs-img:\d+\](\r?\n)?/gi,(_all,before,after)=>before && after?'\n':'');
+    if(!keepImagePlaceholders) result=result.replace(/(?:\r?\n)?<IMG>\s*\d+\s*<\/IMG>(?:\r?\n)?/gi,'');
     return result.replace(/\r\n?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
 }
 
-export function evidenceText(body) {
-    return visibleBody(body).replace(/\s+/gu,' ').trim();
+export function evidenceText(body,options) {
+    return visibleBody(body,options).replace(/\s+/gu,' ').trim();
 }
 export function hasEvidence(body,quote) {
     const expected=evidenceText(quote);
     return !!expected && evidenceText(body).includes(expected);
 }
-export function fingerprintBody(body) {
-    return evidenceText(body).replace(/\s*(<\/?[\p{L}_][^>]*>)\s*/gu,'$1');
+export function fingerprintBody(body,options) {
+    return evidenceText(body,options).replace(/\s*(<\/?[\p{L}_][^>]*>)\s*/gu,'$1');
 }
 
 /** Reconstruct only known presentation edits; never trust a claimed old hash. */
-export function legacyBodyVariants(raw,limit=128) {
+export function legacyBodyVariants(raw,limit=128,{keepImagePlaceholders=false}={}) {
     const original=legacyVisibleBody(raw), result=new Set([original]);
+    const marker=keepImagePlaceholders?/(\r?\n)?\[igs-img:\d+\](\r?\n)?/i:
+        /(\r?\n)?(?:\[igs-img:\d+\]|<IMG>\s*\d+\s*<\/IMG>)(\r?\n)?/i;
     let variants=[original];
-    for(let n=0;n<24 && variants.some(value=>/\[igs-img:\d+\]/i.test(value));n++) {
+    for(let n=0;n<24 && variants.some(value=>marker.test(value));n++) {
         const next=new Set();
         for(const value of variants) {
-            const match=/(\r?\n)?\[igs-img:\d+\](\r?\n)?/i.exec(value);
+            const match=marker.exec(value);
             if(!match) {next.add(value);continue;}
             const before=match[1] || '',after=match[2] || '',left=value.slice(0,match.index),right=value.slice(match.index+match[0].length);
             for(const replacement of [before+after,before,after,'']) {

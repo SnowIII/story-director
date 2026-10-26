@@ -38,14 +38,20 @@ export function createCoopSystem(hooks={}) {
         runtime.store.excluded.clear();
         if(runtime.store.document) runtime.store.reconcile();
     });
-    on('mag_variable_update_ended',variables=>runtime.receiveMvu(variables));
     const helper=globalThis.window?.TavernHelper;
-    if(typeof helper?.eventOn==='function') helper.eventOn('mag_variable_update_ended',variables=>
-        runtime.receiveMvu(variables).catch(error=>runtime.notice(error)));
+    const mvuOn=(name,handler)=>{
+        on(name,handler);
+        if(typeof helper?.eventOn==='function') helper.eventOn(name,async(...args)=>{
+            try {await handler(...args);}catch(error){runtime.notice(error);}
+        });
+    };
+    mvuOn('mag_variable_update_ended',async variables=>{await runtime.receiveMvu(variables);void runtime.syncMvu();});
+    mvuOn('mag_before_message_update',context=>{runtime.syncMvu.updateLive(context?.variables);});
+    for(const name of ['mag_variable_initiailized','mag_variable_initialized']) mvuOn(name,()=>{void runtime.syncMvu();});
     void runtime.load();
     globalThis.window.__storyDirectorCoop={
         open:ui.open,state:()=>runtime.state(),
-        diagnostics:()=>({notices:runtime.notices,pending:!!runtime.store.pending,readonly:runtime.store.readonly}),runtime
+        diagnostics:()=>({notices:runtime.notices,pending:!!runtime.store.pending,readonly:runtime.store.readonly,mvuError:runtime.syncMvu.error?.message || null}),runtime
     };
     return runtime;
 }

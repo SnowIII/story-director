@@ -26,6 +26,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         return '<article class="sdc-card"><div class="sdc-row"><strong>'+esc(p.name)+'</strong><span>'+esc(labels[p.mode])+'</span></div>'+
             ((p.aliases || []).length?'<p class="sdc-field-help">别名／简称：'+esc(p.aliases.join('、'))+'</p>':'')+
             '<p>'+ (p.lock?'🔒 ':'')+'好感 '+p.affinity+'／100 · Rank '+p.rank+'／'+RANK_COUNT+' · 下一阶门槛 '+next+'</p>'+
+            (bindingCapability(runtime.host.mvu?.()).available?'<p class="sdc-field-help">MVU 好感度路径：<code>故事导演.Coop.角色[&quot;'+esc(p.id)+'&quot;].好感度</code></p>':'')+
             (p.lock?'<p class="sdc-lock">完成 Rank '+p.lock.targetRank+' 羁绊事件后解锁；增减均暂停，不补发积分。</p>':'')+
             '<label>管理模式 <select data-mode="'+esc(p.id)+'">'+['off','affinity','coop'].map(mode=>'<option value="'+mode+'"'+(mode===p.mode?' selected':'')+'>'+labels[mode]+'</option>').join('')+'</select></label>'+
             '<div class="sdc-actions">'+
@@ -142,7 +143,9 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         return '<label><input id="sdc-auto" type="checkbox"'+(runtime.store.document.settings.autoStart?' checked':'')+'> 在角色可参与且场景空闲时自动开始已就绪事件</label>'+
             '<label>新事件默认轮数<select id="sdc-rounds"><option value="3"'+(runtime.store.document.settings.eventRounds===3?' selected':'')+'>三轮：切入、困境、收束</option><option value="2"'+(runtime.store.document.settings.eventRounds===2?' selected':'')+'>两轮：切入与困境合并</option></select></label>'+
             '<p>关闭自动开始不解除好感锁。始终只处理管理名单中的角色。</p>'+
-            '<p>外部 MVU 字段绑定：'+esc(bindingCapability().reason)+'</p>'+
+            '<p>MVU 同步：'+esc(bindingCapability(runtime.host.mvu?.()).reason)+'</p>'+
+            '<p>'+esc(runtime.syncMvu.status)+' <button type="button" data-action="sync-mvu">立即同步 MVU</button></p>'+
+            (runtime.syncMvu.error?'<p role="status">MVU 同步暂未完成：'+esc(runtime.syncMvu.error.message)+'</p>':'')+
             '<div class="sdc-actions"><button type="button" data-action="export">导出当前聊天 Coop 档案</button>'+
             '<button type="button" data-action="import" aria-controls="sdc-import">恢复同聊天档案</button></div>'+
             '<input id="sdc-import" type="file" accept="application/json,.json" hidden>'+
@@ -169,6 +172,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         const action=button.dataset.action, key=button.dataset.id;
         if(action==='close'){panel.hidden=true;return;}
         if(action==='history'){chosen=key;tab='archive';render();}
+        if(action==='sync-mvu') run(async()=>{await runtime.syncMvu();render();});
         if(action==='start') run(()=>runtime.generate(key));
         if(action==='replan') run(()=>runtime.generate(key,{replanEventId:button.dataset.event}));
         if(action==='pause') run(()=>runtime.pause(key,button.dataset.event));

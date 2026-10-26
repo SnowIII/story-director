@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {visibleBody,hasEvidence,legacyVisibleBody} from '../coop/body.js';
+import {visibleBody,hasEvidence,legacyVisibleBody,fingerprintBody} from '../coop/body.js';
 import {sourceMap,matchesSourceVersion,ensureMessageIds} from '../coop/messages.js';
 import {hash} from '../coop/model.js';
 
@@ -64,4 +64,36 @@ test('legacy gap cleanup can be verified while changed words stay invalid',()=>{
     assert.ok(matchesSourceVersion(sourceMap(messages).get('m'),oldVersion));
     messages[0].mes='序幕\n\n她拒绝一起核对。';
     assert.equal(matchesSourceVersion(sourceMap(messages).get('m'),oldVersion),false);
+});
+
+test('numeric IMG placeholders inside dialogue preserve current and verified legacy sources',()=>{
+    const original='<content>\n[igs-char:画家|开心|日常|谢谢你的帮助。]\n</content>\n<StatusPlaceHolderImpl/>';
+    const message={sd_coop_id:'m',is_user:false,mes:original},legacy=hash(legacyVisibleBody(original)+'|0|false');
+    const version=sourceMap([message]).get('m').version;
+    message.mes=original.replace('。]','。\n<IMG>\n4\n</IMG>\n]');
+    let source=sourceMap([message]).get('m');
+    assert.equal(source.version,version);assert.ok(matchesSourceVersion(source,legacy));
+    message.mes=message.mes.replace('4\n</IMG>','5\n</IMG>');
+    assert.equal(sourceMap([message]).get('m').version,version);
+    message.mes=message.mes.replace('谢谢你的帮助','我拒绝你的帮助');
+    source=sourceMap([message]).get('m');
+    assert.notEqual(source.version,version);assert.equal(matchesSourceVersion(source,legacy),false);
+});
+test('pre-fix v2 sources that already contained an IMG placeholder remain verifiable',()=>{
+    const body='<content>她接受帮助。\n<IMG>\n4\n</IMG>\n</content>';
+    const oldVersion='v2:'+hash(fingerprintBody(body,{keepImagePlaceholders:true})+'|0|false');
+    const message={sd_coop_id:'m',is_user:false,mes:body};
+    assert.ok(matchesSourceVersion(sourceMap([message]).get('m'),oldVersion));
+    message.mes=body.replace('接受','拒绝');
+    assert.equal(matchesSourceVersion(sourceMap([message]).get('m'),oldVersion),false);
+    assert.ok(visibleBody('<content><IMG>纸上写着真实线索</IMG></content>').includes('纸上写着真实线索'));
+});
+test('a user changing their selected image still invalidates the old interaction',()=>{
+    const message={sd_coop_id:'user',is_user:true,mes:'我选择这张图：<IMG>4</IMG>'};
+    const source=sourceMap([message]).get('user'),oldLegacy=hash(legacyVisibleBody(message.mes)+'|0|true');
+    message.mes='我选择这张图：<IMG>5</IMG>';
+    const changed=sourceMap([message]).get('user');
+    assert.notEqual(changed.version,source.version);
+    assert.equal(matchesSourceVersion(changed,source.version),false);
+    assert.equal(matchesSourceVersion(changed,oldLegacy),false);
 });

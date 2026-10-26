@@ -6,7 +6,7 @@ import {validateAffinityProposal} from './affinity.js';
 import {continuity,publicMemory} from './history.js';
 import {ensureMessageIds,sourceMap,sourceForId,ref,references,parseReports,stripReport,uuid,modelJson,matchesSourceVersion,matchesUserVersion} from './messages.js';
 import {designMessages,renderScene,reportContract} from './prompts.js';
-import {extraModel,readMvuReport} from './mvu.js';
+import {extraModel,readMvuReport,createMvuSync} from './mvu.js';
 import {affinityActivity} from './activity.js';
 
 export class CoopRuntime {
@@ -15,6 +15,7 @@ export class CoopRuntime {
         this.job=null;this.notices=[];this.listeners=new Set();this.scene=false;this.lease=null;
         this.disposed=false;this.queue=Promise.resolve();this.lastAutoFailure=0;this.pendingMvuReports=new Map();
         this.affinityOutcomes=new Map();
+        this.syncMvu=createMvuSync(host,this.store,()=>!this.disposed && this.lease?.scope===this.store.scope);
         const broadcast=host.broadcast;
         host.broadcast=document=>{
             broadcast?.(document);
@@ -27,6 +28,7 @@ export class CoopRuntime {
         const scene=this.occupies();
         if(scene!==this.scene) {this.scene=scene;this.host.sceneChanged?.(scene);}
         this.host.syncPrompts?.();
+        void this.syncMvu();
         for(const listener of this.listeners) listener();
     }
     notice(error) {

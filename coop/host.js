@@ -16,6 +16,7 @@ export function createHost(hooks={}) {
         scope:()=>contextScope(),
         metadata:()=>hostContext().chatMetadata,
         messages:()=>hostContext().chat || [],
+        mvu:()=>globalThis.window?.Mvu,
         reload:()=>hostContext().reloadCurrentChat?.(),
         async persist(document,scope) {
             const ctx=hostContext();
