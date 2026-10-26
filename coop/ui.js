@@ -62,7 +62,6 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
             '<p id="sdc-npc-aliases-help" class="sdc-field-help">全名和别名会归到同一个人物档案，不会重复加分或另开 Coop 线。共用姓氏可能有歧义，请只加入能明确指代此人的称呼。</p>'+
             '<label>补充设定（可选）<textarea name="description" rows="4" maxlength="12000" placeholder="可留空。神谕会从当前角色卡、世界书和故事上下文提取已有设定。&#10;例：对陌生人保持戒心，但答应过的事一定做到。仅填写你希望额外补充的内容。" aria-describedby="sdc-npc-description-help"></textarea></label>'+
             '<p id="sdc-npc-description-help" class="sdc-field-help">不必手动抄写人物档案，留空也能添加。设计事件时由神谕提取已有设定；这里仅作额外补充，不能用来改写已发生的历史。</p>'+
-            '<label>管理模式<select name="mode"><option value="affinity">仅维护好感</option><option value="coop">好感＋Coop</option></select></label>'+
             '<label>初始好感<input name="initialAffinity" type="number" min="0" max="100" value="0" placeholder="0～100，通常从 0 开始" aria-describedby="sdc-initial-affinity-help"></label>'+
             '<p id="sdc-initial-affinity-help" class="sdc-field-help">设定两人已有的关系基础，通常填 0。启用 Coop 且达到首阶门槛时，会封顶到 30 并锁定；Rank 仍需完成事件提升。</p>'+
             '<button type="submit">添加 NPC</button></form></details>'+
@@ -210,11 +209,11 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
             if(form.id==='sdc-add-card') {
                 const candidate=candidates(runtime.host.context()).find(c=>c.id===data.get('candidate'));
                 if(!candidate || runtime.state().profiles[candidate.id]) throw new Error('该角色已加入管理或当前角色卡已切换，请重新选择。');
-                input={...candidate,mode:'affinity'};
+                input={...candidate,mode:'coop'};
             } else if(form.id==='sdc-add-npc') {
                 if(Object.values(runtime.state().profiles).some(p=>p.name===text(data.get('name'),100))) throw new Error('同名角色已有档案，请在现有行中修改模式或说明。');
                 input={id:'npc:'+uuid(),name:data.get('name'),aliases:data.get('aliases'),description:data.get('description'),
-                    mode:data.get('mode'),initialAffinity:Number(data.get('initialAffinity'))};
+                    mode:'coop',initialAffinity:Number(data.get('initialAffinity'))};
             } else if(form.dataset.edit) {
                 input={...runtime.state().profiles[form.dataset.edit],name:data.get('name'),aliases:data.get('aliases'),description:data.get('description')};
             } else if(form.dataset.summary) {
