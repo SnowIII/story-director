@@ -22,7 +22,7 @@ test('MVU mirror preserves other fields and reports while exposing stable charac
     assert.equal(mergeCoopMvu(data,h.store.state),true);
     assert.equal(data.stat_data.生命,11);assert.equal(data.stat_data.故事导演.主线.当前拍,2);
     assert.deepEqual(data.stat_data.故事导演.Coop.回报,{nonce:'turn'});
-    assert.deepEqual(data.stat_data.故事导演.Coop.角色.a,{名称:'画家',好感度:7,Rank:0,好感锁定:false,路线:'unset',管理模式:'coop'});
+    assert.deepEqual(data.stat_data.故事导演.Coop.角色.a,{名称:'画家',好感度:7,Rank:0,阶级上限:4,关系确认阶级:3,好感锁定:false,路线:'unset',管理模式:'coop'});
     assert.equal(mergeCoopMvu(data,h.store.state),false);
     h.store.state.profiles.a.name='新称呼';mergeCoopMvu(data,h.store.state);
     assert.deepEqual(Object.keys(data.stat_data.故事导演.Coop.角色),['a']);

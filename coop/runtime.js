@@ -1,4 +1,4 @@
-import {clone,fail,text,hash,activeEvent,profileOf,historySignature,RANK_COUNT} from './model.js';
+import {clone,fail,text,hash,activeEvent,profileOf,historySignature,rankPolicy,RANK_COUNTS} from './model.js';
 import {CoopStore} from './store.js';
 import {configureRoster,candidates} from './roster.js';
 import {appendOperation,project,readDocument} from './timeline.js';
@@ -14,7 +14,7 @@ export class CoopRuntime {
         this.host=host;this.store=new CoopStore(host);this.snapshot=null;this.snapshots=new Map();
         this.job=null;this.notices=[];this.listeners=new Set();this.scene=false;this.lease=null;
         this.disposed=false;this.queue=Promise.resolve();this.lastAutoFailure=0;this.pendingMvuReports=new Map();
-        this.affinityOutcomes=new Map();this.rosterWarnings=new Map();
+        this.affinityOutcomes=new Map();this.pendingCharacters=[];
         this.syncMvu=createMvuSync(host,this.store,()=>!this.disposed && this.lease?.scope===this.store.scope);
         const broadcast=host.broadcast;
         host.broadcast=document=>{
@@ -60,7 +60,7 @@ export class CoopRuntime {
     }
     async loadNow() {
         this.abort();
-        this.snapshot=null;this.snapshots.clear();this.pendingMvuReports.clear();this.affinityOutcomes.clear();this.rosterWarnings.clear();
+        this.snapshot=null;this.snapshots.clear();this.pendingMvuReports.clear();this.affinityOutcomes.clear();this.pendingCharacters=[];
         this.channel?.close();this.channel=null;
         await this.releaseLease();
         try {this.store.load();} catch(error) {this.store.state=null;this.notice(error);return;}
@@ -81,29 +81,19 @@ export class CoopRuntime {
     }
     async ensureCurrentCharacters() {
         if(!this.store.document || this.store.scope!==this.host.scope() || this.store.readonly || this.disposed) return;
-        const generation=this.store.generation,scope=this.store.scope;
-        if(this.rosterTask?.generation===generation) return this.rosterTask.promise;
-        if(this.store.pending || !candidates(this.host.context()).some(p=>!this.store.document.roster[p.id])) return;
-        const promise=(async()=>{
-            for(const candidate of candidates(this.host.context())) {
-                if(generation!==this.store.generation || scope!==this.store.scope || scope!==this.host.scope() || this.disposed) fail('STALE_SCOPE');
-                if(this.store.document.roster[candidate.id]) continue;
-                try {
-                    await this.store.enqueue((document,state)=>{
-                        if(!document.roster[candidate.id]) configureRoster(document,state,{...candidate,mode:'coop'});
-                    });
-                    this.rosterWarnings.delete(candidate.id);
-                } catch(error) {
-                    if(!['AMBIGUOUS_IDENTITY','INVALID_CHARACTER','INVALID_ID','INVALID_ALIASES'].includes(error.code)) throw error;
-                    const message='自动加入“'+(candidate.name || '未命名角色')+'”失败，已跳过：'+error.message;
-                    if(this.rosterWarnings.get(candidate.id)!==message) {
-                        this.rosterWarnings.set(candidate.id,message);this.notice({code:'AUTO_ROSTER_SKIPPED',message});
-                    }
-                }
-            }
-        })();
-        const task={generation,promise};this.rosterTask=task;
-        try {await promise;} finally {if(this.rosterTask===task) this.rosterTask=null;}
+        this.pendingCharacters=candidates(this.host.context()).filter(candidate=>!this.store.document.roster[candidate.id]);
+    }
+    async enrollCard(characterId,rankCount) {
+        if(!RANK_COUNTS.includes(rankCount)) fail('INVALID_RANK_SYSTEM','请选择 4、7 或 10 阶方案');
+        const scope=this.store.scope,generation=this.store.generation;
+        await this.store.enqueue((document,state)=>{
+            if(document.roster[characterId]) fail('ALREADY_MANAGED','此角色已建档，阶级方案不可更改');
+            const candidate=candidates(this.host.context()).find(item=>item.id===characterId);
+            if(!candidate) fail('STALE_CHARACTER','当前角色卡或群成员已改变，请重新选择阶级');
+            configureRoster(document,state,{...candidate,mode:'coop',rankCount});
+        });
+        if(scope!==this.store.scope || generation!==this.store.generation || scope!==this.host.scope() || this.disposed) fail('STALE_SCOPE');
+        await this.ensureCurrentCharacters();
     }
     async acquireLease() {
         const scope=this.store.scope;
@@ -148,7 +138,7 @@ export class CoopRuntime {
             configureRoster(document,state,input);
             const nextState=project(document,this.store.sources());
             const p=nextState.profiles[roleId];
-            if(p.mode==='coop' && !p.lock && p.rank<RANK_COUNT && p.affinity>=p.thresholds[p.rank]) {
+            if(p.mode==='coop' && !p.lock && p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank]) {
                 appendOperation(document,nextState,{id:uuid(),kind:'activate',characterId:roleId,
                     data:{thresholds:clone(p.thresholds)},refs:[],mode:'coop'},this.store.sources());
             }
@@ -286,7 +276,8 @@ export class CoopRuntime {
         const byExtra=extraModel(this.host.context());
         const snapshot={nonce:'turn-'+uuid(),scope:this.store.scope,userId:user.id,userVersion:user.version,
             byExtra,reportProducer:byExtra?'external':'inline',reportChannel:'mvu',roles:{},event:null};
-        profiles.forEach(p=>{snapshot.roles[p.id]={policyRevision:p.policyRevision,locked:!!p.lock,thresholds:clone(p.thresholds)};});
+        profiles.forEach(p=>{snapshot.roles[p.id]={policyRevision:p.policyRevision,locked:!!p.lock,
+            rankCount:p.rankCount,thresholds:clone(p.thresholds)};});
         const current=this.event();
         if(current) snapshot.event={id:current.id,characterId:current.characterId,version:current.version,phase:current.phase};
         this.snapshot=snapshot;this.snapshots.set(snapshot.nonce,snapshot);
@@ -421,8 +412,16 @@ export class CoopRuntime {
         if(document?.scope!==this.store.scope) fail('STALE_SCOPE','只允许恢复当前聊天的档案');
         const restored=readDocument(document,this.store.scope);
         project(restored,this.store.sources());
+        const checkRanks=current=>{
+            for(const [id,config] of Object.entries(current.roster)) {
+                if(!restored.roster[id] || rankPolicy(restored.roster[id]).rankCount!==rankPolicy(config).rankCount) {
+                    fail('RANK_SYSTEM_LOCKED','恢复档案不能移除角色或更改已经确定的阶级方案');
+                }
+            }
+        };
+        checkRanks(this.store.document);
         this.abort();
-        return this.store.enqueue(next=>Object.assign(next,restored));
+        return this.store.enqueue(next=>{checkRanks(next);Object.assign(next,restored);});
     }
     export() {return JSON.stringify(this.store.document,null,2);}
     dispose() {this.abort();this.releaseLease();this.channel?.close();this.disposed=true;this.listeners.clear();}

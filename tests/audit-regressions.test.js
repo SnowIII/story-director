@@ -33,6 +33,9 @@ test('audit P1: a conflicting new card cannot block another member or an existin
     assert.equal(h.runtime.event().phase,'waiting_user');
     h.context.characters=[{name:'医生',avatar:'doctor.png'},{name:'旅人',avatar:'traveler.png'}];
     h.context.groupId='g';h.context.groups=[{id:'g',members:['doctor.png','traveler.png']}];
+    await h.runtime.ensureCurrentCharacters();
+    await assert.rejects(h.runtime.enrollCard(h.runtime.pendingCharacters.find(p=>p.cardRef==='doctor.png').id,7),{code:'AMBIGUOUS_IDENTITY'});
+    await h.runtime.enrollCard(h.runtime.pendingCharacters.find(p=>p.cardRef==='traveler.png').id,7);
     h.messages.push({is_user:true,mes:'我愿意帮你核对资料。'});
     await assert.doesNotReject(h.runtime.prepare());
     assert.equal(h.runtime.event().answerSource.id,h.messages.at(-1).sd_coop_id);
@@ -57,7 +60,8 @@ test('audit P1: an automatic addition queued behind a manual profile cannot over
     const blocked=h.runtime.store.enqueue(async()=>{await gate;});
     const manual=h.runtime.configure({...candidate,name:'手动名称',description:'手动补充',aliases:['手动别名'],mode:'affinity',initialAffinity:14});
     h.context.characters=[{name:'卡片名称',avatar:'manual.png'}];h.context.characterId=0;
-    const automatic=h.runtime.ensureCurrentCharacters();release();await Promise.all([blocked,manual,automatic]);
+    const automatic=h.runtime.enrollCard(candidate.id,7);release();await Promise.all([blocked,manual]);
+    await assert.rejects(automatic,{code:'ALREADY_MANAGED'});
     const p=h.runtime.state().profiles[candidate.id];
     assert.equal(p.name,'手动名称');assert.equal(p.description,'手动补充');assert.deepEqual(p.aliases,['手动别名']);
     assert.equal(p.policyRevision,1);assert.equal(p.affinity,14);assert.equal(p.mode,'affinity');
@@ -122,10 +126,11 @@ test('audit P1: a registration interrupted by chat switching cannot continue its
     t.after(()=>runtime.dispose());await runtime.load();
     context.characters=[{name:'旧群成员一',avatar:'old-1.png'},{name:'旧群成员二',avatar:'old-2.png'}];
     context.groupId='g';context.groups=[{id:'g',members:['old-1.png','old-2.png']}];
-    const adding=runtime.ensureCurrentCharacters();await started;
+    await runtime.ensureCurrentCharacters();const adding=runtime.enrollCard(runtime.pendingCharacters[0].id,7);await started;
     scope='new';metadata={};context.groupId=null;context.characterId=0;context.characters=[{name:'新角色',avatar:'new.png'}];
     const loading=runtime.load();await new Promise(resolve=>setImmediate(resolve));release();
     await assert.rejects(adding,{code:'STALE_SCOPE'});await loading;
+    await runtime.enrollCard(runtime.pendingCharacters[0].id,10);
     assert.deepEqual(Object.values(runtime.state().profiles).map(p=>p.name),['新角色']);
     assert.ok(writes.filter(w=>w.target==='new').every(w=>!w.names.some(name=>name.startsWith('旧群'))));
 });

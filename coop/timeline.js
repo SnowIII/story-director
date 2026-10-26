@@ -1,25 +1,16 @@
 import {SCHEMA,MODES,clone,fail,hash,object,thresholds,id,initialState,applyAffinity,activateGate,adoptPlan,pauseEvent,resumeEvent,
-    acceptAnswer,chooseRoute,acceptBeat,replanEvent,assertState,activeEvent} from './model.js';
+    acceptAnswer,chooseRoute,acceptBeat,replanEvent,assertState,activeEvent,rankPolicy} from './model.js';
 import {matchesSourceVersion} from './messages.js';
 export function newDocument(scope) {
     return {schemaVersion:SCHEMA,scope,revision:0,roster:{},journal:[],settings:{autoStart:false,eventRounds:3},updatedAt:null};
 }
 export function readDocument(raw,scope) {
     if(!raw) return newDocument(scope);
-    if(!object(raw) || ![1,SCHEMA].includes(raw.schemaVersion) || !object(raw.roster) || !Array.isArray(raw.journal)) fail('UNSUPPORTED_SCHEMA','Coop 存档版本不兼容，保留原档并停止写入');
+    if(!object(raw) || raw.schemaVersion!==SCHEMA || !object(raw.roster) || !Array.isArray(raw.journal)) fail('UNSUPPORTED_SCHEMA','Coop 存档结构不受支持');
     const document=clone(raw);
-    if(document.schemaVersion===1) {
-        if(document.journal.length) fail('LEGACY_PROGRESS','此聊天已有十阶旧版进度，原档已保留。请先导出旧档并迁移，不能直接按四阶重算');
-        for(const config of Object.values(document.roster)) {
-            if(!object(config)) fail('INVALID_DOCUMENT');
-            config.thresholds=thresholds();
-            config.policyRevision=(config.policyRevision || 1)+1;
-        }
-        document.schemaVersion=SCHEMA;
-    }
     for(const [key,config] of Object.entries(document.roster)) {
         if(!object(config) || id(config.id)!==key || !MODES.includes(config.mode)) fail('INVALID_DOCUMENT','角色管理档案结构不完整');
-        thresholds(config.thresholds);
+        thresholds(config.thresholds,rankPolicy(config).rankCount);
     }
     document.scope=scope;
     document.settings={autoStart:false,eventRounds:3,...document.settings};

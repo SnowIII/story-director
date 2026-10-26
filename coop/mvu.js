@@ -1,4 +1,4 @@
-import {object,clone,fail} from './model.js';
+import {object,clone,fail,rankPolicy} from './model.js';
 export function unwrap(value) {
     if(Array.isArray(value) && (value.length===1 || value.length===2 && typeof value[1]==='string')) return unwrap(value[0]);
     return value;
@@ -27,7 +27,8 @@ export function isProtectedCoopPath(path) {
 export function mergeCoopMvu(variables,state) {
     if(!state || !object(variables?.stat_data)) return false;
     const profiles=Object.fromEntries(Object.values(state.profiles).map(p=>[p.id,
-        {名称:p.name,好感度:p.affinity,Rank:p.rank,好感锁定:!!p.lock,路线:p.route,管理模式:p.mode}]));
+        {名称:p.name,好感度:p.affinity,Rank:p.rank,阶级上限:rankPolicy(p).rankCount,关系确认阶级:rankPolicy(p).relationshipRank,
+            好感锁定:!!p.lock,路线:p.route,管理模式:p.mode}]));
     const root=variables.stat_data;
     let ns=unwrap(root['故事导演']),coop=unwrap(ns?.Coop);
     if(!Object.keys(profiles).length && !coop?.角色) return false;

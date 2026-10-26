@@ -1,9 +1,11 @@
 /** Pure Coop rules. Model reports are proposals; only these transitions own progress. */
 import {parseAliases} from './identity.js';
 import {hasEvidence} from './body.js';
+import {RANK_POLICIES} from './ranks.js';
+export {RANK_COUNTS} from './ranks.js';
 export const SCHEMA = 2;
 export const MODES = ['off', 'affinity', 'coop'];
-export const THRESHOLDS = Object.freeze([30,60,90,100]);
+export const THRESHOLDS = RANK_POLICIES[4].thresholds;
 export const RANK_COUNT = THRESHOLDS.length;
 export const RELATIONSHIP_RANK = 3;
 export const PHASES = ['hook','dilemma','waiting_user','waiting_route','resolution','completed'];
@@ -23,9 +25,16 @@ export function hash(value) {
     return (a >>> 0).toString(36);
 }
 export function integer(value, min, max) { if (!Number.isInteger(value) || value < min || value > max) fail('INVALID_NUMBER'); return value; }
-export function thresholds(value = THRESHOLDS) {
-    if (!Array.isArray(value) || value.length !== RANK_COUNT || value.some((v,i)=>v!==THRESHOLDS[i])) {
-        fail('INVALID_THRESHOLDS','Coop 使用固定四阶门槛：30、60、90、100，不可单独修改');
+export function rankPolicy(value=4) {
+    const count=object(value)?value.rankCount ?? 4:value;
+    if(!Number.isInteger(count) || !Object.hasOwn(RANK_POLICIES,count)) fail('INVALID_RANK_SYSTEM','请选择 4、7 或 10 阶方案');
+    return RANK_POLICIES[count];
+}
+export function thresholds(value,rankCount=4) {
+    const expected=rankPolicy(rankCount).thresholds;
+    value=value ?? expected;
+    if (!Array.isArray(value) || value.length !== expected.length || value.some((v,i)=>v!==expected[i])) {
+        fail('INVALID_THRESHOLDS','门槛必须与已选的 '+rankCount+' 阶方案一致，不可单独修改');
     }
     return value.slice();
 }
@@ -37,7 +46,7 @@ export function newProfile(config) {
     return { id:id(config.id), name:text(config.name,100), aliases:parseAliases(config.aliases || [],config.name),description:text(config.description,12000),
         cardRef:text(config.cardRef,200), mode:config.mode || 'off', policyRevision:config.policyRevision || 1,
         affinity:integer(config.initialAffinity ?? 0,0,100), rank:0, route:'unset', lock:null,
-        thresholds:thresholds(config.thresholds), seeds:null, traits:[], facts:[], boundaries:[],
+        rankCount:rankPolicy(config).rankCount,thresholds:thresholds(config.thresholds,rankPolicy(config).rankCount), seeds:null, traits:[], facts:[], boundaries:[],
         openHooks:[], history:[], events:{}, scoreLog:[], revision:0 };
 }
 export function initialState(roster = {}) {
@@ -64,8 +73,8 @@ export function applyAffinity(state, input) {
     if (p.lock || input.lockedAtSource) reasonCode = 'AFFINITY_LOCKED';
     else {
         const proposed = Math.max(0,Math.min(100,before+delta));
-        const gates = thresholds(input.thresholds || p.thresholds);
-        if (p.mode === 'coop' && p.rank < RANK_COUNT && proposed >= gates[p.rank]) {
+        const gates = thresholds(input.thresholds || p.thresholds,p.rankCount);
+        if (p.mode === 'coop' && p.rank < p.rankCount && proposed >= gates[p.rank]) {
             p.affinity = gates[p.rank];
             p.lock = gateFor(p,input.interactionId);
         } else p.affinity = proposed;
@@ -78,8 +87,8 @@ export function applyAffinity(state, input) {
 }
 export function activateGate(state, characterId, token, gateThresholds=null) {
     const p=profileOf(state,characterId);
-    const gates=thresholds(gateThresholds || p.thresholds);
-    if (p.mode !== 'coop' || p.lock || p.rank >= RANK_COUNT || p.affinity < gates[p.rank]) return false;
+    const gates=thresholds(gateThresholds || p.thresholds,p.rankCount);
+    if (p.mode !== 'coop' || p.lock || p.rank >= p.rankCount || p.affinity < gates[p.rank]) return false;
     p.affinity=gates[p.rank]; p.lock=gateFor(p,token); p.revision++; return true;
 }
 export function activeEvent(state) {
@@ -95,7 +104,7 @@ export function validatePlan(raw, profile) {
         plan[key]=text(raw[key],key==='title'?100:1600);
         if (!plan[key]) fail('INVALID_PLAN','事件缺少字段：'+key);
     }
-    if (raw.targetRank !== profile.rank+1) fail('INVALID_RANK');
+    if (raw.targetRank !== profile.rank+1 || raw.targetRank>rankPolicy(profile).rankCount) fail('INVALID_RANK');
     plan.targetRank=raw.targetRank;
     plan.rounds=raw.rounds===2?2:3;
     const expected=profile.history.map(h=>h.eventId);
@@ -158,11 +167,11 @@ export function acceptAnswer(state,input) {
         input.source.index<=e.questionSource?.index || !text(input.source.body)) fail('WAITING_USER');
     e.initialAnswerSource=e.initialAnswerSource || clone(input.source);
     e.answerSource=clone(input.source);
-    e.phase=e.targetRank===RELATIONSHIP_RANK && !e.route ? 'waiting_route':'resolution'; e.version++; p.revision++;
+    e.phase=e.targetRank===rankPolicy(p).relationshipRank && !e.route ? 'waiting_route':'resolution'; e.version++; p.revision++;
 }
 export function chooseRoute(state,input) {
     const {p,e}=eventOf(state,input.characterId,input.eventId);
-    if (e.targetRank!==RELATIONSHIP_RANK || !['waiting_route','resolution'].includes(e.phase) || !e.answerSource || !['friendship','romance'].includes(input.route)) fail('INVALID_ROUTE');
+    if (e.targetRank!==rankPolicy(p).relationshipRank || !['waiting_route','resolution'].includes(e.phase) || !e.answerSource || !['friendship','romance'].includes(input.route)) fail('INVALID_ROUTE');
     e.route=input.route; e.routeSource=clone(e.answerSource); e.phase='resolution'; e.version++; p.revision++;
 }
 export function acceptBeat(state,input) {
@@ -172,7 +181,7 @@ export function acceptBeat(state,input) {
     if(!s || s.isUser || !s.userId || !hasEvidence(s.body,text(input.evidence))) fail('INVALID_EVIDENCE');
     if(e.playedUsers.includes(s.userId)) fail('WAITING_USER','同一用户互动只能完成一个演出阶段');
     if(input.routeConflict===true) {
-        if(e.phase!=='resolution' || e.targetRank!==RELATIONSHIP_RANK || !e.route ||
+        if(e.phase!=='resolution' || e.targetRank!==rankPolicy(p).relationshipRank || !e.route ||
             s.userId!==e.answerSource?.id || (s.userVersion && s.userVersion!==e.answerSource.version) ||
             e.answerSource.id===e.routeSource?.id && e.answerSource.version===e.routeSource.version) fail('INVALID_ROUTE');
         if(!hasEvidence(e.answerSource.body,text(input.userEvidence))) fail('INVALID_EVIDENCE');
@@ -191,11 +200,11 @@ export function completeEvent(state,input) {
     const {p,e}=eventOf(state,input.characterId,input.eventId), report=input.completion, s=input.source;
     if(e.phase!=='resolution' || !e.answerSource || s.userIndex<=e.questionSource.index) fail('WAITING_USER');
     if(s.userId!==e.answerSource.id || (s.userVersion && e.answerSource.version && s.userVersion!==e.answerSource.version)) fail('STALE_SOURCE');
-    if(e.targetRank!==p.rank+1 || e.targetRank>RANK_COUNT) fail('INVALID_RANK');
-    if(e.targetRank===RELATIONSHIP_RANK && !e.route) fail('WAITING_ROUTE');
+    if(e.targetRank!==p.rank+1 || e.targetRank>p.rankCount) fail('INVALID_RANK');
+    if(e.targetRank===rankPolicy(p).relationshipRank && !e.route) fail('WAITING_ROUTE');
     if(!object(report)) fail('SUMMARY_MISSING');
     const outcome=text(report.outcome,600), choice=text(report.choice,600);
-    const choiceSources=e.targetRank===RELATIONSHIP_RANK?[e.routeSource]:[e.initialAnswerSource,e.answerSource];
+    const choiceSources=e.targetRank===rankPolicy(p).relationshipRank?[e.routeSource]:[e.initialAnswerSource,e.answerSource];
     if(!outcome || !choice || !hasEvidence(s.body,text(report.outcomeEvidence)) ||
         !choiceSources.some(source=>hasEvidence(source?.body,text(report.choiceEvidence)))) fail('INVALID_EVIDENCE');
     let summary=text(report.summary,1200);
@@ -231,10 +240,12 @@ export function completeEvent(state,input) {
 export function assertState(state) {
     let active=0;
     for(const p of Object.values(state.profiles)) {
-        integer(p.affinity,0,100); integer(p.rank,0,RANK_COUNT); thresholds(p.thresholds);
+        const policy=rankPolicy(p);
+        integer(p.affinity,0,100); integer(p.rank,0,policy.rankCount); thresholds(p.thresholds,policy.rankCount);
         if(p.history.length!==p.rank || p.history.some((h,i)=>h.rank!==i+1 || !h.summary)) fail('HISTORY_MISSING');
         if(p.lock && (p.affinity!==p.lock.lockedValue || p.lock.targetRank!==p.rank+1)) fail('INVALID_GATE');
         for(const e of Object.values(p.events)) {
+            integer(e.targetRank,1,policy.rankCount);
             if(!PHASES.includes(e.phase)) fail('INVALID_PHASE');
             if(e.id===state.activeEventId && !e.paused && e.phase!=='completed') active++;
         }

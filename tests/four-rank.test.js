@@ -26,19 +26,10 @@ test('four narrative blueprints and the relationship prompt use the same policy'
     assert.ok(messages[0].content.includes('Rank 3'));assert.ok(!messages[0].content.includes('Rank 9'));
     assert.ok(BLUEPRINTS[2].includes('关系抉择'));assert.ok(BLUEPRINTS[3].includes('沿用已确认的关系'));
 });
-test('an old roster with no recorded progress upgrades without changing names, modes or affinity',()=>{
-    const old={schemaVersion:1,scope:'s',revision:2,roster:{a:{id:'a',name:'整合卡',description:'已有设定',mode:'affinity',
-        initialAffinity:17,thresholds:[10,20,30,40,50,60,70,80,90,100],policyRevision:1}},journal:[],settings:{autoStart:false}};
-    const before=JSON.stringify(old),document=readDocument(old,'s');
-    assert.equal(document.schemaVersion,SCHEMA);assert.equal(JSON.stringify(old),before);
-    const p=project(document,new Map()).profiles.a;
-    assert.equal(p.name,'整合卡');assert.equal(p.mode,'affinity');assert.equal(p.affinity,17);assert.equal(p.rank,0);
-    assert.deepEqual(p.thresholds,[30,60,90,100]);
-});
-test('old recorded ten-rank progress is preserved instead of silently replayed under new gates',()=>{
+test('unsupported save structures are rejected without attempting a legacy migration',()=>{
     const old={schemaVersion:1,scope:'s',roster:{},journal:[{id:'old-event',kind:'plan'}]};
     const before=JSON.stringify(old);
-    assert.throws(()=>readDocument(old,'s'),{code:'LEGACY_PROGRESS'});assert.equal(JSON.stringify(old),before);
+    assert.throws(()=>readDocument(old,'s'),{code:'UNSUPPORTED_SCHEMA'});assert.equal(JSON.stringify(old),before);
 });
 test('single-chat choices read the active card and do not invent NPCs from its description',()=>{
     const cards=[{avatar:'整合卡.png',name:'整合卡',description:'包含人物阿甲、阿乙。'},{avatar:'other.png',name:'其他卡'}];
