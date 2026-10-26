@@ -83,8 +83,8 @@ test('inline variable output remains visible and is idempotent after MVU events 
     await h.runtime.load();await h.runtime.afterMessage(index);
     assert.equal(h.profile().affinity,2);assert.equal(h.profile().scoreLog.length,1);
 });
-test('MVU completion can recover a report appended after rendering even when schema drops its field',async t=>{
-    const h=await setup(t,{extra:true}),{index,report}=await h.send(2,{via:'none'});
+test('inline-mode MVU completion can recover a report appended after rendering even when schema drops its field',async t=>{
+    const h=await setup(t),{index,report}=await h.send(2,{via:'none'});
     assert.equal(h.profile().affinity,0);
     h.messages[index].mes+=block(report);
     await h.runtime.receiveMvu({stat_data:{生命:10}});

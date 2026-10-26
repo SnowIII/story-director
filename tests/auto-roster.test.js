@@ -45,7 +45,7 @@ test('automatic management preserves an existing renamed card, NPC, score, gate 
     assert.equal(h.saved.length,writes);
 });
 
-test('group members are added atomically and new members are ready before the next turn',async t=>{
+test('group members are added once and new members are ready before the next turn',async t=>{
     const context={characters:cards,groupId:'g',groups:[{id:'g',members:['painter.png']}]},h=setup(t,{context});
     await h.runtime.load();const first=Object.values(h.runtime.state().profiles)[0];
     context.groups[0].members.push('doctor.png');h.messages.push({is_user:true,mes:'大家好。'});

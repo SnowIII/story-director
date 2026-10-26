@@ -3,6 +3,14 @@ export function unwrap(value) {
     if(Array.isArray(value) && (value.length===1 || value.length===2 && typeof value[1]==='string')) return unwrap(value[0]);
     return value;
 }
+function ensureWrappedObject(parent,key) {
+    let value=parent[key];
+    while(Array.isArray(value) && (value.length===1 || value.length===2 && typeof value[1]==='string')) {
+        parent=value;key=0;value=value[0];
+    }
+    if(value==null) parent[key]={};
+    return parent[key];
+}
 export function extraModel(context) {
     const box=context.extensionSettings?.mvu_settings || context.extension_settings?.mvu_settings || {};
     return /额外模型/.test(String(box['更新方式'] ?? box.updateMode ?? ''));
@@ -25,8 +33,8 @@ export function mergeCoopMvu(variables,state) {
     if(!Object.keys(profiles).length && !coop?.角色) return false;
     if(ns!=null && !object(ns) || coop!=null && !object(coop)) fail('INVALID_MVU_NAMESPACE','MVU 的故事导演／Coop 字段不是对象，已停止同步');
     if(JSON.stringify(coop?.角色)===JSON.stringify(profiles) && Object.hasOwn(coop,'回报')) return false;
-    if(!ns) ns=root['故事导演']={};
-    if(!coop) coop=ns.Coop={};
+    if(!ns) ns=ensureWrappedObject(root,'故事导演');
+    if(!coop) coop=ensureWrappedObject(ns,'Coop');
     if(!Object.hasOwn(coop,'回报')) coop.回报=null;
     coop.角色=profiles;
     return true;

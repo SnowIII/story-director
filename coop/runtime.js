@@ -14,7 +14,7 @@ export class CoopRuntime {
         this.host=host;this.store=new CoopStore(host);this.snapshot=null;this.snapshots=new Map();
         this.job=null;this.notices=[];this.listeners=new Set();this.scene=false;this.lease=null;
         this.disposed=false;this.queue=Promise.resolve();this.lastAutoFailure=0;this.pendingMvuReports=new Map();
-        this.affinityOutcomes=new Map();
+        this.affinityOutcomes=new Map();this.rosterWarnings=new Map();
         this.syncMvu=createMvuSync(host,this.store,()=>!this.disposed && this.lease?.scope===this.store.scope);
         const broadcast=host.broadcast;
         host.broadcast=document=>{
@@ -60,7 +60,7 @@ export class CoopRuntime {
     }
     async loadNow() {
         this.abort();
-        this.snapshot=null;this.snapshots.clear();this.pendingMvuReports.clear();this.affinityOutcomes.clear();
+        this.snapshot=null;this.snapshots.clear();this.pendingMvuReports.clear();this.affinityOutcomes.clear();this.rosterWarnings.clear();
         this.channel?.close();this.channel=null;
         await this.releaseLease();
         try {this.store.load();} catch(error) {this.store.state=null;this.notice(error);return;}
@@ -81,14 +81,27 @@ export class CoopRuntime {
     }
     async ensureCurrentCharacters() {
         if(!this.store.document || this.store.scope!==this.host.scope() || this.store.readonly || this.disposed) return;
-        const generation=this.store.generation;
+        const generation=this.store.generation,scope=this.store.scope;
         if(this.rosterTask?.generation===generation) return this.rosterTask.promise;
         if(this.store.pending || !candidates(this.host.context()).some(p=>!this.store.document.roster[p.id])) return;
-        const promise=this.store.enqueue((document,state)=>{
+        const promise=(async()=>{
             for(const candidate of candidates(this.host.context())) {
-                if(!document.roster[candidate.id]) configureRoster(document,state,{...candidate,mode:'coop'});
+                if(generation!==this.store.generation || scope!==this.store.scope || scope!==this.host.scope() || this.disposed) fail('STALE_SCOPE');
+                if(this.store.document.roster[candidate.id]) continue;
+                try {
+                    await this.store.enqueue((document,state)=>{
+                        if(!document.roster[candidate.id]) configureRoster(document,state,{...candidate,mode:'coop'});
+                    });
+                    this.rosterWarnings.delete(candidate.id);
+                } catch(error) {
+                    if(!['AMBIGUOUS_IDENTITY','INVALID_CHARACTER','INVALID_ID','INVALID_ALIASES'].includes(error.code)) throw error;
+                    const message='自动加入“'+(candidate.name || '未命名角色')+'”失败，已跳过：'+error.message;
+                    if(this.rosterWarnings.get(candidate.id)!==message) {
+                        this.rosterWarnings.set(candidate.id,message);this.notice({code:'AUTO_ROSTER_SKIPPED',message});
+                    }
+                }
             }
-        });
+        })();
         const task={generation,promise};this.rosterTask=task;
         try {await promise;} finally {if(this.rosterTask===task) this.rosterTask=null;}
     }
@@ -254,8 +267,10 @@ export class CoopRuntime {
     }
     async prepare() {
         if(!this.store.document || this.store.scope!==this.host.scope() || this.store.readonly) return;
-        await this.ensureCurrentCharacters();
-        if(!this.store.document || this.store.scope!==this.host.scope() || this.store.readonly || this.disposed) return;
+        const generation=this.store.generation,scope=this.store.scope;
+        const sameChat=()=>generation===this.store.generation && scope===this.store.scope && scope===this.host.scope() && !this.store.readonly && !this.disposed;
+        try {await this.ensureCurrentCharacters();} catch(error) {this.notice(error);}
+        if(!sameChat()) return;
         ensureMessageIds(this.host.messages());
         this.store.reconcile();
         const sources=this.store.sources(), user=[...sources.values()].filter(s=>s.isUser).at(-1);
@@ -265,10 +280,12 @@ export class CoopRuntime {
             user.index>e.questionSource.index && (e.answerSource?.id!==user.id || e.answerSource?.version!==user.version)) {
             await this.store.operation('answer',e.characterId,{eventId:e.id,source:user},[ref(user),ref(e.questionSource)]);
         }
+        if(!sameChat()) return;
         const roster=Object.values(this.state().profiles);
         const profiles=roster.filter(p=>p.mode!=='off' && (this.host.available(p,roster) || p.id===this.event()?.characterId));
+        const byExtra=extraModel(this.host.context());
         const snapshot={nonce:'turn-'+uuid(),scope:this.store.scope,userId:user.id,userVersion:user.version,
-            byExtra:extraModel(this.host.context()),reportChannel:'mvu',roles:{},event:null};
+            byExtra,reportProducer:byExtra?'external':'inline',reportChannel:'mvu',roles:{},event:null};
         profiles.forEach(p=>{snapshot.roles[p.id]={policyRevision:p.policyRevision,locked:!!p.lock,thresholds:clone(p.thresholds)};});
         const current=this.event();
         if(current) snapshot.event={id:current.id,characterId:current.characterId,version:current.version,phase:current.phase};
@@ -310,14 +327,8 @@ export class CoopRuntime {
         const reports=external?[external]:parseReports(message.mes);
         const saved=message.extra?.sdCoopReports;
         const parsed=reports.length?reports:(matchesSourceVersion(source,saved?.version)?saved.reports:[]);
-        if(reports.length) {
-            message.extra=message.extra || {};
-            message.extra.sdCoopReports={version:source.version,reports,byExtra:!!external};
-            if(!external) {
-                message.mes=stripReport(message.mes);
-                this.host.renderMessage?.(messageIndex);
-            }
-        }
+        const viaExternal=!!external || !reports.length && !!saved?.byExtra,accepted=[];
+        let rendered=false;
         for(const report of parsed) {
             const snapshot=this.snapshots.get(report.nonce) || message.extra?.sdCoopSnapshot;
             if(!snapshot || snapshot.nonce!==report.nonce || snapshot.scope!==this.store.scope ||
@@ -325,9 +336,18 @@ export class CoopRuntime {
                 for(const p of (Array.isArray(report.affinity)?report.affinity:[]).slice(0,20)) this.affinityOutcome(source,p.characterId,'INVALID_REQUEST');
                 continue;
             }
-            if(snapshot.reportChannel!=='mvu' && !!external!==snapshot.byExtra) continue;
+            const producer=snapshot.reportProducer || (snapshot.byExtra?'external':'inline');
+            if(producer==='external' && !viaExternal) continue;
+            if(!snapshot.reportProducer && snapshot.reportChannel!=='mvu' && viaExternal!==!!snapshot.byExtra) continue;
             snapshot.messageId=source.id;snapshot.messageVersion=source.version;
             message.extra=message.extra || {};message.extra.sdCoopSnapshot=clone(snapshot);
+            if(reports.length) {
+                accepted.push(report);
+                message.extra.sdCoopReports={version:source.version,reports:[...accepted],byExtra:viaExternal,reportProducer:producer};
+                if(!external && !rendered) {
+                    rendered=true;message.mes=stripReport(message.mes);this.host.renderMessage?.(messageIndex);
+                }
+            }
             for(const proposal of (Array.isArray(report.affinity)?report.affinity:[]).slice(0,20)) {
                 try {
                     const p=this.state().profiles[proposal.characterId];
@@ -368,10 +388,11 @@ export class CoopRuntime {
             const source=sourceForId(this.host.messages(),index);
             const message=this.host.messages()[index], saved=message.extra?.sdCoopReports;
             const nonce=parseReports(message.mes)[0]?.nonce;
+            const inlineSnapshot=nonce && this.snapshots.get(nonce);
             const persisted=message.extra?.sdCoopSnapshot;
             const reusable=persisted?.scope===this.store.scope && persisted.userId===source?.userId && matchesUserVersion(source,persisted.userVersion) &&
                 (matchesSourceVersion(source,persisted.messageVersion) || matchesSourceVersion(source,saved?.version));
-            assigned=(nonce && this.snapshots.get(nonce)) || (reusable?persisted:null) ||
+            assigned=(inlineSnapshot && !inlineSnapshot.byExtra && inlineSnapshot.reportProducer!=='external'?inlineSnapshot:null) || (reusable?persisted:null) ||
                 [...this.snapshots.values()].findLast(s=>s.userId===source?.userId && (!s.messageId || s.messageId===source.id));
             if(assigned && source?.userId===assigned.userId) {
                 message.extra=message.extra || {};
