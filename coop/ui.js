@@ -32,7 +32,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
             (p.mode==='coop' && unfinished?'<button data-action="'+(unfinished.paused?'resume':'pause')+'" data-id="'+esc(p.id)+'" data-event="'+esc(unfinished.id)+'">'+(unfinished.paused?'继续事件':'暂停事件')+'</button>':'')+
             (p.mode==='coop' && unfinished?.paused?'<button data-action="replan" data-id="'+esc(p.id)+'" data-event="'+esc(unfinished.id)+'">重设未演部分</button>':'')+
             '<button data-action="history" data-id="'+esc(p.id)+'">历阶摘要／档案</button></div>'+
-            '<details><summary>编辑角色说明</summary><form data-edit="'+esc(p.id)+'">'+
+            '<details class="sdc-disclosure"><summary class="sdc-disclosure-trigger"><svg class="sdc-disclosure-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15Z"/></svg><span class="sdc-disclosure-label">编辑角色说明</span><span class="sdc-disclosure-indicator" aria-hidden="true"></span></summary><form data-edit="'+esc(p.id)+'">'+
             '<label>名称<input name="name" value="'+esc(p.name)+'" placeholder="填写正文中使用的角色名或常用称呼" aria-describedby="'+helpId+'-name" required maxlength="100"></label>'+
             '<p id="'+helpId+'-name" class="sdc-field-help">用于界面显示和对话识别，建议与正文中的称呼一致。</p>'+
             '<label>别名／简称（可选）<textarea name="aliases" rows="2" maxlength="1400" placeholder="例：英妮缇雅，维赛塔&#10;同一人物的其他称呼，用逗号或换行分隔。" aria-describedby="'+helpId+'-aliases">'+esc((p.aliases || []).join('，'))+'</textarea></label>'+
@@ -44,7 +44,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
     function roles(state) {
         const list=Object.values(state.profiles);
         return '<p>固定四阶门槛：30 → 60 → 90 → 100；事件完成并归档后才解锁。</p>'+
-            '<details><summary>手动添加卡内 NPC</summary><form id="sdc-add-npc">'+
+            '<details class="sdc-disclosure"><summary class="sdc-disclosure-trigger"><svg class="sdc-disclosure-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14M5 12h14"/></svg><span class="sdc-disclosure-label">手动添加卡内 NPC</span><span class="sdc-disclosure-indicator" aria-hidden="true"></span></summary><form id="sdc-add-npc">'+
             '<label>NPC 名称<input name="name" placeholder="例：艾琳（与正文或角色设定中的称呼一致）" aria-describedby="sdc-npc-name-help" required maxlength="100"></label>'+
             '<p id="sdc-npc-name-help" class="sdc-field-help">填写要单独维护好感和 Coop 的具体人物名，便于在对话中识别。</p>'+
             '<label>别名／简称（可选）<textarea name="aliases" rows="2" maxlength="1400" placeholder="例：英妮缇雅，维赛塔&#10;同一人物的其他称呼，用逗号或换行分隔。" aria-describedby="sdc-npc-aliases-help"></textarea></label>'+
