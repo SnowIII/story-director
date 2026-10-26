@@ -10,7 +10,7 @@ export function createCoopSystem(hooks={}) {
         if(!name) return;
         events?.on?.(name,async(...args)=>{try {await handler(...args);}catch(error){runtime.notice(error);}});
     };
-    const ready=()=>runtime.store.scope===host.scope()?Promise.resolve():runtime.load();
+    const ready=()=>runtime.store.scope===host.scope()?(runtime.loading || Promise.resolve()):runtime.load();
     on(types.CHAT_CHANGED || 'chat_id_changed',async()=>{await runtime.load();});
     on(types.GENERATION_STARTED || 'generation_started',async(type,options,dryRun)=>{
         if(dryRun || ['quiet','impersonate'].includes(type)) return;

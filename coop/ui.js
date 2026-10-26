@@ -1,5 +1,4 @@
 import {text,hash,activeEvent,RANK_COUNT,RELATIONSHIP_RANK} from './model.js';
-import {candidates} from './roster.js';
 import {safeJson,uuid} from './messages.js';
 import {bindingCapability} from './mvu.js';
 const esc=value=>String(value ?? '').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
@@ -44,15 +43,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
     }
     function roles(state) {
         const list=Object.values(state.profiles);
-        const choices=candidates(runtime.host.context()), available=choices.filter(c=>!state.profiles[c.id]);
-        return '<p>只有你加入并启用的角色才会维护好感或生成 Coop。出场和被提及不会自动加入。</p>'+
-            '<p>固定四阶门槛：30 → 60 → 90 → 100；事件完成并归档后才解锁。</p>'+
-            '<form id="sdc-add-card"><label>当前角色卡／群聊成员<select name="candidate"'+(!available.length?' disabled':'')+'>'+
-            (choices.length?choices.map(c=>'<option value="'+esc(c.id)+'"'+(state.profiles[c.id]?' disabled':'')+
-                (c.id===(available[0] || choices[0]).id?' selected':'')+'>'+esc(c.name)+(state.profiles[c.id]?'（已管理）':'')+'</option>').join(''):
-                '<option value="" selected disabled>暂未读取到角色卡／群聊成员</option>')+'</select></label>'+
-            '<button type="submit"'+(!available.length?' disabled':'')+'>加入所选角色</button></form>'+
-            '<p class="sdc-note">这里读取酒馆当前角色卡或群聊成员，不会自动识别卡内 NPC。整合卡中的具体人物请用下面的「手动添加卡内 NPC」。</p>'+
+        return '<p>固定四阶门槛：30 → 60 → 90 → 100；事件完成并归档后才解锁。</p>'+
             '<details><summary>手动添加卡内 NPC</summary><form id="sdc-add-npc">'+
             '<label>NPC 名称<input name="name" placeholder="例：艾琳（与正文或角色设定中的称呼一致）" aria-describedby="sdc-npc-name-help" required maxlength="100"></label>'+
             '<p id="sdc-npc-name-help" class="sdc-field-help">填写要单独维护好感和 Coop 的具体人物名，便于在对话中识别。</p>'+
@@ -63,7 +54,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
             '<label>初始好感<input name="initialAffinity" type="number" min="0" max="100" value="0" placeholder="0～100，通常从 0 开始" aria-describedby="sdc-initial-affinity-help"></label>'+
             '<p id="sdc-initial-affinity-help" class="sdc-field-help">设定两人已有的关系基础，通常填 0。启用 Coop 且达到首阶门槛时，会封顶到 30 并锁定；Rank 仍需完成事件提升。</p>'+
             '<button type="submit">添加 NPC</button></form></details>'+
-            (list.length?list.map(card).join(''):'<p class="sdc-empty">管理名单为空。先选择角色，再开始互动。</p>');
+            (list.length?list.map(card).join(''):'<p class="sdc-empty">暂无角色档案。</p>');
     }
     function eventPage(state) {
         const event=activeEvent(state);
@@ -199,11 +190,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         event.preventDefault();const form=event.target, data=new FormData(form);
         run(async()=>{
             let input;
-            if(form.id==='sdc-add-card') {
-                const candidate=candidates(runtime.host.context()).find(c=>c.id===data.get('candidate'));
-                if(!candidate || runtime.state().profiles[candidate.id]) throw new Error('该角色已加入管理或当前角色卡已切换，请重新选择。');
-                input={...candidate,mode:'coop'};
-            } else if(form.id==='sdc-add-npc') {
+            if(form.id==='sdc-add-npc') {
                 if(Object.values(runtime.state().profiles).some(p=>p.name===text(data.get('name'),100))) throw new Error('同名角色已有档案。');
                 input={id:'npc:'+uuid(),name:data.get('name'),aliases:data.get('aliases'),description:data.get('description'),
                     mode:'coop',initialAffinity:Number(data.get('initialAffinity'))};

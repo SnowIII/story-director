@@ -1,6 +1,6 @@
 import {clone,fail,text,hash,activeEvent,profileOf,historySignature,RANK_COUNT} from './model.js';
 import {CoopStore} from './store.js';
-import {configureRoster} from './roster.js';
+import {configureRoster,candidates} from './roster.js';
 import {appendOperation,project,readDocument} from './timeline.js';
 import {validateAffinityProposal} from './affinity.js';
 import {continuity,publicMemory} from './history.js';
@@ -76,7 +76,21 @@ export class CoopRuntime {
                 this.changed();
             };
         }
+        try {await this.ensureCurrentCharacters();} catch(error) {this.notice(error);}
         this.changed();
+    }
+    async ensureCurrentCharacters() {
+        if(!this.store.document || this.store.scope!==this.host.scope() || this.store.readonly || this.disposed) return;
+        const generation=this.store.generation;
+        if(this.rosterTask?.generation===generation) return this.rosterTask.promise;
+        if(this.store.pending || !candidates(this.host.context()).some(p=>!this.store.document.roster[p.id])) return;
+        const promise=this.store.enqueue((document,state)=>{
+            for(const candidate of candidates(this.host.context())) {
+                if(!document.roster[candidate.id]) configureRoster(document,state,{...candidate,mode:'coop'});
+            }
+        });
+        const task={generation,promise};this.rosterTask=task;
+        try {await promise;} finally {if(this.rosterTask===task) this.rosterTask=null;}
     }
     async acquireLease() {
         const scope=this.store.scope;
@@ -106,6 +120,7 @@ export class CoopRuntime {
     async takeover() {
         await this.host.reload?.();
         await this.acquireLease();
+        await this.ensureCurrentCharacters();
     }
     abort() {const job=this.job;if(job){job.controller.abort();this.job=null;this.changed();}}
     async configure(input) {
@@ -239,6 +254,8 @@ export class CoopRuntime {
     }
     async prepare() {
         if(!this.store.document || this.store.scope!==this.host.scope() || this.store.readonly) return;
+        await this.ensureCurrentCharacters();
+        if(!this.store.document || this.store.scope!==this.host.scope() || this.store.readonly || this.disposed) return;
         ensureMessageIds(this.host.messages());
         this.store.reconcile();
         const sources=this.store.sources(), user=[...sources.values()].filter(s=>s.isUser).at(-1);
