@@ -150,17 +150,20 @@ export class CoopRuntime {
         const job={id:uuid(),characterId,controller,scope};this.job=job;this.changed();
         try {
             let context=await this.host.contextText(p);
-            context+='\n【本事件指定轮数】'+this.store.document.settings.eventRounds+'；2轮把切入与困境合并，3轮分别演绎。';
+            const rounds=existing?.progress.length?existing.plan.rounds:this.store.document.settings.eventRounds;
+            context+='\n【本事件指定轮数】'+rounds+'；2轮把切入与困境合并，3轮分别演绎。';
             context+='\n【共享世界事实；角色只可使用其已知信息】\n'+JSON.stringify(this.state().sharedFacts);
             if(existing) context+='\n【只重设未演部分，不改已发生事实】\n'+JSON.stringify({phase:existing.phase,
-                progress:existing.progress,question:existing.plan.question,answer:existing.answerSource?.body});
+                plan:existing.plan,progress:existing.progress,initialAnswer:existing.initialAnswerSource?.body,
+                answer:existing.answerSource?.body,route:existing.route,routeResponse:existing.routeSource?.body});
             if(controller.signal.aborted) fail('CANCELLED');
             const messages=designMessages(p,context);
             const raw=await this.host.ask(messages,controller.signal,()=>this.changed());
             if(controller.signal.aborted || this.job!==job || this.store.scope!==scope) fail('STALE_TASK');
             ensureMessageIds(this.host.messages());
             const fresh=profileOf(this.state(),characterId);
-            if(fresh.mode!=='coop' || fresh.policyRevision!==policy || fresh.lock?.id!==gate || hash(continuity(fresh))!==history) fail('STALE_TASK');
+            if(fresh.mode!=='coop' || fresh.policyRevision!==policy || fresh.lock?.id!==gate || hash(continuity(fresh))!==history ||
+                existing && fresh.events[existing.id]?.version!==existing.version) fail('STALE_TASK');
             if(JSON.stringify([...this.store.sources().values()].slice(-24).map(ref))!==contextKey) fail('STALE_TASK','生成期间场景发生变化，请重试设计');
             const parsed=modelJson(raw);
             const map=this.store.sources(), last=[...map.values()].filter(s=>!s.isSystem).at(-1);
@@ -213,19 +216,21 @@ export class CoopRuntime {
             const messages=[{role:'system',content:[
                 '仅为已经发生的 Coop 事件核对并补齐归档，不继续创作剧情，不代写用户行动。',
                 '若现有正文未实际达到本阶局部目标，输出 {"ready":false,"reason":"缺什么"}。',
+                '若最新回应明确改变已确认的关系路线，输出 {"ready":false,"routeConflict":true,"userEvidence":"最新用户原文","evidence":"正文承接该变化的原文"}，等待面板重新确认。',
                 '若已完成，输出 {"ready":true,"evidence":"收束正文准确短句","completion":{summary,outcome,outcomeEvidence,choice,choiceEvidence,traits:[],facts:[],boundaries:[],openHooks:[],closedHooks:[],conflicts:[]}}。',
                 '所有依据必须逐字引用提供的原文。摘要约100～200字，区分事实、猜测和未解决事项。只输出JSON。'
             ].join('\n')},{role:'user',content:JSON.stringify({targetRank:event.targetRank,goal:event.plan.goal,
-                route:event.route,question:event.plan.question,userResponse:event.answerSource.body,
+                route:event.route,question:event.plan.question,initialUserResponse:event.initialAnswerSource?.body,userResponse:event.answerSource.body,
                 routeResponse:event.routeSource?.body,currentReply:source.body,
                 earlierActs:event.progress.map(v=>({phase:v.phase,evidence:v.evidence})),history:continuity(p)})}];
             const raw=await this.host.ask(messages,controller.signal);
             if(controller.signal.aborted || this.job!==job || this.store.scope!==scope ||
                 this.event()?.version!==version || this.store.sources().get(source.id)?.version!==source.version) fail('STALE_TASK');
             const result=modelJson(raw);
-            if(result.ready!==true) fail('NOT_COMPLETE',text(result.reason,400) || '当前正文尚未达到收束条件');
+            if(result.ready!==true && result.routeConflict!==true) fail('NOT_COMPLETE',text(result.reason,400) || '当前正文尚未达到收束条件');
             await this.store.operation('beat',p.id,{eventId:event.id,characterId:p.id,eventVersion:version,
-                phase:'resolution',source,evidence:result.evidence,completion:result.completion},references(source),
+                phase:'resolution',source,evidence:result.evidence,completion:result.completion,
+                routeConflict:result.routeConflict,userEvidence:result.userEvidence},references(source),
                 'archive:'+event.id+':'+source.id+':'+source.version);
         } catch(error) {if(!['CANCELLED','STALE_TASK'].includes(error.code)) this.notice(error);throw error;}
         finally {if(this.job===job){this.job=null;this.changed();}}

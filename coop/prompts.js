@@ -44,10 +44,11 @@ export function renderScene(profile,event) {
     else if(event.phase==='dilemma') lines.push('本轮只演困境：'+p.dilemma,'向用户提出核心问题：'+p.question,'在问题处停笔，严禁自己补出用户答案或收尾。');
     else if(event.phase==='waiting_user') lines.push('核心问题已提出：'+p.question,'等待用户真正回应，不替他回答，不重复演开场。');
     else if(event.phase==='waiting_route') lines.push('正在等待用户在 Coop 面板明确确认恋人／挚友路线。可以接住情绪，不预写告白结果或亲密行为，不结算。');
-    else if(event.phase==='resolution') lines.push('用户实际回应：'+event.answerSource?.body,
+    else if(event.phase==='resolution') lines.push('用户首次回应：'+(event.initialAnswerSource || event.answerSource)?.body,
+        '用户最新回应：'+event.answerSource?.body,'结合首次选择与最新补充收束；普通闲聊不覆盖先前明确的选择。',
         '已明确的路线：'+(event.route || profile.route),'本轮收束条件：'+p.resolution,
         ...(event.routeSource?['路线确认对应的真实回应：'+event.routeSource.body,
-            '如果用户最新回应与所选路线冲突，尊重最新回应，报告 conflicts 并等待用户在面板改选，不强行结算。']:[]),
+            '如果用户最新回应与所选路线冲突，尊重最新回应，回报 routeConflict:true 及 userEvidence 原文，等待面板重新确认，不报完成。']:[]),
         '只根据真实回应演绎人物变化、局部结果与余温，不提前开下一阶。',
         '本阶成长目标：'+p.goal);
     lines.push(publicMemory(profile));
@@ -73,10 +74,12 @@ export function reportContract(profiles,event,snapshot,byExtra=false) {
         '所有 evidence 必须准确引用对应消息原文；只引用已发生事实，不能把猜测写成事实或代写用户行为。',
         'event 回报仅在当前 phase 的任务完整写进正文后提供；waiting_user／waiting_route 不报完成。每次回复最多完成当前一幕。',
         'resolution 的 completion 必须包含实际选择、局部结果、人物变化、未解决与已回收伏笔，以及完整简短摘要。不可只写“任务完成”。',
+        'completion.choiceEvidence 可引用用户首次或最新回应中的真实选择；普通闲聊不覆盖首次选择。Rank 3 必须引用路线确认时的回应。',
         '若共享 NPC／信物状态实际变化，可在 completion.sharedFacts 填 [{entityId:"稳定英文ID",name:"实体名",fact:"新事实",previousFact:"已有旧事实原文",evidence:"正文准确短句",knownBy:["user","当前角色ID"]}]；没有变化用空数组。',
         '不要直接修改好感、Rank、锁、路线、管理名单或档案；程序负责校验和保存。JSON 范例的说明文字要换成真实内容；无变化可用空 affinity 数组。',
         JSON.stringify(sample)];
-    if(event?.routeSource) lines.push('本阶 completion.choiceEvidence 应引用路线确认对应回应的准确短句：'+event.routeSource.body);
+    if(event?.routeSource) lines.push('本阶 completion.choiceEvidence 应引用路线确认对应回应的准确短句：'+event.routeSource.body,
+        '若最新回应明确改变已确认的关系路线，event 使用 routeConflict:true、userEvidence:最新用户原文、evidence:正文接住该变化的原文，省略 completion。程序退回等待面板确认；普通补充不报冲突。');
     if(byExtra) lines.push('当前采用额外变量模型回填：正文不输出 CoopReport；变量模型把上述完整 JSON 写入 _.set(\'故事导演.Coop.回报\', JSON对象);。必须原样携带 nonce；不要写好感或 Rank。');
     else lines.push('在正文末尾仅附一个 <CoopReport>完整JSON</CoopReport>，不使用代码围栏。程序采集后移除，不把报告当作正文。');
     return lines.join('\n');

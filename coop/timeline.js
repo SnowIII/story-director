@@ -34,6 +34,16 @@ export function roleSignature(state,characterId) {
     return hash(JSON.stringify({rank:p.rank,affinity:p.affinity,lock:p.lock,
         history:p.history.map(h=>h.eventId),events:Object.values(p.events).map(e=>[e.id,e.version,e.phase,e.paused])}));
 }
+function operationDependencies(state,op) {
+    const p=state.profiles[op.characterId],e=p?.events[op.data?.eventId];
+    const sourceRef=source=>source?{id:source.id,version:source.version}:null;
+    // Recheck thresholds in the model; unrelated totals and events are not prerequisites.
+    return {rank:p?.rank,route:p?.route,gate:p?.lock?clone(p.lock):null,history:p?.history.map(h=>h.eventId) || [],
+        event:e?hash(JSON.stringify({id:e.id,version:e.version,phase:e.phase,paused:e.paused,plan:e.plan,
+            history:e.historySignature,progress:e.progress.map(step=>[step.phase,sourceRef(step.source)]),
+            question:sourceRef(e.questionSource),initialAnswer:sourceRef(e.initialAnswerSource),
+            answer:sourceRef(e.answerSource),route:e.route,routeSource:sourceRef(e.routeSource)})):null};
+}
 export function applyOperation(state,op) {
     const p=state.profiles[op.characterId], oldMode=p?.mode;
     if(p && op.mode) p.mode=op.mode;
@@ -71,7 +81,8 @@ export function project(document,sources) {
         const dependencyValid=op.kind==='affinity' ?
             (op.affinityHistory!==undefined ? Array.isArray(op.affinityHistory) && JSON.stringify(op.affinityHistory)===JSON.stringify(history) :
                 !op.precondition || op.precondition===roleSignature(state,op.characterId) || !hadCompletion && !history.length) :
-            !op.precondition || op.precondition===roleSignature(state,op.characterId);
+            op.dependencies!==undefined ? JSON.stringify(op.dependencies)===JSON.stringify(operationDependencies(state,op)) :
+                !op.precondition || op.precondition===roleSignature(state,op.characterId);
         if(!dependencyValid) {
             skipped.push({id:op.id,code:'STALE_DEPENDENCY'});continue;
         }
@@ -110,6 +121,7 @@ export function appendOperation(document,state,op,sources) {
     const durable=clone(op);
     durable.precondition=roleSignature(state,op.characterId);
     if(op.kind==='affinity') durable.affinityHistory=state.profiles[op.characterId].history.map(h=>h.eventId);
+    else durable.dependencies=operationDependencies(state,op);
     if(durable.data?.source?.id) durable.data.source={id:durable.data.source.id,version:durable.data.source.version};
     document.journal.push(durable);
     return candidate;

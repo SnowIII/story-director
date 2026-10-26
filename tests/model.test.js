@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {initialState,applyAffinity,adoptPlan,acceptBeat,acceptAnswer,chooseRoute,pauseEvent,resumeEvent,assertState,validatePlan,THRESHOLDS} from '../coop/model.js';
+import {initialState,applyAffinity,adoptPlan,acceptBeat,acceptAnswer,chooseRoute,pauseEvent,resumeEvent,replanEvent,assertState,validatePlan,THRESHOLDS,clone} from '../coop/model.js';
 import {continuity} from '../coop/history.js';
 import {configureRoster} from '../coop/roster.js';
 import {newDocument,project,appendOperation} from '../coop/timeline.js';
@@ -223,6 +223,72 @@ test('a new reply after Rank 3 route confirmation does not loop back to route ch
     chooseRoute(s,{characterId:'a',eventId:e.id,route:'friendship'});
     acceptAnswer(s,{characterId:'a',eventId:e.id,source:{id:'u4',index:7,isUser:true,body:'继续说吧。'}});
     assert.equal(e.phase,'resolution');assert.equal(e.route,'friendship');assert.equal(e.routeSource.id,'u3');
+    assert.equal(e.initialAnswerSource.id,'u3');assert.equal(e.answerSource.id,'u4');
     acceptBeat(s,{characterId:'a',eventId:e.id,eventVersion:e.version,phase:'resolution',evidence:'核对资料',source:source('u4',8,'她决定核对资料。'),completion:completion()});
     assert.equal(s.profiles.a.rank,3);
+});
+
+for(const phase of ['hook','dilemma','waiting_user','waiting_route','resolution']) test('replan freezes performed material at '+phase,()=>{
+    const s=state(),rank=['waiting_route','resolution'].includes(phase)?3:1;
+    for(let r=1;r<rank;r++) finish(s,start(s,r));
+    const e=start(s,rank);e.plan.rounds=3;
+    if(phase!=='hook') acceptBeat(s,{characterId:'a',eventId:e.id,eventVersion:e.version,phase:'hook',evidence:'旧画册',source:source('u1',2)});
+    if(!['hook','dilemma'].includes(phase)) acceptBeat(s,{characterId:'a',eventId:e.id,eventVersion:e.version,phase:'dilemma',evidence:'提出问题',source:source('u2',4)});
+    if(['waiting_route','resolution'].includes(phase)) acceptAnswer(s,{characterId:'a',eventId:e.id,source:{id:'u3',index:5,isUser:true,body:'我愿意帮你。'}});
+    if(phase==='resolution') chooseRoute(s,{characterId:'a',eventId:e.id,route:'friendship'});
+    assert.equal(e.phase,phase);pauseEvent(s,'a',e.id);
+    const before=clone(e),replacement={...plan(s.profiles.a),rounds:2};
+    for(const key of ['title','scene','conflict','goal','hook','dilemma','question','resolution']) replacement[key]='重设：'+replacement[key];
+    replanEvent(s,{characterId:'a',eventId:e.id,plan:replacement});
+    for(const key of ['title','scene','conflict','goal','hook','rounds']) assert.equal(e.plan[key],phase==='hook'?replacement[key]:before.plan[key]);
+    for(const key of ['dilemma','question']) assert.equal(e.plan[key],e.questionSource?before.plan[key]:replacement[key]);
+    assert.equal(e.plan.resolution,replacement.resolution);
+    for(const key of ['phase','progress','playedUsers','questionSource','initialAnswerSource','answerSource','route','routeSource']) assert.deepEqual(e[key],before[key]);
+    resumeEvent(s,'a',e.id);assert.equal(e.phase,phase);assertState(s);
+});
+test('a performed two-round opening keeps both its dilemma and question when replanned',()=>{
+    const s=state(),e=start(s);e.plan.rounds=2;
+    acceptBeat(s,{characterId:'a',eventId:e.id,eventVersion:e.version,phase:'hook',evidence:'提出问题',source:source('u1',2)});
+    pauseEvent(s,'a',e.id);const before=clone(e.plan);
+    replanEvent(s,{characterId:'a',eventId:e.id,plan:{...plan(s.profiles.a),rounds:3,hook:'新开场',dilemma:'新困境',question:'新问题'}});
+    assert.equal(e.plan.rounds,2);assert.equal(e.plan.hook,before.hook);
+    assert.equal(e.plan.dilemma,before.dilemma);assert.equal(e.plan.question,before.question);
+    resumeEvent(s,'a',e.id);
+    acceptAnswer(s,{characterId:'a',eventId:e.id,source:{id:'u2',index:3,isUser:true,body:'我愿意帮你处理这件事。'}});
+    acceptBeat(s,{characterId:'a',eventId:e.id,eventVersion:e.version,phase:'resolution',evidence:'核对资料',source:source('u2',4,'她决定核对资料。'),completion:completion()});
+    assert.equal(s.profiles.a.rank,1);
+});
+test('consecutive resolution inputs preserve the original choice and bind completion to the latest input',()=>{
+    const s=state(),e=start(s);
+    acceptBeat(s,{characterId:'a',eventId:e.id,eventVersion:e.version,phase:'hook',evidence:'旧画册',source:source('u1',2)});
+    acceptBeat(s,{characterId:'a',eventId:e.id,eventVersion:e.version,phase:'dilemma',evidence:'提出问题',source:source('u2',4)});
+    const answer={id:'u3',version:'v3',index:5,isUser:true,body:'我愿意帮你处理这件事。'};
+    acceptAnswer(s,{characterId:'a',eventId:e.id,source:answer});const oldVersion=e.version;
+    acceptAnswer(s,{characterId:'a',eventId:e.id,source:{id:'u4',version:'v4',index:6,isUser:true,body:'先坐下来吧。'}});
+    acceptAnswer(s,{characterId:'a',eventId:e.id,source:{id:'u5',version:'v5',index:7,isUser:true,body:'慢慢来。'}});
+    assert.deepEqual(e.initialAnswerSource,answer);assert.equal(e.answerSource.id,'u5');
+    assert.throws(()=>acceptBeat(s,{characterId:'a',eventId:e.id,eventVersion:oldVersion,phase:'resolution',evidence:'核对资料',source:source('u3',8,'她决定核对资料。'),completion:completion()}),{code:'STALE_EVENT'});
+    acceptBeat(s,{characterId:'a',eventId:e.id,eventVersion:e.version,phase:'resolution',evidence:'核对资料',source:source('u5',8,'她决定核对资料。'),completion:completion()});
+    assert.equal(s.profiles.a.rank,1);assert.equal(s.profiles.a.history[0].initialAnswerSource.id,'u3');
+    assert.equal(s.profiles.a.history[0].answerSource.id,'u5');
+});
+test('a grounded Rank 3 route conflict requires explicit confirmation before completion',()=>{
+    const s=state();for(let r=1;r<3;r++) finish(s,start(s,r));const e=start(s,3);
+    acceptBeat(s,{characterId:'a',eventId:e.id,eventVersion:e.version,phase:'hook',evidence:'旧画册',source:source('u1',2)});
+    acceptBeat(s,{characterId:'a',eventId:e.id,eventVersion:e.version,phase:'dilemma',evidence:'提出问题',source:source('u2',4)});
+    acceptAnswer(s,{characterId:'a',eventId:e.id,source:{id:'u3',index:5,isUser:true,body:'我愿意成为恋人。'}});
+    chooseRoute(s,{characterId:'a',eventId:e.id,route:'romance'});
+    acceptAnswer(s,{characterId:'a',eventId:e.id,source:{id:'u4',index:7,isUser:true,body:'我只想和你做朋友。'}});
+    const version=e.version,proposal={characterId:'a',eventId:e.id,eventVersion:version,phase:'resolution',routeConflict:true,
+        evidence:'尊重你的选择',userEvidence:'只想和你做朋友',source:source('u4',8,'她决定尊重你的选择。')};
+    assert.throws(()=>acceptBeat(s,{...proposal,userEvidence:'并未说过的话'}),{code:'INVALID_EVIDENCE'});
+    acceptBeat(s,proposal);
+    assert.equal(e.phase,'waiting_route');assert.equal(e.route,null);assert.equal(e.routeSource,null);
+    assert.equal(s.profiles.a.rank,2);assert.ok(s.profiles.a.lock);
+    chooseRoute(s,{characterId:'a',eventId:e.id,route:'friendship'});
+    assert.equal(e.routeSource.id,'u4');
+    assert.throws(()=>acceptBeat(s,proposal),{code:'STALE_EVENT'});
+    const report={...completion(),choice:'做朋友',choiceEvidence:'只想和你做朋友'};
+    acceptBeat(s,{characterId:'a',eventId:e.id,eventVersion:e.version,phase:'resolution',evidence:'核对资料',source:source('u4',9,'她决定核对资料。'),completion:report});
+    assert.equal(s.profiles.a.rank,3);assert.equal(s.profiles.a.route,'friendship');
 });

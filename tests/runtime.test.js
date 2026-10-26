@@ -243,3 +243,150 @@ test('points earned after an invalidated Rank keep their actual arc dependency',
     assert.equal(h.runtime.state().profiles.a.rank,0);assert.equal(h.runtime.state().profiles.a.affinity,30);
     assert.equal(h.runtime.state().skipped.find(op=>op.id===scoreId).code,'STALE_DEPENDENCY');
 });
+
+for(const change of ['edit','delete','swipe']) for(const delta of [4,5]) test('an invalid earlier score preserves a later gate only while its threshold still holds, '+change+', delta='+delta,async t=>{
+    const h=await setup(t);await h.configure('affinity',25);
+    const first=await h.send('我来帮你。','她放松了。',h.score(2));
+    await h.send('我继续帮你。','她放松了。',h.score(delta));
+    await h.runtime.configure({...h.runtime.state().profiles.a,mode:'coop',acceptCap:true});
+    await h.runtime.generate('a');const eventId=h.runtime.event().id;
+    await h.send('我问起画册。','她带来了旧画册。',snapshot=>({event:{eventId:snapshot.event.id,characterId:'a',eventVersion:snapshot.event.version,phase:'hook',evidence:'旧画册'}}));
+    if(change==='edit') h.messages[first].mes='她拒绝了帮助。';
+    if(change==='delete') h.messages.splice(first-1,2);
+    if(change==='swipe') h.messages[first].swipe_id=1;
+    h.runtime.store.reconcile();
+    if(delta===5) {
+        assert.equal(h.runtime.event()?.id,eventId);assert.equal(h.runtime.event().phase,'dilemma');
+        assert.equal(h.runtime.state().profiles.a.affinity,30);
+        assert.deepEqual(h.runtime.state().skipped.map(op=>op.code),['STALE_SOURCE']);
+        await h.runtime.load();assert.equal(h.runtime.event()?.id,eventId);
+    } else {
+        assert.equal(h.runtime.event(),null);assert.equal(h.runtime.state().profiles.a.lock,null);
+        assert.equal(h.runtime.state().profiles.a.affinity,29);
+    }
+});
+test('legacy event journals retain conservative preconditions when dependencies are unknown',async t=>{
+    const h=await setup(t);await h.configure('affinity',25);
+    const first=await h.send('我来帮你。','她放松了。',h.score(2));
+    await h.send('我继续帮你。','她放松了。',h.score(5));
+    await h.runtime.configure({...h.runtime.state().profiles.a,mode:'coop',acceptCap:true});await h.runtime.generate('a');
+    for(const op of h.runtime.store.document.journal) delete op.dependencies;
+    h.messages[first].mes='她拒绝了帮助。';h.runtime.store.reconcile();
+    assert.equal(h.runtime.event(),null);
+    assert.ok(h.runtime.state().skipped.some(op=>op.code==='STALE_DEPENDENCY'));
+});
+test('replanning after the opening keeps the original rounds in both the request and the resumed event',async t=>{
+    const h=await setup(t);await unlockAndStart(h);
+    await h.send('我问起画册。','她带来了旧画册。',snapshot=>({event:{eventId:snapshot.event.id,characterId:'a',eventVersion:snapshot.event.version,phase:'hook',evidence:'旧画册'}}));
+    const eventId=h.runtime.event().id,original=clone(h.runtime.event().plan);
+    await h.runtime.pause('a',eventId);await h.runtime.configureSettings({eventRounds:2});let request;
+    h.host.ask=async messages=>{request=messages;return JSON.stringify({...eventPlan(h.runtime.state().profiles.a),rounds:2,hook:'另一个开场'});};
+    await h.runtime.generate('a',{replanEventId:eventId});await h.runtime.resume('a',eventId);
+    assert.ok(request[1].content.includes('【本事件指定轮数】3'));
+    assert.ok(request[1].content.includes(original.hook));
+    assert.equal(h.runtime.event().plan.rounds,3);assert.equal(h.runtime.event().plan.hook,original.hook);
+    await h.send('请继续说。','她提出疑问，等待回应。',snapshot=>({event:{eventId:snapshot.event.id,characterId:'a',eventVersion:snapshot.event.version,phase:'dilemma',evidence:'等待回应'}}));
+    assert.equal(h.runtime.event().phase,'waiting_user');
+});
+test('consecutive resolution inputs retain the first answer in prompts and archive recovery',async t=>{
+    const h=await setup(t);await unlockAndStart(h);await progressToResolution(h);
+    h.messages.push({is_user:true,mes:'我愿意帮你核对资料。'});await h.runtime.prepare();
+    const first=h.messages.at(-1).sd_coop_id;
+    h.messages.push({is_user:true,mes:'先坐下来吧。'});await h.runtime.prepare();
+    h.messages.push({is_user:true,mes:'慢慢来。'});await h.runtime.prepare();
+    const version=h.runtime.event().version;
+    await h.runtime.prepare();assert.equal(h.runtime.event().version,version);
+    assert.equal(h.runtime.event().initialAnswerSource.id,first);
+    assert.ok(h.runtime.injection().includes('我愿意帮你核对资料。'));
+    assert.ok(h.runtime.injection().includes('慢慢来。'));
+    await h.reply('她决定核对资料，接受有限帮助。');let request;
+    h.host.ask=async messages=>{
+        request=messages;
+        return JSON.stringify({ready:true,evidence:'核对资料',completion:{
+            summary:'用户愿意共同核对画册资料，随后请她坐下慢慢来。她接受有限帮助，并保留自己的判断，展览问题留待后续处理。',
+            outcome:'核对资料并接受帮助',outcomeEvidence:'接受有限帮助',choice:'愿意核对资料',choiceEvidence:'愿意帮你',
+            traits:['接受有限帮助'],facts:[],boundaries:[],openHooks:[],closedHooks:[]}});
+    };
+    await h.runtime.recoverArchive();
+    assert.ok(request[1].content.includes('我愿意帮你核对资料。'));
+    assert.ok(request[1].content.includes('慢慢来。'));
+    assert.equal(h.runtime.state().profiles.a.rank,1);
+    const archive=h.runtime.state().profiles.a.history[0];
+    assert.equal(archive.initialAnswerSource.id,first);
+    assert.equal(archive.answerSource.id,h.messages.at(-2).sd_coop_id);
+    await h.runtime.load();assert.equal(h.runtime.state().profiles.a.history[0].initialAnswerSource.id,first);
+});
+
+for(const recovery of [false,true]) test('Rank 3 route conflict survives persistence and requires a new choice, archive='+recovery,async t=>{
+    const h=await setup(t,{extra:!recovery});await h.configure();
+    for(let rank=1;rank<=3;rank++) {
+        while(h.runtime.state().profiles.a.affinity<h.runtime.state().profiles.a.thresholds[rank-1]) await h.send('我继续帮你。','她放松了。',h.score(5));
+        await h.runtime.generate('a');await progressToResolution(h);
+        if(rank===3) break;
+        await h.send('我愿意帮你核对资料。','她决定核对资料，接受有限帮助。',snapshot=>({event:{
+            eventId:snapshot.event.id,characterId:'a',eventVersion:snapshot.event.version,phase:'resolution',evidence:'核对资料',
+            completion:{summary:'她说明画册和导师要求之间的矛盾，用户愿意共同核对资料。她接受有限帮助，保留自己的判断，展览问题仍未解决。',
+                outcome:'核对资料',outcomeEvidence:'核对资料',choice:'愿意帮助',choiceEvidence:'愿意帮你',
+                traits:['接受有限帮助'],facts:[],boundaries:[],openHooks:[],closedHooks:[]}}}));
+    }
+    await h.send('我愿意成为恋人。','她等待你确认关系。');
+    const firstAnswer=h.runtime.event().answerSource.id;
+    await h.runtime.route('romance');
+    const conflict=await h.send('我只想和你做朋友。','她决定尊重你的选择。',snapshot=>recovery?{}:{event:{
+        eventId:snapshot.event.id,characterId:'a',eventVersion:snapshot.event.version,phase:'resolution',
+        routeConflict:true,userEvidence:'只想和你做朋友',evidence:'尊重你的选择'}});
+    if(recovery) {
+        h.host.ask=async()=>JSON.stringify({ready:false,routeConflict:true,userEvidence:'只想和你做朋友',evidence:'尊重你的选择'});
+        await h.runtime.recoverArchive();
+    }
+    assert.equal(h.runtime.event().phase,'waiting_route');assert.equal(h.runtime.event().route,null);
+    assert.equal(h.runtime.state().profiles.a.rank,2);assert.ok(h.runtime.state().profiles.a.lock);
+    await h.runtime.load();assert.equal(h.runtime.event().phase,'waiting_route');
+    await h.runtime.route('friendship');await h.runtime.prepare();
+    const snapshot=h.runtime.snapshot;
+    await h.reply('她决定核对资料，接受有限帮助。',{event:{eventId:snapshot.event.id,characterId:'a',eventVersion:snapshot.event.version,phase:'resolution',evidence:'核对资料',
+        completion:{summary:'用户在危机后明确选择伙伴关系，她尊重了新的选择。两人决定共同核对展览资料，她接受有限帮助并保留自己的判断。',
+            outcome:'核对资料并保持伙伴关系',outcomeEvidence:'核对资料',choice:'做朋友',choiceEvidence:'只想和你做朋友',
+            traits:['尊重关系边界'],facts:[],boundaries:['伙伴关系'],openHooks:[],closedHooks:[]}}});
+    assert.equal(h.runtime.state().profiles.a.rank,3);assert.equal(h.runtime.state().profiles.a.route,'friendship');
+    assert.equal(h.runtime.state().profiles.a.history.at(-1).initialAnswerSource.id,firstAnswer);
+    await h.runtime.load();assert.equal(h.runtime.state().profiles.a.route,'friendship');
+    h.messages[conflict].mes='她还未回应。';h.runtime.store.reconcile();
+    assert.equal(h.runtime.state().profiles.a.rank,2);assert.ok(h.runtime.state().profiles.a.lock);
+});
+test('replan generation is rejected when its paused event changes without new messages',async t=>{
+    const h=await setup(t);await unlockAndStart(h);const eventId=h.runtime.event().id;
+    await h.runtime.pause('a',eventId);let release;
+    h.host.ask=()=>new Promise(resolve=>{release=resolve;});
+    const pending=h.runtime.generate('a',{replanEventId:eventId});await new Promise(resolve=>setTimeout(resolve,0));
+    await h.runtime.resume('a',eventId);await h.runtime.pause('a',eventId);
+    release(JSON.stringify(eventPlan(h.runtime.state().profiles.a)));
+    await assert.rejects(pending,{code:'STALE_TASK'});
+    assert.equal(h.runtime.state().profiles.a.events[eventId].paused,true);
+    assert.equal(h.runtime.store.document.journal.filter(op=>op.kind==='replan').length,0);
+});
+
+for(const change of ['edit','delete']) test('a resolution source invalidated during saving never publishes its Rank, '+change,async t=>{
+    const h=await setup(t);await unlockAndStart(h);await progressToResolution(h);
+    const published=[],persist=h.host.persist;
+    const unsubscribe=h.runtime.onChange(()=>published.push(h.runtime.state().profiles.a.rank));t.after(unsubscribe);
+    let release,entered;
+    const saving=new Promise(resolve=>{entered=resolve;});
+    h.host.persist=async document=>{
+        if(document.journal.at(-1)?.kind==='beat' && document.journal.at(-1).data.phase==='resolution') {
+            entered();await new Promise(resolve=>{release=resolve;});
+        }
+        await persist(document);
+    };
+    const pending=h.send('我愿意帮你核对资料。','她决定核对资料，接受有限帮助。',snapshot=>({event:{
+        eventId:snapshot.event.id,characterId:'a',eventVersion:snapshot.event.version,phase:'resolution',evidence:'核对资料',
+        completion:{summary:'用户愿意一起核对资料，她接受有限帮助并保留自己的判断，展览与导师的问题留待后续处理。',
+            outcome:'核对资料',outcomeEvidence:'核对资料',choice:'愿意帮忙',choiceEvidence:'愿意帮你',
+            traits:['接受有限帮助'],facts:[],boundaries:[],openHooks:[],closedHooks:[]}}}));
+    await saving;
+    if(change==='edit') h.messages.at(-1).mes='她仍在犹豫，尚未解决。';else h.messages.pop();
+    h.runtime.store.reconcile();release();await pending;
+    assert.ok(published.every(rank=>rank===0));assert.equal(h.runtime.state().profiles.a.rank,0);
+    assert.ok(h.runtime.state().profiles.a.lock);
+    await h.runtime.load();assert.equal(h.runtime.state().profiles.a.rank,0);
+});
