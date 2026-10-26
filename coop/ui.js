@@ -41,7 +41,6 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
             '<p id="'+helpId+'-aliases" class="sdc-field-help">所有别名共用这一份好感、Rank 和摘要。只填明确称呼，避免“她”“老师”等泛称；与其他角色重名会提示冲突，不会自动合并档案。</p>'+
             '<label>补充设定（可选）<textarea name="description" rows="4" maxlength="12000" placeholder="可留空。神谕会自动从角色卡和故事上下文提取已有设定。&#10;这里只补充你希望额外说明的性格、背景或关系限制。" aria-describedby="'+helpId+'-description">'+esc(p.description)+'</textarea></label>'+
             '<p id="'+helpId+'-description" class="sdc-field-help">设计事件时，神谕会读取角色卡、相关世界书、近期对话和历阶摘要。需要额外补充时再填写；已有内容会保留，已发生的历史请在摘要中修正。</p>'+
-            '<p>固定四阶门槛：30 → 60 → 90 → 100。</p>'+
             '<button type="submit">保存</button></form></details></article>';
     }
     function roles(state) {
