@@ -3,7 +3,7 @@ import {candidates} from './roster.js';
 import {safeJson,uuid} from './messages.js';
 import {bindingCapability} from './mvu.js';
 const esc=value=>String(value ?? '').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-const labels={off:'不管理',affinity:'仅维护好感',coop:'好感＋Coop',hook:'反常切入',dilemma:'困境与提问',
+const labels={hook:'反常切入',dilemma:'困境与提问',
     waiting_user:'等待用户回应',waiting_route:'等待确认关系路线',resolution:'破局与收束',completed:'已完成'};
 export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
     document.querySelectorAll('#story-director-coop-entry').forEach(entry=>entry.remove());
@@ -23,12 +23,11 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         const helpId='sdc-profile-'+hash(p.id);
         const unfinished=Object.values(p.events).find(e=>e.phase!=='completed');
         const next=p.rank<RANK_COUNT?p.thresholds[p.rank]:'—';
-        return '<article class="sdc-card"><div class="sdc-row"><strong>'+esc(p.name)+'</strong><span>'+esc(labels[p.mode])+'</span></div>'+
+        return '<article class="sdc-card"><div class="sdc-row"><strong>'+esc(p.name)+'</strong></div>'+
             ((p.aliases || []).length?'<p class="sdc-field-help">别名／简称：'+esc(p.aliases.join('、'))+'</p>':'')+
             '<p>'+ (p.lock?'🔒 ':'')+'好感 '+p.affinity+'／100 · Rank '+p.rank+'／'+RANK_COUNT+' · 下一阶门槛 '+next+'</p>'+
             (bindingCapability(runtime.host.mvu?.()).available?'<p class="sdc-field-help">MVU 好感度路径：<code>故事导演.Coop.角色[&quot;'+esc(p.id)+'&quot;].好感度</code></p>':'')+
             (p.lock?'<p class="sdc-lock">完成 Rank '+p.lock.targetRank+' 羁绊事件后解锁；增减均暂停，不补发积分。</p>':'')+
-            '<label>管理模式 <select data-mode="'+esc(p.id)+'">'+['off','affinity','coop'].map(mode=>'<option value="'+mode+'"'+(mode===p.mode?' selected':'')+'>'+labels[mode]+'</option>').join('')+'</select></label>'+
             '<div class="sdc-actions">'+
             (p.mode==='coop' && p.lock && !unfinished?'<button data-action="start" data-id="'+esc(p.id)+'">开始下一阶事件</button>':'')+
             (p.mode==='coop' && unfinished?'<button data-action="'+(unfinished.paused?'resume':'pause')+'" data-id="'+esc(p.id)+'" data-event="'+esc(unfinished.id)+'">'+(unfinished.paused?'继续事件':'暂停事件')+'</button>':'')+
@@ -54,7 +53,6 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
                 '<option value="" selected disabled>暂未读取到角色卡／群聊成员</option>')+'</select></label>'+
             '<button type="submit"'+(!available.length?' disabled':'')+'>加入所选角色</button></form>'+
             '<p class="sdc-note">这里读取酒馆当前角色卡或群聊成员，不会自动识别卡内 NPC。整合卡中的具体人物请用下面的「手动添加卡内 NPC」。</p>'+
-            (choices.length && !available.length?'<p>当前角色卡／群聊成员均已加入管理，请在下方档案中修改模式。</p>':'')+
             '<details><summary>手动添加卡内 NPC</summary><form id="sdc-add-npc">'+
             '<label>NPC 名称<input name="name" placeholder="例：艾琳（与正文或角色设定中的称呼一致）" aria-describedby="sdc-npc-name-help" required maxlength="100"></label>'+
             '<p id="sdc-npc-name-help" class="sdc-field-help">填写要单独维护好感和 Coop 的具体人物名，便于在对话中识别。</p>'+
@@ -124,7 +122,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         const rows=[
             ['保存状态',saving],
             ['写入权限',store.readonly?'当前窗口只读，无法保存改动；请按上方提示处理':'当前窗口可以维护和保存 Coop 档案'],
-            ['角色档案',profiles.length+' 个：好感＋Coop '+profiles.filter(p=>p.mode==='coop').length+'，仅维护好感 '+profiles.filter(p=>p.mode==='affinity').length+'，不管理 '+profiles.filter(p=>p.mode==='off').length],
+            ['角色档案',profiles.length+' 个'],
             ['当前事件',scene],
             ['好感锁定',locked.length?locked.length+' 名角色等待完成事件后解锁；锁定期间增减均不结算':'当前没有角色被事件门槛锁定'],
             ['消息回退',skipped.length?(stale?stale+' 条记录因来源消息或前置进度变化而失效；进度已按有效记录重新计算。':'')+
@@ -161,7 +159,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
                 (runtime.store.pending?'<p class="sdc-warning">归档待保存。'+(runtime.store.error?esc(runtime.store.error.message)+' <button data-action="retry">重试保存</button>':'正在等待服务器确认……')+'</p>':'')+
                 (runtime.notices[0]?'<p role="status">'+esc(runtime.notices[0].message)+' <button data-action="dismiss">知道了</button></p>':'')+
                 ({roles:roles,event:eventPage,archive:archive,settings:settings}[tab])(state))+'</div>';
-        if(runtime.store.readonly || runtime.store.pending) panel.querySelectorAll('form button,form input,form textarea,form select,[data-mode],[data-action="start"],[data-action="resume"],[data-action="route"],[data-action="import"],#sdc-import').forEach(node=>{node.disabled=true;});
+        if(runtime.store.readonly || runtime.store.pending) panel.querySelectorAll('form button,form input,form textarea,form select,[data-action="start"],[data-action="resume"],[data-action="route"],[data-action="import"],#sdc-import').forEach(node=>{node.disabled=true;});
     }
     panel.addEventListener('click',event=> {
         const button=event.target.closest('button');if(!button) return;
@@ -188,11 +186,6 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
     });
     panel.addEventListener('change',event=>{
         const node=event.target;
-        if(node.dataset.mode) run(async()=>{
-            const p=runtime.state().profiles[node.dataset.mode];
-            try {await runtime.configure({...p,mode:node.value});}
-            catch(error) {if(error.code==='CAP_CONFIRMATION' && window.confirm(error.message)) await runtime.configure({...p,mode:node.value,acceptCap:true});else throw error;}
-        });
         if(node.id==='sdc-history-role'){chosen=node.value;render();}
         if(node.id==='sdc-auto') run(()=>runtime.configureSettings({autoStart:node.checked}));
         if(node.id==='sdc-rounds') run(()=>runtime.configureSettings({eventRounds:Number(node.value)}));
@@ -211,7 +204,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
                 if(!candidate || runtime.state().profiles[candidate.id]) throw new Error('该角色已加入管理或当前角色卡已切换，请重新选择。');
                 input={...candidate,mode:'coop'};
             } else if(form.id==='sdc-add-npc') {
-                if(Object.values(runtime.state().profiles).some(p=>p.name===text(data.get('name'),100))) throw new Error('同名角色已有档案，请在现有行中修改模式或说明。');
+                if(Object.values(runtime.state().profiles).some(p=>p.name===text(data.get('name'),100))) throw new Error('同名角色已有档案。');
                 input={id:'npc:'+uuid(),name:data.get('name'),aliases:data.get('aliases'),description:data.get('description'),
                     mode:'coop',initialAffinity:Number(data.get('initialAffinity'))};
             } else if(form.dataset.edit) {
