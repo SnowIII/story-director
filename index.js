@@ -18,11 +18,12 @@
 
 import { createCoopSystem } from './coop/bootstrap.js';
 import { createMessageRefreshQueue } from './message-render.js';
+import { createUpdateReloader } from './update-reload.js';
 import { extension_settings } from '../../../extensions.js';
 import {
     eventSource, event_types, saveSettingsDebounced, saveSettings,
     setExtensionPrompt, extension_prompt_types, extension_prompt_roles,
-    chat, updateMessageBlock, saveChatDebounced,
+    chat, updateMessageBlock, saveChatDebounced, isGenerating, isChatSaving,
 } from '../../../../script.js';
 import {
     world_names, selected_world_info, world_info, onWorldInfoChange, updateWorldInfoList, loadWorldInfo, saveWorldInfo,
@@ -58,7 +59,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.40.2';
+const VERSION = '0.40.3';
 let coop = null;
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
@@ -7228,6 +7229,39 @@ function init() {
     } catch (error) { console.debug('[故事导演] event binding unavailable', error); }
     window.setTimeout(() => { if (!document.getElementById('story-director-bubble')) init(); }, 1500);
 }
+
+let appReady = false;
+const updateReloader = createUpdateReloader({
+    version: VERSION,
+    storage: (() => { try { return window.sessionStorage; } catch { return null; } })(),
+    readVersion: async () => {
+        const response = await fetch(new URL('./manifest.json', import.meta.url), { cache: 'no-store' });
+        if (!response.ok) throw new Error('读取故事导演版本失败：HTTP ' + response.status);
+        return (await response.json()).version;
+    },
+    isBusy: () => !appReady || isGenerating() || isChatSaving || storyGenerating || !!coop?.job || !!coop?.store.pending ||
+        !!document.querySelector('#send_textarea')?.value || !!document.querySelector('.edit_textarea,.reasoning_edit_textarea') ||
+        !!document.activeElement?.matches('input:not(#send_textarea),textarea:not(#send_textarea),select,[contenteditable="true"]'),
+    flush: async () => {
+        await coop?.store.queue;
+        await coop?.syncMvu();
+        let saved = false;
+        const onSaved = () => { saved = true; };
+        eventSource.on(event_types.SETTINGS_UPDATED, onSaved);
+        try {
+            await saveSettings();
+            if (!saved) throw new Error('设置尚未保存，暂不刷新');
+        } finally { eventSource.removeListener(event_types.SETTINGS_UPDATED, onSaved); }
+        await window.SillyTavern?.getContext?.()?.saveChat?.();
+    },
+    reload: () => window.location.reload(),
+    notify: () => toast('故事导演已更新，将在生成和保存完成、输入框清空后自动刷新。'),
+    onError: error => console.debug('[故事导演] 自动刷新暂缓，稍后重试', error),
+});
+export function onStoryDirectorUpdate() { updateReloader.request(); }
+eventSource.on(event_types.APP_READY, () => { appReady = true; void updateReloader.check(); });
+window.addEventListener('focus', () => { void updateReloader.check(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) void updateReloader.check(); });
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true });
 else init();

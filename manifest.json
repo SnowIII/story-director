@@ -6,7 +6,10 @@
   "js": "index.js",
   "css": "style.css",
   "author": "SnowIII",
-  "version": "0.40.2",
+  "version": "0.40.3",
   "homePage": "https://github.com/anyKami/story-director",
-  "auto_update": true
+  "auto_update": true,
+  "hooks": {
+    "update": "onStoryDirectorUpdate"
+  }
 }
