@@ -393,6 +393,8 @@ export class CoopRuntime {
     }
     async receiveMvu(variables) {
         if(this.usesMvuAffinity) {
+            // MVU 更新结束时先限制超出的好感；事件回调中的变量会继续用于本楼层保存。
+            this.syncMvu.capLive(variables);
             // 事件先按请求快照归档，再读取这一轮 MVU 更新后的数值；不再结算 affinity 回报。
             this.mvuLive=null;
             try {await this.receiveMvuReport(variables);this.mvuLive=variables;this.store.reconcile();}

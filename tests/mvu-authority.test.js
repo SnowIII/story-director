@@ -98,11 +98,61 @@ test('renaming a profile moves its MVU row without losing the MVU score or lock'
     const roles=h.messages[0].variables[0].stat_data.故事导演.Coop.角色;
     assert.equal(roles.新称呼.好感度,18);assert.equal(roles.新称呼.好感锁定,true);assert.equal(roles.画家,undefined);
 });
-test('invalid MVU values are reported without silently replacing them',async t=>{
-    const h=await fixture(t);h.write(999,true);await h.runtime.syncMvu();
-    assert.equal(h.row().好感度,999);assert.equal(h.runtime.state().profiles.a.mvuReady,false);
-    assert.match(h.runtime.state().profiles.a.mvuError,/0～100/);
-    await assert.rejects(h.runtime.generate('a'),{code:'NOT_READY'});
+test('over-100 MVU values read as 100 and are saved with wrappers and lock intact',async t=>{
+    const h=await fixture(t),row=h.row();
+    row.好感度=[[101.5,'内层说明'],'好感说明'];row.好感锁定=[true,'锁定说明'];
+    const profile=h.runtime.state().profiles.a;
+    assert.equal(profile.affinity,100);assert.equal(profile.mvuReady,true);assert.equal(profile.lock.lockedValue,100);
+    assert.deepEqual(row.好感度,[[101.5,'内层说明'],'好感说明']);
+    await h.runtime.syncMvu();
+    assert.deepEqual(h.row().好感度,[[100,'内层说明'],'好感说明']);
+    assert.deepEqual(h.row().好感锁定,[true,'锁定说明']);
+});
+test('MVU update hooks clamp the updated value before the new floor is saved',async t=>{
+    const h=await fixture(t),live=clone(h.messages[0].variables[0]);
+    live.stat_data.故事导演.Coop.角色.画家.好感度=120;
+    live.stat_data.故事导演.Coop.角色.画家.好感锁定=false;
+    live.stat_data.故事导演.Coop.角色.画家.额外信息='原样保留';
+    live.stat_data.故事导演.Coop.角色.其他角色={好感度:120};
+    const updating=h.runtime.receiveMvu(live);
+    assert.equal(live.stat_data.故事导演.Coop.角色.画家.好感度,100);
+    assert.equal(live.stat_data.故事导演.Coop.角色.画家.好感锁定,false);
+    assert.equal(live.stat_data.故事导演.Coop.角色.画家.额外信息,'原样保留');
+    assert.deepEqual(live.stat_data.故事导演.Coop.角色.其他角色,{好感度:120});
+    await updating;
+    live.stat_data.故事导演.Coop.角色.画家.好感度=101;
+    h.runtime.syncMvu.updateLive(live);
+    assert.equal(live.stat_data.故事导演.Coop.角色.画家.好感度,100);
+});
+test('capping one managed character preserves other characters and their locks',()=>{
+    const state=initialState({a:{id:'a',name:'画家'},b:{id:'b',name:'医生'}});
+    const data={stat_data:{故事导演:{Coop:{角色:{
+        画家:{角色ID:'a',好感度:150,好感锁定:true},医生:{角色ID:'b',好感度:80,好感锁定:false}},回报:null}}}};
+    assert.equal(mergeCoopMvu(data,state,{authority:true}),true);
+    const roles=data.stat_data.故事导演.Coop.角色;
+    assert.equal(roles.画家.好感度,100);assert.equal(roles.画家.好感锁定,true);
+    assert.equal(roles.医生.好感度,80);assert.equal(roles.医生.好感锁定,false);
+    assert.equal(mergeCoopMvu(data,state,{authority:true}),false);
+});
+test('valid MVU values are preserved while other invalid values remain errors',async t=>{
+    const h=await fixture(t);
+    for(const value of [99,100]) {
+        h.write(value,false);await h.runtime.syncMvu();
+        assert.equal(h.row().好感度,value);assert.equal(h.runtime.state().profiles.a.affinity,value);
+    }
+    for(const value of [-1,99.5,'101']) {
+        h.write(value,true);await h.runtime.syncMvu();
+        assert.equal(h.row().好感度,value);assert.equal(h.runtime.state().profiles.a.mvuReady,false);
+        assert.match(h.runtime.state().profiles.a.mvuError,/0～100/);
+        await assert.rejects(h.runtime.generate('a'),{code:'NOT_READY'});
+    }
+});
+test('deleting a capped floor restores the previous MVU snapshot',async t=>{
+    const h=await fixture(t);await h.turn({value:20,locked:false});
+    await h.turn({value:120,locked:false});
+    assert.equal(h.row().好感度,100);assert.equal(h.runtime.state().profiles.a.affinity,100);
+    h.messages.splice(3);h.runtime.store.reconcile();await h.runtime.syncMvu();
+    assert.equal(h.row().好感度,20);assert.equal(h.runtime.state().profiles.a.affinity,20);
 });
 test('MVU unavailability never falls back to applying legacy affinity reports',async t=>{
     const h=await fixture(t);h.host.mvu=()=>null;

@@ -15,6 +15,9 @@ export function unwrap(value) {
     if(Array.isArray(value) && (value.length===1 || value.length===2 && typeof value[1]==='string')) return unwrap(value[0]);
     return value;
 }
+function capAffinity(value) {
+    return typeof value==='number' && value>100?100:value;
+}
 function ensureWrappedObject(parent,key) {
     let value=parent[key];
     while(Array.isArray(value) && (value.length===1 || value.length===2 && typeof value[1]==='string')) {
@@ -72,6 +75,17 @@ function roleRow(roles,key,id) {
     return Object.entries(roles).filter(([name])=>name!=='$meta').map(([,row])=>unwrap(row))
         .find(row=>unwrap(row?.角色ID)===id) || null;
 }
+function capLiveAffinities(variables,state) {
+    const roles=roleTable(variables),keys=mvuCharacterKeys(state);
+    let changed=false;
+    for(const p of Object.values(state.profiles)) {
+        const row=roleRow(roles,keys.get(p.id),p.id),value=unwrap(row?.好感度);
+        if(typeof value==='number' && value>100) {
+            row.好感度=mirrorValue(row.好感度,100);changed=true;
+        }
+    }
+    return changed;
+}
 export function readMvuAffinity(host,state,{live=null,previous=null}={}) {
     let roles=roleTable(live);
     const api=host.mvu?.();
@@ -86,7 +100,7 @@ export function readMvuAffinity(host,state,{live=null,previous=null}={}) {
         const row=roleRow(roles,keys.get(p.id),p.id) || roleRow(roles,oldKeys.get(p.id),p.id);
         p.mvuReady=false;p.mvuError='';p.scoreLog=[];
         if(!row) continue;
-        const value=unwrap(row.好感度),locked=unwrap(row.好感锁定);
+        const value=capAffinity(unwrap(row.好感度)),locked=unwrap(row.好感锁定);
         if(!Number.isInteger(value) || value<0 || value>100 || typeof locked!=='boolean') {
             p.mvuError='MVU 好感度须为 0～100 的整数，好感锁定须为布尔值。';continue;
         }
@@ -110,8 +124,11 @@ export function mergeCoopMvu(variables,state,{authority=false}={}) {
     if(authority) for(const p of Object.values(state.profiles)) {
         const row=roleRow(unwrap(coop?.角色),keys.get(p.id),p.id),target=profiles[keys.get(p.id)];
         target.角色ID=p.id;
-        // 只在字段缺失时初始化；已有数值和锁定状态始终归 MVU 所有。
-        for(const field of ['好感度','好感锁定']) if(object(row) && Object.hasOwn(row,field)) target[field]=unwrap(row[field]);
+        // 只在字段缺失时初始化；已有好感超过 100 时封顶，锁定状态归 MVU 所有。
+        for(const field of ['好感度','好感锁定']) if(object(row) && Object.hasOwn(row,field)) {
+            const value=unwrap(row[field]);
+            target[field]=field==='好感度'?capAffinity(value):value;
+        }
     }
     profiles=mirrorValue(coop?.角色,profiles);
     if(JSON.stringify(coop?.角色)===JSON.stringify(profiles) && Object.hasOwn(coop,'回报')) return false;
@@ -163,6 +180,7 @@ export function createMvuSync(host,store,canWrite) {
     };
     sync.error=null;
     sync.status='尚未同步';
+    sync.capLive=variables=>allowed() && authority?capLiveAffinities(variables,store.state):false;
     sync.updateLive=variables=>allowed()?mergeCoopMvu(variables,store.state,{authority}):false;
     return sync;
 }
