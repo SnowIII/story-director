@@ -122,8 +122,8 @@ test('mixed-rank runtime reports use each profile gate, survive reload and expos
     assert.ok(runtime.variableContract().includes('"rankCount":7'));assert.ok(runtime.variableContract().includes('"relationshipRank":9'));
     await runtime.load();assert.equal(runtime.state().profiles.seven.rankCount,7);assert.equal(runtime.state().profiles.ten.rankCount,10);
     const mirrored={stat_data:{}};mergeCoopMvu(mirrored,runtime.state());
-    assert.equal(mirrored.stat_data.故事导演.Coop.角色.seven.阶级上限,7);
-    assert.equal(mirrored.stat_data.故事导演.Coop.角色.ten.关系确认阶级,9);
+    assert.equal(mirrored.stat_data.故事导演.Coop.角色.角色seven.阶级上限,7);
+    assert.equal(mirrored.stat_data.故事导演.Coop.角色.角色ten.关系确认阶级,9);
     const before=JSON.stringify(runtime.store.document),forged=clone(runtime.store.document);
     forged.roster.seven.rankCount=10;forged.roster.seven.thresholds=thresholds(undefined,10);
     await assert.rejects(runtime.restore(forged),{code:'RANK_SYSTEM_LOCKED'});assert.equal(JSON.stringify(runtime.store.document),before);

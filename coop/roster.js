@@ -16,11 +16,22 @@ export function configureRoster(document,state,input) {
         fail('CAP_CONFIRMATION','启用 Coop 会将好感封顶到下一阶门槛，溢出不补发；请确认后再启用');
     }
     Object.assign(config,{name:text(input.name,100),description:text(input.description ?? config.description,12000),
-        cardRef:text(input.cardRef ?? config.cardRef,200),rankCount:count,mode,policyRevision:(previous?.policyRevision || 0)+1});
+        cardRef:text(input.cardRef ?? config.cardRef,200),rankCount:count,mode,policyRevision:(previous?.policyRevision || document.deletedCharacters?.[characterId] || 0)+1});
     config.aliases=parseAliases(input.aliases ?? config.aliases ?? [],config.name);
     assertIdentityAvailable(config,document.roster);
     document.roster[characterId]=config;
     return {config, eventToPause:mode!=='coop' && activeEvent(state)?.characterId===characterId?activeEvent(state):null};
+}
+export function removeRoster(document,characterId) {
+    characterId=id(characterId);
+    const config=document.roster[characterId];
+    if(!config) fail('NOT_MANAGED');
+    document.deletedCharacters=document.deletedCharacters || {};
+    document.deletedCharacters[characterId]=config.policyRevision || 1;
+    const events=new Set(document.journal.filter(op=>op.characterId===characterId).map(op=>op.data?.eventId).filter(Boolean));
+    delete document.roster[characterId];
+    document.journal=document.journal.filter(op=>op.characterId!==characterId);
+    for(const eventId of events) if(document.summaryEdits) delete document.summaryEdits[eventId];
 }
 export function candidates(context) {
     const cards=context.characters || [];

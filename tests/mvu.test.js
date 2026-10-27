@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {initialState,clone} from '../coop/model.js';
-import {mergeCoopMvu,createMvuSync,bindingCapability} from '../coop/mvu.js';
+import {mergeCoopMvu,createMvuSync,bindingCapability,mvuCharacterKeys} from '../coop/mvu.js';
 
 function setup() {
     const state=initialState({a:{id:'a',name:'画家',mode:'coop',initialAffinity:7}});
@@ -14,25 +14,50 @@ function setup() {
     const api={getMvuData:target=>tables[target.type],replaceMvuData:async(data,target)=>{calls.push({...target});tables[target.type]=clone(data);}};
     host.mvu=()=>api;
     const sync=createMvuSync(host,store,()=>true);
-    const affinity=type=>tables[type].stat_data.故事导演.Coop.角色.a.好感度;
+    const affinity=type=>tables[type].stat_data.故事导演.Coop.角色.画家.好感度;
     return {store,host,api,messages,tables,calls,sync,affinity};
 }
-test('MVU mirror preserves other fields and reports while exposing stable character IDs',()=>{
+test('MVU mirror replaces legacy ID keys with character names without losing confirmed progress',()=>{
     const h=setup(),data=clone(h.tables.message);
+    data.stat_data.故事导演.Coop.角色={a:{名称:'画家',好感度:7}};
     assert.equal(mergeCoopMvu(data,h.store.state),true);
     assert.equal(data.stat_data.生命,11);assert.equal(data.stat_data.故事导演.主线.当前拍,2);
     assert.deepEqual(data.stat_data.故事导演.Coop.回报,{nonce:'turn'});
-    assert.deepEqual(data.stat_data.故事导演.Coop.角色.a,{名称:'画家',好感度:7,Rank:0,阶级上限:4,关系确认阶级:3,好感锁定:false,路线:'unset',管理模式:'coop'});
+    assert.deepEqual(data.stat_data.故事导演.Coop.角色.画家,{名称:'画家',好感度:7,Rank:0,阶级上限:4,关系确认阶级:3,好感锁定:false,路线:'unset',管理模式:'coop'});
+    assert.deepEqual(Object.keys(data.stat_data.故事导演.Coop.角色),['画家']);
     assert.equal(mergeCoopMvu(data,h.store.state),false);
     h.store.state.profiles.a.name='新称呼';mergeCoopMvu(data,h.store.state);
-    assert.deepEqual(Object.keys(data.stat_data.故事导演.Coop.角色),['a']);
+    assert.deepEqual(Object.keys(data.stat_data.故事导演.Coop.角色),['新称呼']);
+    assert.equal(data.stat_data.故事导演.Coop.角色.新称呼.好感度,7);
+    assert.equal(h.store.state.profiles.a.id,'a');
+});
+
+test('duplicate MVU names use numeric suffixes without taking another character name',()=>{
+    const state=initialState(Object.fromEntries(['艾琳','艾琳','艾琳_2','医生'].map((name,i)=>
+        ['p'+i,{id:'p'+i,name,mode:'coop',initialAffinity:i}]))),data={stat_data:{}};
+    assert.deepEqual([...mvuCharacterKeys(state).values()],['艾琳','艾琳_3','艾琳_2','医生']);
+    mergeCoopMvu(data,state);
+    const roles=data.stat_data.故事导演.Coop.角色;
+    assert.equal(roles.艾琳.好感度,0);assert.equal(roles.艾琳_3.好感度,1);
+    assert.equal(roles.艾琳_2.好感度,2);assert.equal(roles.医生.好感度,3);
+    assert.equal(mergeCoopMvu(data,state),false);
+});
+
+test('MVU names containing quotes and prototype names remain distinct own keys',()=>{
+    const names=['__proto__','constructor','英妮缇雅·维赛塔','艾"琳\\'],data={stat_data:{}};
+    const state=initialState(Object.fromEntries(names.map((name,i)=>['p'+i,{id:'p'+i,name}])));
+    mergeCoopMvu(data,state);
+    const roles=data.stat_data.故事导演.Coop.角色;
+    assert.deepEqual(Object.keys(roles),names);
+    for(const name of names) assert.ok(Object.hasOwn(roles,name));
+    assert.equal(Object.getPrototypeOf(roles),Object.prototype);
 });
 test('MVU wrapped namespaces retain their wrappers and report',()=>{
     const h=setup(),data={stat_data:{故事导演:[{Coop:[{回报:{nonce:'turn'}},'Coop 说明']},'命名空间说明']}};
     mergeCoopMvu(data,h.store.state);
     assert.equal(data.stat_data.故事导演[1],'命名空间说明');
     assert.equal(data.stat_data.故事导演[0].Coop[1],'Coop 说明');
-    assert.equal(data.stat_data.故事导演[0].Coop[0].角色.a.好感度,7);
+    assert.equal(data.stat_data.故事导演[0].Coop[0].角色.画家.好感度,7);
     assert.equal(data.stat_data.故事导演[0].Coop[0].回报.nonce,'turn');
 });
 test('sync writes both the concrete message snapshot and chat baseline without duplicate writes',async()=>{
@@ -84,7 +109,7 @@ test('an MVU write failure is retryable without changing Coop progress',async()=
 test('MVU update hooks repair a model-written total using the confirmed Coop state',()=>{
     const h=setup(),live={stat_data:{故事导演:{Coop:{角色:{a:{好感度:99}},回报:{nonce:'new'}}}}};
     assert.equal(h.sync.updateLive(live),true);
-    assert.equal(live.stat_data.故事导演.Coop.角色.a.好感度,7);
+    assert.equal(live.stat_data.故事导演.Coop.角色.画家.好感度,7);
     assert.equal(live.stat_data.故事导演.Coop.回报.nonce,'new');
     assert.equal(h.sync.updateLive(live),false);
 });

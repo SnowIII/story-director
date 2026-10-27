@@ -24,9 +24,20 @@ export function isProtectedCoopPath(path) {
     const normalized=String(path || '').replace(/\[['"]?([^'"\]]+)['"]?\]/g,'.$1').replace(/^(stat_data|status_current_variables)\./,'');
     return normalized==='故事导演.Coop' || normalized.startsWith('故事导演.Coop.');
 }
+export function mvuCharacterKeys(state) {
+    const profiles=Object.values(state.profiles),reserved=new Set(profiles.map(p=>p.name || '未命名角色')),used=new Set();
+    return new Map(profiles.map(p=>{
+        const name=p.name || '未命名角色';
+        let key=name,suffix=2;
+        while(used.has(key) || key!==name && reserved.has(key)) key=name+'_'+suffix++;
+        used.add(key);
+        return [p.id,key];
+    }));
+}
 export function mergeCoopMvu(variables,state) {
     if(!state || !object(variables?.stat_data)) return false;
-    const profiles=Object.fromEntries(Object.values(state.profiles).map(p=>[p.id,
+    const keys=mvuCharacterKeys(state);
+    const profiles=Object.fromEntries(Object.values(state.profiles).map(p=>[keys.get(p.id),
         {名称:p.name,好感度:p.affinity,Rank:p.rank,阶级上限:rankPolicy(p).rankCount,关系确认阶级:rankPolicy(p).relationshipRank,
             好感锁定:!!p.lock,路线:p.route,管理模式:p.mode}]));
     const root=variables.stat_data;

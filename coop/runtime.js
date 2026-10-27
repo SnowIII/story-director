@@ -1,6 +1,6 @@
 import {clone,fail,text,hash,activeEvent,profileOf,historySignature,rankPolicy,RANK_COUNTS} from './model.js';
 import {CoopStore} from './store.js';
-import {configureRoster,candidates} from './roster.js';
+import {configureRoster,removeRoster,candidates} from './roster.js';
 import {appendOperation,project,readDocument} from './timeline.js';
 import {validateAffinityProposal} from './affinity.js';
 import {continuity,publicMemory} from './history.js';
@@ -144,9 +144,14 @@ export class CoopRuntime {
             }
         });
     }
+    async removeCharacter(characterId) {
+        if(this.job?.characterId===characterId) this.abort();
+        await this.store.enqueue(document=>removeRoster(document,characterId));
+        await this.ensureCurrentCharacters();
+        this.changed();
+    }
     async configureSettings(settings) {
         return this.store.enqueue(document=>{
-            if(settings.autoStart!==undefined) document.settings.autoStart=!!settings.autoStart;
             if(settings.eventRounds!==undefined) {
                 if(![2,3].includes(settings.eventRounds)) fail('INVALID_NUMBER');
                 document.settings.eventRounds=settings.eventRounds;
@@ -401,7 +406,7 @@ export class CoopRuntime {
         await this.maybeAuto();
     }
     async maybeAuto() {
-        if(!this.store.document?.settings.autoStart || this.store.readonly || this.occupies() || !this.host.autoAllowed?.() ||
+        if(!this.store.document || this.store.readonly || this.occupies() || !this.host.autoAllowed?.() ||
             Date.now()-this.lastAutoFailure<60000) return;
         const roster=Object.values(this.state().profiles);
         const profiles=roster.filter(p=>p.mode==='coop' && p.lock && this.host.available(p,roster) &&

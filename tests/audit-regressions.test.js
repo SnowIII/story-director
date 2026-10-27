@@ -144,7 +144,7 @@ for(const level of ['namespace','coop','nested']) test('audit P3: initializing a
     assert.strictEqual(actual,wrapper);assert.equal(actual[1],level==='nested'?'外层说明':'变量说明');
     if(level==='nested') assert.equal(actual[0][1],'内层说明');
     const ns=unwrap(variables.stat_data.故事导演),coop=unwrap(ns.Coop);
-    assert.equal(coop.角色.a.好感度,7);assert.equal(variables.stat_data.生命,9);
+    assert.equal(coop.角色.画家.好感度,7);assert.equal(variables.stat_data.生命,9);
     assert.equal(mergeCoopMvu(variables,state),false);
 });
 
@@ -152,7 +152,7 @@ test('audit P3: undefined single-value wrappers are retained during initializati
     const state=initialState({a:{id:'a',name:'画家',mode:'coop',initialAffinity:7}});
     const wrapper=[undefined],variables={stat_data:{故事导演:wrapper}};
     assert.equal(mergeCoopMvu(variables,state),true);assert.strictEqual(variables.stat_data.故事导演,wrapper);
-    assert.equal(wrapper[0].Coop.角色.a.好感度,7);
+    assert.equal(wrapper[0].Coop.角色.画家.好感度,7);
 });
 
 test('audit P3: invalid wrapped namespace values still fail without modifying the input',()=>{

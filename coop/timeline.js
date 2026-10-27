@@ -2,7 +2,7 @@ import {SCHEMA,MODES,clone,fail,hash,object,thresholds,id,initialState,applyAffi
     acceptAnswer,chooseRoute,acceptBeat,replanEvent,assertState,activeEvent,rankPolicy} from './model.js';
 import {matchesSourceVersion} from './messages.js';
 export function newDocument(scope) {
-    return {schemaVersion:SCHEMA,scope,revision:0,roster:{},journal:[],settings:{autoStart:false,eventRounds:3},updatedAt:null};
+    return {schemaVersion:SCHEMA,scope,revision:0,roster:{},journal:[],settings:{autoStart:true,eventRounds:3},updatedAt:null};
 }
 export function readDocument(raw,scope) {
     if(!raw) return newDocument(scope);
@@ -13,7 +13,7 @@ export function readDocument(raw,scope) {
         thresholds(config.thresholds,rankPolicy(config).rankCount);
     }
     document.scope=scope;
-    document.settings={autoStart:false,eventRounds:3,...document.settings};
+    document.settings={eventRounds:3,...document.settings,autoStart:true};
     return document;
 }
 export function validRefs(refs,sources) {

@@ -396,7 +396,7 @@ test('MVU mirrors confirmed scores, retains the old total on save failure and fo
     const h=await setup(t);await h.configure('affinity',0);
     const tables={message:{stat_data:{生命:11}},chat:{stat_data:{生命:11}}};
     h.host.mvu=()=>({getMvuData:target=>tables[target.type],replaceMvuData:async(data,target)=>{tables[target.type]=clone(data);}});
-    const affinity=type=>tables[type].stat_data.故事导演.Coop.角色.a.好感度;
+    const affinity=type=>tables[type].stat_data.故事导演.Coop.角色.画家.好感度;
     const persist=h.host.persist;h.host.persist=async()=>{throw new Error('offline');};
     const index=await h.send('我来帮你。','她放松了。',h.score(1));
     await h.runtime.syncMvu();assert.equal(affinity('message'),0);assert.equal(affinity('chat'),0);
@@ -405,4 +405,74 @@ test('MVU mirrors confirmed scores, retains the old total on save failure and fo
     h.messages[index].mes='她拒绝了帮助。';h.runtime.store.reconcile();await h.runtime.syncMvu();
     assert.equal(affinity('message'),0);assert.equal(affinity('chat'),0);
     assert.equal(tables.message.stat_data.生命,11);assert.equal(tables.chat.stat_data.生命,11);
+});
+
+test('deleting a role removes its scores, events, summaries and MVU entry while preserving other roles',async t=>{
+    const h=await setup(t);await completeFirst(h);
+    await h.runtime.configure({id:'b',name:'医生',mode:'coop',initialAffinity:12});
+    const eventId=h.runtime.state().profiles.a.history[0].eventId;
+    await h.runtime.editSummary('a',eventId,'用户帮忙核对画册资料，她接受有限支持并继续保留自己的判断。');
+    const other=clone(h.runtime.state().profiles.b),tables={message:{stat_data:{生命:11}},chat:{stat_data:{生命:12}}};
+    h.host.mvu=()=>({getMvuData:target=>tables[target.type],replaceMvuData:async(data,target)=>{tables[target.type]=clone(data);}});
+    await h.runtime.syncMvu();assert.ok(tables.chat.stat_data.故事导演.Coop.角色.画家);
+    await h.runtime.removeCharacter('a');await h.runtime.syncMvu();
+    assert.equal(h.runtime.store.document.roster.a,undefined);
+    assert.ok(h.runtime.store.document.journal.every(op=>op.characterId!=='a'));
+    assert.equal(h.runtime.store.document.summaryEdits[eventId],undefined);
+    assert.deepEqual(h.runtime.state().profiles.b,other);
+    for(const type of ['message','chat']) assert.deepEqual(Object.keys(tables[type].stat_data.故事导演.Coop.角色),['医生']);
+    assert.equal(tables.message.stat_data.生命,11);assert.equal(tables.chat.stat_data.生命,12);
+    await h.runtime.load();assert.equal(h.runtime.state().profiles.a,undefined);
+    assert.deepEqual(h.runtime.state().profiles.b,other);
+});
+
+test('deleting an active role releases the scene only after a successful save and supports retry',async t=>{
+    const h=await setup(t);await unlockAndStart(h);
+    const eventId=h.runtime.event().id,persist=h.host.persist;
+    h.host.persist=async()=>{throw new Error('offline');};
+    await assert.rejects(h.runtime.removeCharacter('a'),/offline/);
+    assert.equal(h.runtime.event().id,eventId);assert.equal(h.runtime.occupies(),true);
+    assert.ok(h.runtime.store.pending);assert.ok(h.runtime.state().profiles.a.lock);
+    h.host.persist=persist;await h.runtime.store.retrySave();
+    assert.equal(h.runtime.event(),null);assert.equal(h.runtime.occupies(),false);
+    assert.equal(h.runtime.state().profiles.a,undefined);
+});
+
+test('deleting a role cancels its pending design and rejects the late model result',async t=>{
+    const h=await setup(t);await h.configure('coop',30);
+    let release;h.host.ask=()=>new Promise(resolve=>{release=resolve;});
+    const generating=h.runtime.generate('a');await new Promise(resolve=>setImmediate(resolve));
+    const plan=eventPlan(h.runtime.state().profiles.a);
+    await h.runtime.removeCharacter('a');assert.equal(h.runtime.job,null);
+    release(JSON.stringify(plan));await assert.rejects(generating,{code:'STALE_TASK'});
+    assert.equal(h.runtime.state().profiles.a,undefined);assert.equal(h.runtime.occupies(),false);
+});
+
+test('re-enrolling a deleted identity rejects old reports and only accepts new interactions',async t=>{
+    const h=await setup(t);await h.configure('affinity',0);
+    const index=await h.send('我来帮你。','她放松了。',h.score(2));
+    const oldPolicy=h.runtime.state().profiles.a.policyRevision;
+    await h.runtime.removeCharacter('a');await h.runtime.load();await h.configure('affinity',0);
+    assert.ok(h.runtime.state().profiles.a.policyRevision>oldPolicy);
+    await h.runtime.afterMessage(index);
+    assert.equal(h.runtime.state().profiles.a.affinity,0);assert.equal(h.runtime.state().profiles.a.scoreLog.length,0);
+    await h.send('我继续帮你。','她放松了。',h.score(1));
+    assert.equal(h.runtime.state().profiles.a.affinity,1);
+});
+
+test('automatic events are enabled for new and legacy chats while honoring generation and availability gates',async t=>{
+    const h=await setup(t);assert.equal(h.runtime.store.document.settings.autoStart,true);
+    await h.configure('coop',30);
+    h.meta[STORAGE_KEY].settings.autoStart=false;await h.runtime.load();
+    assert.equal(h.runtime.store.document.settings.autoStart,true);
+    await h.runtime.configureSettings({autoStart:false,eventRounds:2});
+    assert.equal(h.runtime.store.document.settings.autoStart,true);assert.equal(h.runtime.store.document.settings.eventRounds,2);
+    await h.runtime.maybeAuto();assert.equal(h.runtime.event(),null);
+    h.host.autoAllowed=()=>true;h.host.available=()=>false;
+    await h.runtime.maybeAuto();assert.equal(h.runtime.event(),null);
+    h.host.available=()=>true;h.runtime.store.readonly=true;
+    await h.runtime.maybeAuto();assert.equal(h.runtime.event(),null);
+    h.runtime.store.readonly=false;await h.runtime.maybeAuto();
+    assert.ok(h.runtime.event());const eventId=h.runtime.event().id;
+    await h.runtime.maybeAuto();assert.equal(h.runtime.event().id,eventId);
 });

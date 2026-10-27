@@ -1,6 +1,6 @@
 import {text,hash,activeEvent,rankPolicy,RANK_COUNTS} from './model.js';
 import {safeJson,uuid} from './messages.js';
-import {bindingCapability} from './mvu.js';
+import {bindingCapability,mvuCharacterKeys} from './mvu.js';
 const esc=value=>String(value ?? '').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const labels={hook:'反常切入',dilemma:'困境与提问',
     waiting_user:'等待用户回应',waiting_route:'等待确认关系路线',resolution:'破局与收束',completed:'已完成'};
@@ -20,18 +20,20 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
     }
     function card(p) {
         const helpId='sdc-profile-'+hash(p.id);
+        const mvuPath='故事导演.Coop.角色['+JSON.stringify(mvuCharacterKeys(runtime.state()).get(p.id))+'].好感度';
         const unfinished=Object.values(p.events).find(e=>e.phase!=='completed');
         const next=p.rank<p.rankCount?p.thresholds[p.rank]:'—';
         return '<article class="sdc-card"><div class="sdc-row"><strong>'+esc(p.name)+'</strong></div>'+
             ((p.aliases || []).length?'<p class="sdc-field-help">别名／简称：'+esc(p.aliases.join('、'))+'</p>':'')+
             '<p>'+ (p.lock?'🔒 ':'')+'好感 '+p.affinity+'／100 · Rank '+p.rank+'／'+p.rankCount+' · 下一阶门槛 '+next+'</p>'+
-            (bindingCapability(runtime.host.mvu?.()).available?'<p class="sdc-field-help">MVU 好感度路径：<code>故事导演.Coop.角色[&quot;'+esc(p.id)+'&quot;].好感度</code></p>':'')+
+            (bindingCapability(runtime.host.mvu?.()).available?'<p class="sdc-field-help">MVU 好感度路径：<code>'+esc(mvuPath)+'</code></p>':'')+
             (p.lock?'<p class="sdc-lock">完成 Rank '+p.lock.targetRank+' 羁绊事件后解锁；增减均暂停，不补发积分。</p>':'')+
             '<div class="sdc-actions">'+
             (p.mode==='coop' && p.lock && !unfinished?'<button data-action="start" data-id="'+esc(p.id)+'">开始下一阶事件</button>':'')+
             (p.mode==='coop' && unfinished?'<button data-action="'+(unfinished.paused?'resume':'pause')+'" data-id="'+esc(p.id)+'" data-event="'+esc(unfinished.id)+'">'+(unfinished.paused?'继续事件':'暂停事件')+'</button>':'')+
             (p.mode==='coop' && unfinished?.paused?'<button data-action="replan" data-id="'+esc(p.id)+'" data-event="'+esc(unfinished.id)+'">重设未演部分</button>':'')+
-            '<button data-action="history" data-id="'+esc(p.id)+'">历阶摘要／档案</button></div>'+
+            '<button data-action="history" data-id="'+esc(p.id)+'">历阶摘要／档案</button>'+
+            '<button data-action="delete" data-id="'+esc(p.id)+'">删除角色</button></div>'+
             '<details class="sdc-disclosure"><summary class="sdc-disclosure-trigger"><svg class="sdc-disclosure-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15Z"/></svg><span class="sdc-disclosure-label">编辑角色说明</span><span class="sdc-disclosure-indicator" aria-hidden="true"></span></summary><form data-edit="'+esc(p.id)+'">'+
             '<label>名称<input name="name" value="'+esc(p.name)+'" placeholder="填写正文中使用的角色名或常用称呼" aria-describedby="'+helpId+'-name" required maxlength="100"></label>'+
             '<p id="'+helpId+'-name" class="sdc-field-help">用于界面显示和对话识别，建议与正文中的称呼一致。</p>'+
@@ -50,12 +52,9 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
     }
     function roles(state) {
         const list=Object.values(state.profiles);
-        const pending=(runtime.pendingCharacters || []).filter(candidate=>!state.profiles[candidate.id]);
-        return pending.map(candidate=>'<article class="sdc-card"><strong>'+esc(candidate.name)+'</strong><form data-enroll="'+esc(candidate.id)+'">'+
-            rankOptions()+'<button type="submit">确定阶级</button></form></article>').join('')+
-            '<details class="sdc-disclosure"><summary class="sdc-disclosure-trigger"><svg class="sdc-disclosure-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14M5 12h14"/></svg><span class="sdc-disclosure-label">手动添加卡内 NPC</span><span class="sdc-disclosure-indicator" aria-hidden="true"></span></summary><form id="sdc-add-npc">'+
-            '<label>NPC 名称<input name="name" placeholder="例：艾琳（与正文或角色设定中的称呼一致）" aria-describedby="sdc-npc-name-help" required maxlength="100"></label>'+
-            '<p id="sdc-npc-name-help" class="sdc-field-help">填写要单独维护好感和 Coop 的具体人物名，便于在对话中识别。</p>'+
+        return '<details class="sdc-disclosure"'+(!list.length?' open':'')+'><summary class="sdc-disclosure-trigger"><svg class="sdc-disclosure-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14M5 12h14"/></svg><span class="sdc-disclosure-label">添加剧情人物</span><span class="sdc-disclosure-indicator" aria-hidden="true"></span></summary><form id="sdc-add-npc">'+
+            '<label>人物名称<input name="name" placeholder="例：英妮缇雅（填写剧情或世界书中的人物名）" aria-describedby="sdc-npc-name-help" required maxlength="100"></label>'+
+            '<p id="sdc-npc-name-help" class="sdc-field-help">输入要维护好感和 Coop 的具体人物名。设计事件时，神谕会按名称与别名从上下文剧情和相关世界书中读取已有设定。</p>'+
             '<label>别名／简称（可选）<textarea name="aliases" rows="2" maxlength="1400" placeholder="例：英妮缇雅，维赛塔&#10;同一人物的其他称呼，用逗号或换行分隔。" aria-describedby="sdc-npc-aliases-help"></textarea></label>'+
             '<p id="sdc-npc-aliases-help" class="sdc-field-help">全名和别名会归到同一个人物档案，不会重复加分或另开 Coop 线。共用姓氏可能有歧义，请只加入能明确指代此人的称呼。</p>'+
             '<label>补充设定（可选）<textarea name="description" rows="4" maxlength="12000" placeholder="可留空。神谕会从当前角色卡、世界书和故事上下文提取已有设定。&#10;例：对陌生人保持戒心，但答应过的事一定做到。仅填写你希望额外补充的内容。" aria-describedby="sdc-npc-description-help"></textarea></label>'+
@@ -63,7 +62,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
             rankOptions()+
             '<label>初始好感<input name="initialAffinity" type="number" min="0" max="100" value="0" placeholder="0～100，通常从 0 开始" aria-describedby="sdc-initial-affinity-help"></label>'+
             '<p id="sdc-initial-affinity-help" class="sdc-field-help">设定两人已有的关系基础，通常填 0。达到所选方案首阶门槛时会封顶并锁定，完成事件后提升 Rank。</p>'+
-            '<button type="submit">添加 NPC</button></form></details>'+
+            '<button type="submit">添加人物</button></form></details>'+
             (list.length?list.map(card).join(''):'<p class="sdc-empty">暂无角色档案。</p>');
     }
     function eventPage(state) {
@@ -136,9 +135,8 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
                 invalidated:skipped,notices:runtime.notices},null,2))+'</pre></details></details>';
     }
     function settings() {
-        return '<label><input id="sdc-auto" type="checkbox"'+(runtime.store.document.settings.autoStart?' checked':'')+'> 在角色可参与且场景空闲时自动开始已就绪事件</label>'+
-            '<label>新事件默认轮数<select id="sdc-rounds"><option value="3"'+(runtime.store.document.settings.eventRounds===3?' selected':'')+'>三轮：切入、困境、收束</option><option value="2"'+(runtime.store.document.settings.eventRounds===2?' selected':'')+'>两轮：切入与困境合并</option></select></label>'+
-            '<p>关闭自动开始不解除好感锁。始终只处理管理名单中的角色。</p>'+
+        return '<label>新事件默认轮数<select id="sdc-rounds"><option value="3"'+(runtime.store.document.settings.eventRounds===3?' selected':'')+'>三轮：切入、困境、收束</option><option value="2"'+(runtime.store.document.settings.eventRounds===2?' selected':'')+'>两轮：切入与困境合并</option></select></label>'+
+            '<p>角色可参与、场景空闲且全局允许自动生成时，自动开始已就绪事件。始终只处理管理名单中的角色。</p>'+
             '<p>MVU 同步：'+esc(bindingCapability(runtime.host.mvu?.()).reason)+'</p>'+
             '<p>'+esc(runtime.syncMvu.status)+' <button type="button" data-action="sync-mvu">立即同步 MVU</button></p>'+
             (runtime.syncMvu.error?'<p role="status">MVU 同步暂未完成：'+esc(runtime.syncMvu.error.message)+'</p>':'')+
@@ -160,7 +158,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
                 (runtime.store.pending?'<p class="sdc-warning">归档待保存。'+(runtime.store.error?esc(runtime.store.error.message)+' <button data-action="retry">重试保存</button>':'正在等待服务器确认……')+'</p>':'')+
                 (runtime.notices[0]?'<p role="status">'+esc(runtime.notices[0].message)+' <button data-action="dismiss">知道了</button></p>':'')+
                 ({roles:roles,event:eventPage,archive:archive,settings:settings}[tab])(state))+'</div>';
-        if(runtime.store.readonly || runtime.store.pending) panel.querySelectorAll('form button,form input,form textarea,form select,[data-action="start"],[data-action="resume"],[data-action="route"],[data-action="import"],#sdc-import').forEach(node=>{node.disabled=true;});
+        if(runtime.store.readonly || runtime.store.pending) panel.querySelectorAll('form button,form input,form textarea,form select,[data-action="start"],[data-action="resume"],[data-action="route"],[data-action="delete"],[data-action="import"],#sdc-import').forEach(node=>{node.disabled=true;});
     }
     panel.addEventListener('click',event=> {
         const button=event.target.closest('button');if(!button) return;
@@ -168,6 +166,10 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         const action=button.dataset.action, key=button.dataset.id;
         if(action==='close'){panel.hidden=true;return;}
         if(action==='history'){chosen=key;tab='archive';render();}
+        if(action==='delete') {
+            const p=runtime.state()?.profiles[key];
+            if(p && window.confirm('删除“'+p.name+'”的 Coop 档案？好感、Rank、事件和历阶摘要将一并删除。')) run(()=>runtime.removeCharacter(key));
+        }
         if(action==='sync-mvu') run(async()=>{await runtime.syncMvu();render();});
         if(action==='start') run(()=>runtime.generate(key));
         if(action==='replan') run(()=>runtime.generate(key,{replanEventId:button.dataset.event}));
@@ -176,7 +178,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         if(action==='route') run(()=>runtime.route(button.dataset.route));
         if(action==='archive') run(()=>runtime.recoverArchive());
         if(action==='abort') runtime.abort();
-        if(action==='retry') run(()=>runtime.store.retrySave());
+        if(action==='retry') run(async()=>{await runtime.store.retrySave();await runtime.ensureCurrentCharacters();render();});
         if(action==='takeover') run(()=>runtime.takeover());
         if(action==='dismiss'){runtime.notices.shift();render();}
         if(action==='import') panel.querySelector('#sdc-import')?.click();
@@ -192,7 +194,6 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
             if(preview) preview.textContent='门槛：'+rankPolicy(Number(node.value)).thresholds.join(' → ');
         }
         if(node.id==='sdc-history-role'){chosen=node.value;render();}
-        if(node.id==='sdc-auto') run(()=>runtime.configureSettings({autoStart:node.checked}));
         if(node.id==='sdc-rounds') run(()=>runtime.configureSettings({eventRounds:Number(node.value)}));
         if(node.id==='sdc-import' && node.files?.[0]) run(async()=>{
             const data=safeJson(await node.files[0].text(),8*1024*1024);
@@ -204,9 +205,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         event.preventDefault();const form=event.target, data=new FormData(form);
         run(async()=>{
             let input;
-            if(form.dataset.enroll) {
-                await runtime.enrollCard(form.dataset.enroll,Number(data.get('rankCount')));
-            } else if(form.id==='sdc-add-npc') {
+            if(form.id==='sdc-add-npc') {
                 if(Object.values(runtime.state().profiles).some(p=>p.name===text(data.get('name'),100))) throw new Error('同名角色已有档案。');
                 input={id:'npc:'+uuid(),name:data.get('name'),aliases:data.get('aliases'),description:data.get('description'),
                     mode:'coop',rankCount:Number(data.get('rankCount')),initialAffinity:Number(data.get('initialAffinity'))};

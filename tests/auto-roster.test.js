@@ -114,3 +114,17 @@ test('a name conflict never overwrites a manually managed NPC',async t=>{
     assert.deepEqual(h.runtime.store.document,before);assert.equal(h.saved.length,1);
     assert.equal(h.runtime.state().profiles['npc:painter'].affinity,18);
 });
+
+test('a deleted card stays unmanaged across reload and can be explicitly enrolled again',async t=>{
+    const h=setup(t,{context:{characters:cards,characterId:0}});await h.runtime.load();
+    const id=h.runtime.pendingCharacters[0].id;await h.runtime.enrollCard(id,4);
+    await h.runtime.removeCharacter(id);
+    assert.equal(h.runtime.state().profiles[id],undefined);
+    assert.equal(h.runtime.pendingCharacters[0].id,id);
+    await h.runtime.load();assert.equal(h.runtime.state().profiles[id],undefined);
+    assert.equal(h.runtime.pendingCharacters[0].id,id);
+    await h.runtime.enrollCard(id,7);
+    assert.equal(h.runtime.state().profiles[id].rankCount,7);
+    assert.equal(h.runtime.state().profiles[id].affinity,0);
+    assert.equal(h.runtime.state().profiles[id].policyRevision,2);
+});
