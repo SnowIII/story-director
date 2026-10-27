@@ -1,5 +1,7 @@
 let coopScene = false;
 export function setCoopScene(value) { coopScene = !!value; }
+let coopMvuAuthority = false;
+export function setCoopMvuAuthority(value) { coopMvuAuthority = !!value; }
 /**
  * 故事导演 · 纯逻辑层
  *
@@ -1602,6 +1604,12 @@ const MAIN_LOCKED_IN_INTERLUDE = new Set([
 function ownedPathOf(target) {
   return String(target ?? '').replace(/\[(['"])(.*?)\1\]/g, '.$2');
 }
+function mvuAffinityPath(target) {
+  if (!coopMvuAuthority) return false;
+  const parts = toPath(target);
+  return parts.length === 5 && parts[0] === NS && parts[1] === 'Coop' && parts[2] === '角色'
+    && ['好感度', '好感锁定'].includes(parts[4]);
+}
 
 /**
  * 诊断计数：模型（或旧消息重放）想写一个**更小**的拍号、被我们按「只增不减」挡掉了几次。
@@ -1673,6 +1681,7 @@ export function applyNsCommand(statData, command, path) {
   const args = Array.isArray(command?.args) ? command.args : [];
   const target = String(path ?? '');
   const owned = ownedPathOf(target);
+  if (mvuAffinityPath(target)) return false;
   if (owned === NS) return true;
   if (coopScene && owned !== NS + '.Coop.回报') return true;
   if (owned === NS + '.Coop' || owned.startsWith(NS + '.Coop.')) {
@@ -1757,7 +1766,7 @@ export function applyNsCommands(statData, commands) {
   const rest = [];
   for (const command of commands) {
     const path = nsPathOfCommand(command);
-    if (path === null) rest.push(command);
+    if (path === null || mvuAffinityPath(path)) rest.push(command);
     else mine.push({ command, path });
   }
   if (!mine.length) return { owned: 0, applied: 0 };

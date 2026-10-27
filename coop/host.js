@@ -3,6 +3,7 @@ import {STORAGE_KEY} from './store.js';
 import {visibleBody} from './messages.js';
 import {stripScriptChunks} from '../model.js';
 import {mentionsProfile} from './identity.js';
+import {mvuApiFor} from './mvu.js';
 export function hostContext() { return globalThis.SillyTavern?.getContext?.() || globalThis.window?.SillyTavern?.getContext?.() || {}; }
 export function contextScope(ctx=hostContext()) {
     const chatId=ctx.getCurrentChatId?.() || ctx.chatId;
@@ -12,11 +13,12 @@ export function contextScope(ctx=hostContext()) {
 }
 export function createHost(hooks={}) {
     return {
+        affinityAuthority:'mvu',
         context:hostContext,
         scope:()=>contextScope(),
         metadata:()=>hostContext().chatMetadata,
         messages:()=>hostContext().chat || [],
-        mvu:()=>globalThis.window?.Mvu,
+        mvu:()=>mvuApiFor(),
         reload:()=>hostContext().reloadCurrentChat?.(),
         async persist(document,scope) {
             const ctx=hostContext();

@@ -132,6 +132,7 @@ export function adoptPlan(state, input) {
     if (Object.values(p.events).some(e=>e.gateId===p.lock.id && e.phase!=='completed')) fail('EVENT_EXISTS','该阶已有未完成事件，请继续原事件');
     p.seeds=p.seeds || clone(plan.seeds);
     p.events[eventId]={id:eventId,characterId:p.id,gateId:p.lock.id,targetRank:p.rank+1,plan,
+        ...(input.createdAt?{createdAt:clone(input.createdAt)}:{}),
         phase:'hook',paused:false,version:1,playedUsers:[],questionSource:null,initialAnswerSource:null,answerSource:null,
         route:null,historyIds:p.history.map(h=>h.eventId),historySignature:input.historySignature || historySignature(p),progress:[]};
     state.activeEventId=eventId; p.revision++;
@@ -139,7 +140,7 @@ export function adoptPlan(state, input) {
 }
 export function eventOf(state, characterId, eventId) {
     const p=profileOf(state,characterId), e=p.events[eventId];
-    if (!e || !p.lock || e.gateId!==p.lock.id || e.phase==='completed') fail('STALE_EVENT');
+    if (!e || (!p.lock || e.gateId!==p.lock.id) && !state.mvuAuthority || e.phase==='completed') fail('STALE_EVENT');
     return {p,e};
 }
 export function pauseEvent(state,characterId,eventId) {
@@ -224,6 +225,7 @@ export function completeEvent(state,input) {
             source:clone(s),rank:e.targetRank,characterId:p.id});
     }
     const history={rank:e.targetRank,eventId:e.id,summary,summaryVersion:1,outcome,choice,traits,facts,boundaries,openHooks,closedHooks,
+        ...(e.createdAt?{createdAt:clone(e.createdAt)}:{}),
         route:e.route || p.route,source:clone(s),initialAnswerSource:clone(e.initialAnswerSource || e.answerSource),
         answerSource:clone(e.answerSource),sharedFacts:shared};
     if(p.history.some(h=>h.rank===e.targetRank || h.eventId===e.id)) fail('ALREADY_COMMITTED');

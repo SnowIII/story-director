@@ -1,5 +1,5 @@
 import {clone,fail} from './model.js';
-import {newDocument,readDocument,project,appendOperation} from './timeline.js';
+import {newDocument,readDocument,project,appendOperation,deletedEventIds,pruneDeletedEvents} from './timeline.js';
 import {sourceMap,uuid,matchesSourceVersion} from './messages.js';
 export const STORAGE_KEY='storyDirectorCoop';
 
@@ -7,6 +7,7 @@ export class CoopStore {
     constructor(host) {
         this.host=host;this.document=null;this.state=null;this.scope='';this.queue=Promise.resolve();
         this.error=null;this.pending=null;this.readonly=false;this.onChange=()=>{};this.excluded=new Map();this.generation=0;
+        this.eventPruneTask=null;
     }
     load() {
         this.generation++;
@@ -14,6 +15,7 @@ export class CoopStore {
         this.scope=scope;this.excluded.clear();this.pending=null;this.error=null;
         if(!scope) {this.scope='';this.document=null;this.state=null;return;}
         this.document=readDocument(this.host.metadata()?.[STORAGE_KEY],scope);
+        if(this.host.affinityAuthority==='mvu') this.document.settings.affinityAuthority='mvu';
         this.reconcile();
     }
     sources() {
@@ -21,8 +23,12 @@ export class CoopStore {
         for(const [key,version] of this.excluded) if(matchesSourceVersion(map.get(key),version)) map.delete(key);
         return map;
     }
+    project(document=this.document) {
+        const state=project(document,this.sources());
+        return this.host.projectState?.(state) || state;
+    }
     reconcile() {
-        if(this.document) this.state=project(this.document,this.sources());
+        if(this.document) this.state=this.project();
         this.onChange();
         return this.state;
     }
@@ -34,16 +40,16 @@ export class CoopStore {
             if(this.readonly) fail('READ_ONLY','其他窗口正在维护此聊天；请在当前写入窗口操作');
             if(this.pending && this.error && !retry) fail('SAVE_PENDING','请先重试保存尚未确认的进度');
             const next=clone(this.document || newDocument(scope));
-            const before=project(next,this.sources());
+            const before=this.project(next);
             const result=await change(next,before);
             if(!current()) fail('STALE_SCOPE');
             next.revision=(this.document?.revision || 0)+1;next.updatedAt=new Date().toISOString();
-            project(next,this.sources());
+            this.project(next);
             this.pending=next;this.error=null;this.onChange();
             try {
                 await this.host.persist(next,scope);
                 if(!current()) return result;
-                const state=project(next,this.sources());
+                const state=this.project(next);
                 this.document=next;this.state=state;this.pending=null;this.error=null;
                 this.host.broadcast?.(next);this.onChange();return result;
             } catch(error) {
@@ -59,8 +65,26 @@ export class CoopStore {
         return this.enqueue((document,state)=>{
             const op={id:operationId || uuid(),kind,characterId,data:clone(data),refs:clone(refs),
                 mode:state.profiles[characterId]?.mode || 'coop',at:Date.now()};
+            if(this.host.affinityAuthority==='mvu') {
+                op.mvuAuthority=true;
+                if(kind==='plan') {op.data.mvuGate=clone(state.profiles[characterId].lock);op.data.mvuAffinity=state.profiles[characterId].affinity;}
+            }
             return appendOperation(document,state,op,this.sources());
         });
+    }
+    pruneEvents() {
+        if(this.eventPruneTask) return this.eventPruneTask;
+        if(!this.document || this.readonly || this.scope!==this.host.scope() || !deletedEventIds(this.document,sourceMap(this.host.messages())).size) return Promise.resolve([]);
+        this.eventPruneTask=this.enqueue(document=>{
+            const removed=pruneDeletedEvents(document,sourceMap(this.host.messages()));
+            this.host.pruneEventCaches?.(new Set(removed));
+            return removed;
+        }).catch(()=>[]).finally(()=>{
+            this.eventPruneTask=null;
+            if(!this.pending && !this.error && !this.readonly && this.document && this.scope===this.host.scope() &&
+                deletedEventIds(this.document,sourceMap(this.host.messages())).size) void this.pruneEvents();
+        });
+        return this.eventPruneTask;
     }
     retrySave() {
         if(!this.pending) return Promise.resolve();

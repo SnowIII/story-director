@@ -17,6 +17,7 @@
  */
 
 import { createCoopSystem } from './coop/bootstrap.js';
+import { mvuApiFor } from './coop/mvu.js';
 import { createMessageRefreshQueue } from './message-render.js';
 import { createUpdateReloader } from './update-reload.js';
 import { extension_settings } from '../../../extensions.js';
@@ -720,11 +721,11 @@ function persistChatSlice() {
 // 阶段三：MVU 数据访问
 
 let mvuApi = null;
-const mvu = () => mvuApi || window.Mvu || null;
+const mvu = () => mvuApiFor() || mvuApi;
 
 /** 优先用酒馆助手提供的 waitGlobalInitialized 等 Mvu 就绪，避免插件加载早于 MVU。 */
 async function resolveMvu() {
-    if (window.Mvu) { mvuApi = window.Mvu; return mvuApi; }
+    if (mvu()) { mvuApi = mvu(); return mvuApi; }
     const helper = window.TavernHelper;
     const wait = helper?.waitGlobalInitialized || helper?._bind?._waitGlobalInitialized;
     if (typeof wait === 'function') {
@@ -2392,7 +2393,7 @@ function completedChapterGoals(root) {
  *   而防重复块里**只有章名标题、没有内容**，模型根本不知道"这套因果已经写过了"。
  *   现在旧章表以「**要避开**的东西」的身份出现在这里。
  */
-function antiRepeatBlock(task = '') {
+function antiRepeatBlock(task = '', { replacingEpic = false } = {}) {
     const s = settings();
     const root = rootOf();
     const history = completedMainTitles(root);
@@ -2401,7 +2402,18 @@ function antiRepeatBlock(task = '') {
     if (history.length) lines.push(`已经走过的章（不要重演，也不要换个说法再来一遍）：${history.join('、')}`);
     if (titles.length) lines.push(`已经用过的标题（新的标题不要与它们重复或近似）：${titles.join('、')}`);
     if (task === 'epic') {
-        const retired = Array.isArray(s.run.retiredEpics) ? s.run.retiredEpics : [];
+        let retired = Array.isArray(s.run.retiredEpics) ? s.run.retiredEpics : [];
+        // 换篇章时临时带上当前章表；生成成功前不把它写进淘汰 / 归档记录。
+        if (replacingEpic) {
+            const outgoing = epicOf(root);
+            const title = String(unwrap(outgoing[EP.title]) ?? '').trim();
+            const chapters = epicChapters(outgoing).slice(0, 24);
+            if (epicStarted(outgoing) && chapters.length) {
+                retired = retired.filter((old) => String(old?.title ?? '') !== title
+                    || JSON.stringify(old?.chapters) !== JSON.stringify(chapters));
+                retired = [...retired, { title, chapters }];
+            }
+        }
         for (const old of retired.slice(-2)) {
             const chapters = Array.isArray(old?.chapters) ? old.chapters : [];
             if (!chapters.length) continue;
@@ -3226,7 +3238,7 @@ async function buildUserPrompt(task, userText = '', taskOpts = {}) {
     // ★ 朱批（用户对上一版的不满）放在用户输入的**最后**：最靠近尾注，模型最容易照它动。
     //   它由弹窗的「对上一版的朱批」那一栏经 taskOpts 传进来（只影响这一次重生成）。
     if (taskOpts.critique) blocks.push(String(taskOpts.critique));
-    const anti = antiRepeatBlock(task);
+    const anti = antiRepeatBlock(task, taskOpts);
     if (anti) blocks.push(anti);
     const tail = {
         chapter: '请按上面的格式输出一个 <StoryChapters> 区块。',
@@ -4079,17 +4091,8 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
     const origin = chatKey();
     // establish = 换新的一部 → 进度归零；evolve = 校准 → 不动进度
     const progress = mode === 'establish' ? 0 : null;
-    // ★ 换新的一部之前，先把**旧的这一部**记进名单：
-    //   ① 它会被当成「要避开的东西」进防重复块（不然新的一部就是它的换皮）；
-    //   ② 同时告诉上下文构造器：**别再拿旧章表当"这一册的章内容"发下去**。
-    //   ⚠ 理由（why）由**实际状态**决定，不看是谁调用的：
-    //     章表写满 = 演义完了 → **归档**；没演完就被换掉 → 只当防重复提醒（几轮后自动清掉）。
-    if (mode === 'establish') {
-        const outgoing = epicOf(rootOf());
-        if (epicStarted(outgoing)) {
-            rememberRetiredEpic(outgoing, { why: epicFinished(outgoing) ? 'finished' : 'replaced' });
-        }
-    }
+    // 先保留旧篇章快照，成功采用新篇章后才淘汰；请求中的防重复由 taskOpts 临时提供。
+    const outgoing = mode === 'establish' ? epicOf(rootOf()) : null;
     try {
         const raw = await askOracle({
             task: 'epic',
@@ -4150,6 +4153,10 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
             console.info(`[故事导演] 篇章检查结果：${changed ? '有调整' : '照旧'}${verdict ? `｜${verdict}` : ''}`);
         }
         await applyEpic(epic, { quiet: false, entry: progress });
+        if (origin && chatKey() !== origin) return false;
+        if (outgoing && epicStarted(outgoing)) {
+            rememberRetiredEpic(outgoing, { why: epicFinished(outgoing) ? 'finished' : 'replaced' });
+        }
         return true;
     } catch (error) {
         console.debug('[故事导演] 生成史诗失败', error);
@@ -5723,11 +5730,6 @@ function renderMainTab() {
         save();
         render();
     });
-    host.querySelector('[name="chapters-per-epic"]')?.addEventListener('change', (event) => {
-        settings().chaptersPerEpic = Math.max(1, Math.min(12, Math.round(toNumber(event.target.value, 4))));
-        save();
-        render();
-    });
 }
 
 function renderSideTab() {
@@ -5951,6 +5953,11 @@ function renderSetTab() {
     bind('max-interludes', 'maxInterludes', 'value');
     bind('story-transcript', 'storyTranscript');
     bind('auto-epic', 'autoEpic');
+    host.querySelector('[name="chapters-per-epic"]')?.addEventListener('change', (event) => {
+        s.chaptersPerEpic = Math.max(1, Math.min(12, Math.round(toNumber(event.target.value, 4))));
+        save();
+        render();
+    });
     bind('discarded-epic-rounds', 'discardedEpicKeepRounds', 'value');
     bind('audit-epic', 'auditEpic');
     bind('transcript-limit', 'transcriptLimit', 'value');
@@ -6246,15 +6253,21 @@ async function finishChapter() {
     const main = mainState();
     const beats = beatsOf(main);
     await patchMain({ [KEY_BEAT]: beats.length + 1, [KEY_CHAPTER_DONE]: true, [KEY_READY]: true });
-    // ⚠ 不要在这里伪造 live：rootOf() 是 getMvuData 的快照，包成 live 会让 rememberChapter 走
-    // 「只原地改、不回写」的快路径，章节史就进不了 MVU（autoChapter 关掉时永远进不了）。
-    await rememberChapter(main);
-    settings().run.closedChapter = `主线:${String(unwrap(main[MAIN_TITLE]) ?? '').trim()}`;
+    const s = settings();
+    const advance = s.autoDirector && s.autoChapter;
+    if (advance) {
+        // 手动收尾立即交给导演，记史与 closedChapter 交给正常收尾流程。
+        s.run.closedChapter = '';
+        s.run.aftermathAt = 0;
+    } else {
+        await rememberChapter(main);
+        s.run.closedChapter = `主线:${String(unwrap(main[MAIN_TITLE]) ?? '').trim()}`;
+    }
     save();
     syncMainInjection();
     render();
-    toast('本章已标记为收尾；自动换章开着的话会请神谕开下一章。', 'success');
-    if (settings().autoDirector && settings().autoChapter) void evaluateDirector();
+    toast(advance ? '本章已标记为收尾，正在交给故事神谕衔接下一幕。' : '本章已收尾并记入章节史；可手动设计下一章。', 'success');
+    if (advance) await evaluateDirector();
 }
 
 /** 只重排剩下的拍（已演过的不动）。 */
@@ -6561,17 +6574,35 @@ async function manualAdvanceInterludeBeat() {
     toast(`间章切到第 ${beat + 1} 个日常画面（共 ${beats.length} 个）。`, 'success');
 }
 
-/** 「现在回主线」：立刻收掉间章（**不必跑完拍**），回主线并开新的一章。 */
+/** 「现在回主线」：立刻收掉间章；自动换章开启时接着请神谕开新章。 */
 async function endInterludeNow() {
     const chapter = interludeChapterOf(rootOf());
     if (!truthy(chapter[IL.active])) { toast('现在不在间章里。', 'info'); return; }
-    await patchInterlude({ [IL.ready]: true });
-    const rt = settings().run;
+    const s = settings();
+    const rt = s.run;
+    const origin = chatKey();
+    const ilKey = `间章:${String(unwrap(chapter[IL.title]) ?? '').trim()}`;
     // 手动按钮不受自动节奏的冷却限制：用户说了算
     rt.lastGenerateAt = 0;
+    rt.aftermathAt = aiMessageCount();
+    rt.beatAt = rt.aftermathAt;
+    await rememberInterlude(chapter);
+    await switchMode('main', { quiet: true });
+    if (!s.autoChapter) {
+        rt.closedChapter = ilKey;
+        save();
+        toast('已回到主线；自动换章已关闭，可手动设计下一章。', 'success');
+        return;
+    }
+    toast('已回到主线，正在请故事神谕接上下一章。', 'info');
+    const opened = await ensureClosingChapter({ interlude: false });
+    if (chatKey() !== origin) return;
+    if (opened) rt.closedChapter = ilKey;
+    else {
+        rt.lastGenerateAt = 0;
+        if (!justAborted()) toast('已回到主线，但新章未生成；可手动设计下一章重试。', 'warning');
+    }
     save();
-    toast('好，回主线 —— 正在请故事神谕接上。', 'success');
-    await evaluateDirector();
 }
 
 /**

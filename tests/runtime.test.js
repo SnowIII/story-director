@@ -392,6 +392,29 @@ for(const change of ['edit','delete']) test('a resolution source invalidated dur
     await h.runtime.load();assert.equal(h.runtime.state().profiles.a.rank,0);
 });
 
+test('a new role enters both MVU mirrors only after its registration is saved',async t=>{
+    const h=await setup(t);await h.configure('affinity',7);
+    h.messages.push({is_user:false,mes:'画家和医生在画室里。'});
+    const tables={message:{stat_data:{生命:11,故事导演:{Coop:{角色:{$meta:{extensible:true}}}}}},
+        chat:{stat_data:{生命:12,故事导演:{Coop:{角色:{$meta:{extensible:true}}}}}}};
+    h.host.mvu=()=>({getMvuData:target=>tables[target.type],replaceMvuData:async(data,target)=>{tables[target.type]=clone(data);}});
+    await h.runtime.syncMvu();
+    const persist=h.host.persist;h.host.persist=async()=>{throw new Error('offline');};
+    await assert.rejects(h.runtime.configure({id:'b',name:'医生.艾"琳',mode:'coop',rankCount:7,initialAffinity:9}),/offline/);
+    await h.runtime.syncMvu();
+    for(const type of ['message','chat']) {
+        assert.equal(tables[type].stat_data.故事导演.Coop.角色['医生.艾"琳'],undefined);
+        assert.equal(tables[type].stat_data.故事导演.Coop.角色.画家.好感度,7);
+    }
+    h.host.persist=persist;await h.runtime.store.retrySave();await h.runtime.syncMvu();
+    for(const type of ['message','chat']) {
+        const roles=tables[type].stat_data.故事导演.Coop.角色;
+        assert.equal(roles['医生.艾"琳'].好感度,9);assert.equal(roles['医生.艾"琳'].阶级上限,7);
+        assert.equal(roles.画家.好感度,7);assert.deepEqual(roles.$meta,{extensible:true});
+    }
+    assert.equal(tables.message.stat_data.生命,11);assert.equal(tables.chat.stat_data.生命,12);
+});
+
 test('MVU mirrors confirmed scores, retains the old total on save failure and follows source rollback',async t=>{
     const h=await setup(t);await h.configure('affinity',0);
     const tables={message:{stat_data:{生命:11}},chat:{stat_data:{生命:11}}};

@@ -11,6 +11,21 @@ export function legacyVisibleBody(body) {
         .replace(/<故事导演(?:自检|审查|审查说明)>[\s\S]*?<\/故事导演(?:自检|审查|审查说明)>/g,'').trim();
 }
 
+// AutoInstructionAppender 会在发送下一轮时清掉历史消息的这些附加指令。
+const instructionPattern = /<!--AIA_VISIBLE_START-->[\s\S]*?<!--AIA_VISIBLE_END-->|<!--\s*\[System Note\][\s\S]*?-->|<div class="aia-(?:stealth|visible)-cmd">\[System Note:[\s\S]*?<\/div>|<aia-cmd\b[^>]*>[\s\S]*?<\/aia-cmd>/gi;
+export function instructionBlocks(body) {
+    return [...String(body || '').matchAll(instructionPattern)].map(match=>match[0]);
+}
+export function instructionSourceVariants(body,blocks) {
+    const raw=String(body || ''),clean=raw.replace(instructionPattern,''),variants=new Set([raw]);
+    for(const block of blocks) {
+        // 记忆插件可能把原输入包在这个标签里；只还原实际见过的指令块，不信任缓存里的旧哈希。
+        if(clean.includes('</本轮用户输入>')) variants.add(clean.replace(/\s*<\/本轮用户输入>/,()=> '\n\n'+block+'\n</本轮用户输入>'));
+        variants.add(clean.trimEnd()+'\n\n'+block);
+    }
+    return [...variants];
+}
+
 function variableRanges(body) {
     const ranges=[];
     let start=null, contentDepth=0;
@@ -32,8 +47,10 @@ function variableRanges(body) {
     return ranges;
 }
 
-function withoutAnalysis(body) {
-    let result=stripReport(body).replace(/<(build|think|thinking|analysis)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,'');
+function withoutAnalysis(body,{keepInstructions=false}={}) {
+    let result=stripReport(body);
+    if(!keepInstructions) result=result.replace(instructionPattern,'');
+    result=result.replace(/<(build|think|thinking|analysis)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,'');
     // An unfinished analysis block cannot consume a following explicit story.
     result=result.replace(/<(?:build|think|thinking|analysis)\b[^>]*>([\s\S]*)$/gi,(_all,tail)=>{
         const story=tail.search(/<content\b|###\s*正文/i);
@@ -45,8 +62,8 @@ export function updateVariableBlocks(body) {
     const clean=withoutAnalysis(body);
     return variableRanges(clean).map(([from,to])=>clean.slice(from,to)).filter(block=>/<\/UpdateVariable\s*>$/i.test(block));
 }
-export function visibleBody(body,{keepImagePlaceholders=false}={}) {
-    let result=withoutAnalysis(body);
+export function visibleBody(body,{keepImagePlaceholders=false,keepInstructions=false}={}) {
+    let result=withoutAnalysis(body,{keepInstructions});
     for(const [from,to] of variableRanges(result).reverse()) result=result.slice(0,from)+result.slice(to);
     result=result
         .replace(/<story_director_status\b[^>]*>[\s\S]*?<\/story_director_status\s*>/gi,'')

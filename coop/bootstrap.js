@@ -2,8 +2,10 @@ import {createHost} from './host.js';
 import {CoopRuntime} from './runtime.js';
 import {mountCoopUI} from './ui.js';
 import {sourceForId} from './messages.js';
+import {setCoopMvuAuthority} from '../model.js';
 export function createCoopSystem(hooks={}) {
     const host=createHost(hooks), runtime=new CoopRuntime(host);
+    setCoopMvuAuthority(runtime.usesMvuAffinity);
     const ui=mountCoopUI(runtime,{container:hooks.uiContainer,onOpen:hooks.openPanel});
     const ctx=host.context(), events=ctx.eventSource, types=ctx.eventTypes || ctx.event_types || {};
     const on=(name,handler)=>{

@@ -19,6 +19,25 @@ export function readDocument(raw,scope) {
 export function validRefs(refs,sources) {
     return (refs || []).every(ref=>matchesSourceVersion(sources.get(ref.id),ref.version));
 }
+/** 楼层号用于显示，删除判断使用消息 ID；中间删楼后编号会改变。 */
+export function deletedEventIds(document,sources) {
+    const plans=document.journal.filter(op=>op.kind==='plan'),cuts=new Map();
+    for(const op of plans) {
+        const anchor=op.data.createdAt?.id || op.refs?.[0]?.id;
+        if(anchor && !sources.has(anchor) || (op.refs || []).some(ref=>!sources.has(ref.id))) {
+            cuts.set(op.characterId,Math.min(cuts.get(op.characterId) ?? Infinity,op.data.plan.targetRank));
+        }
+    }
+    return new Set(plans.filter(op=>op.data.plan.targetRank>=(cuts.get(op.characterId) ?? Infinity)).map(op=>op.data.eventId));
+}
+export function pruneDeletedEvents(document,sources) {
+    const removed=deletedEventIds(document,sources);
+    if(!removed.size) return [];
+    document.journal=document.journal.filter(op=>!removed.has(op.data?.eventId) &&
+        !(op.affinityHistory || []).some(eventId=>removed.has(eventId)));
+    for(const eventId of removed) if(document.summaryEdits) delete document.summaryEdits[eventId];
+    return [...removed];
+}
 export function roleSignature(state,characterId) {
     const p=state.profiles[characterId];
     if(!p) return '';
@@ -29,7 +48,7 @@ function operationDependencies(state,op) {
     const p=state.profiles[op.characterId],e=p?.events[op.data?.eventId];
     const sourceRef=source=>source?{id:source.id,version:source.version}:null;
     // Recheck thresholds in the model; unrelated totals and events are not prerequisites.
-    return {rank:p?.rank,route:p?.route,gate:p?.lock?clone(p.lock):null,history:p?.history.map(h=>h.eventId) || [],
+    return {rank:p?.rank,route:p?.route,gate:op.mvuAuthority?null:p?.lock?clone(p.lock):null,history:p?.history.map(h=>h.eventId) || [],
         event:e?hash(JSON.stringify({id:e.id,version:e.version,phase:e.phase,paused:e.paused,plan:e.plan,
             history:e.historySignature,progress:e.progress.map(step=>[step.phase,sourceRef(step.source)]),
             question:sourceRef(e.questionSource),initialAnswer:sourceRef(e.initialAnswerSource),
@@ -43,7 +62,9 @@ export function applyOperation(state,op) {
         switch(op.kind) {
             case 'affinity':result=applyAffinity(state,op.data);break;
             case 'activate':result=activateGate(state,op.characterId,op.id,op.data.thresholds);break;
-            case 'plan':result=adoptPlan(state,{...op.data,characterId:op.characterId});break;
+            case 'plan':
+                if(op.mvuAuthority && op.data.mvuGate) {p.affinity=op.data.mvuAffinity;p.lock=clone(op.data.mvuGate);}
+                result=adoptPlan(state,{...op.data,characterId:op.characterId});break;
             case 'replan':result=replanEvent(state,{...op.data,characterId:op.characterId});break;
             case 'pause':result=pauseEvent(state,op.characterId,op.data.eventId);break;
             case 'resume':result=resumeEvent(state,op.characterId,op.data.eventId);break;
@@ -58,6 +79,7 @@ export function applyOperation(state,op) {
 }
 export function project(document,sources) {
     const state=initialState(document.roster), skipped=[];
+    if(document.settings?.affinityAuthority==='mvu') state.mvuAuthority=true;
     const ids=new Set(), priorCompletions=new Set();
     for(const op of document.journal) {
         if(ids.has(op.id)) continue;

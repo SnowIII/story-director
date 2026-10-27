@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CoopRuntime } from '../coop/runtime.js';
 import { clone, hash } from '../coop/model.js';
-import { legacyVisibleBody } from '../coop/body.js';
+import { legacyVisibleBody, fingerprintBody } from '../coop/body.js';
 import { sourceMap, visibleBody } from '../coop/messages.js';
 import { STORAGE_KEY } from '../coop/store.js';
 
@@ -21,8 +21,8 @@ async function setup(t, mode = 'coop', initialAffinity = 0) {
     t.after(() => runtime.dispose());
     await runtime.configure({ id: 'npc:review', name: '测试画家', mode, initialAffinity });
     const profile = () => runtime.state().profiles['npc:review'];
-    async function send(delta, body = '<content>她放心地把资料交给你。</content>') {
-        messages.push({ is_user: true, mes: '我来帮你核对资料。' });
+    async function send(delta, body = '<content>她放心地把资料交给你。</content>', user = '我来帮你核对资料。') {
+        messages.push({ is_user: true, mes: user });
         await runtime.prepare();
         const report = { nonce: runtime.snapshot.nonce, affinity: [{
             characterId: 'npc:review', delta, reason: '接受实际帮助',
@@ -56,6 +56,30 @@ test('A2: director control-tag cleanup and newline collapse must preserve affini
         .replace(/\n{3,}/g, '\n\n').trimEnd();
     h.runtime.store.reconcile();
     assert.equal(h.profile().affinity, 1, 'the director cleanup invalidated its own score source');
+});
+
+test('A3: removing old automatic instructions restores legacy cumulative scores without duplicating them', async t => {
+    const h=await setup(t,'coop',5);
+    const note='<!--AIA_VISIBLE_START-->\n> **[System Note]**\n> 对话使用角色标签。\n<!--AIA_VISIBLE_END-->';
+    const user='<本轮用户输入>\n我来帮你核对资料。\n\n'+note+'\n</本轮用户输入>\n<recall>已有记忆</recall>';
+    for(const delta of [2,1,1]) {
+        for(const message of h.messages.filter(message=>message.is_user)) message.mes=message.mes.replace(note,'');
+        const index=await h.send(delta,undefined,user),input=h.messages[index-1];
+        const legacy='v2:'+hash(fingerprintBody(input.mes,{keepInstructions:true})+'|0|true');
+        const op=h.runtime.store.document.journal.at(-1);
+        op.refs.find(ref=>ref.id===input.sd_coop_id).version=legacy;
+        h.messages[index].extra.sdCoopSnapshot.userVersion=legacy;
+    }
+    h.metadata[STORAGE_KEY]=clone(h.runtime.store.document);
+    await h.runtime.load();
+    assert.equal(h.profile().affinity,9);
+    assert.deepEqual(h.profile().scoreLog.map(log=>log.actual),[2,1,1]);
+    await h.runtime.afterMessage(h.messages.length-1);
+    await h.runtime.load();
+    assert.equal(h.profile().affinity,9);assert.equal(h.profile().scoreLog.length,3);
+    h.messages[0].mes=h.messages[0].mes.replace('帮你核对','拒绝核对');
+    h.runtime.store.reconcile();
+    assert.equal(h.profile().affinity,7,'an actual user edit still revokes only its own score');
 });
 
 test('B: mentioning an UpdateVariable opener in a build block must not erase the story evidence', async t => {

@@ -97,3 +97,32 @@ test('a user changing their selected image still invalidates the old interaction
     assert.equal(matchesSourceVersion(changed,source.version),false);
     assert.equal(matchesSourceVersion(changed,oldLegacy),false);
 });
+
+const instructions=[
+    '<!--AIA_VISIBLE_START-->\n> **[System Note]**\n> 对话使用角色标签。\n<!--AIA_VISIBLE_END-->',
+    '<!--[System Note]\n对话使用角色标签。-->',
+];
+for(const note of instructions) test('automatic instruction cleanup preserves user sources and excludes instruction evidence, '+note.slice(0,25),()=>{
+    const body='<本轮用户输入>\n我愿意帮你核对资料。\n\n'+note+'\n</本轮用户输入>\n<recall>旧记忆索引</recall>';
+    const clean=body.replace(note,''),legacy='v2:'+hash(fingerprintBody(body,{keepInstructions:true})+'|0|true');
+    const message={sd_coop_id:'user',is_user:true,mes:body};
+    const version=sourceMap([message]).get('user').version;
+    assert.equal(hasEvidence(body,'对话使用角色标签'),false);
+    message.mes=clean;
+    const messages=[message,{sd_coop_id:'next',is_user:true,mes:'下一轮\n\n'+note}];
+    const source=sourceMap(messages).get('user');
+    assert.equal(source.version,version);
+    assert.ok(matchesSourceVersion(source,legacy),'an observed instruction block reconstructs the exact old hash');
+    message.extra={sdCoopSnapshot:{userVersion:'v2:invented'}};
+    assert.equal(matchesSourceVersion(sourceMap(messages).get('user'),'v2:invented'),false);
+    message.mes=clean.replace('愿意帮你','拒绝帮你');
+    assert.equal(matchesSourceVersion(sourceMap(messages).get('user'),legacy),false);
+});
+test('newly observed instruction blocks invalidate the compatibility cache without trusting missing blocks',()=>{
+    const note=instructions[0],body='我愿意帮你核对资料。',raw=body+'\n\n'+note;
+    const old='v2:'+hash(fingerprintBody(raw,{keepInstructions:true})+'|0|true');
+    const messages=[{sd_coop_id:'user',is_user:true,mes:body}];
+    assert.equal(matchesSourceVersion(sourceMap(messages).get('user'),old),false);
+    messages.push({sd_coop_id:'next',is_user:true,mes:'下一轮\n\n'+note});
+    assert.equal(matchesSourceVersion(sourceMap(messages).get('user'),old),true);
+});

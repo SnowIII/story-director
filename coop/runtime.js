@@ -6,7 +6,7 @@ import {validateAffinityProposal} from './affinity.js';
 import {continuity,publicMemory} from './history.js';
 import {ensureMessageIds,sourceMap,sourceForId,ref,references,parseReports,stripReport,uuid,modelJson,matchesSourceVersion,matchesUserVersion} from './messages.js';
 import {designMessages,renderScene,reportContract} from './prompts.js';
-import {extraModel,readMvuReport,createMvuSync} from './mvu.js';
+import {extraModel,readMvuReport,createMvuSync,readMvuAffinity,mvuCharacterKeys} from './mvu.js';
 import {affinityActivity} from './activity.js';
 
 export class CoopRuntime {
@@ -15,6 +15,18 @@ export class CoopRuntime {
         this.job=null;this.notices=[];this.listeners=new Set();this.scene=false;this.lease=null;
         this.disposed=false;this.queue=Promise.resolve();this.lastAutoFailure=0;this.pendingMvuReports=new Map();
         this.affinityOutcomes=new Map();this.pendingCharacters=[];
+        this.usesMvuAffinity=host.affinityAuthority==='mvu';this.mvuLive=null;
+        if(this.usesMvuAffinity) host.projectState=state=>this.store.scope===host.scope()?
+            readMvuAffinity(host,state,{live:this.mvuLive,previous:this.store.state}):state;
+        host.pruneEventCaches=removed=>{
+            if(removed.has(this.snapshot?.event?.id)) this.snapshot.event=null;
+            for(const snapshot of this.snapshots.values()) if(removed.has(snapshot.event?.id)) snapshot.event=null;
+            for(const [nonce,report] of this.pendingMvuReports) if(removed.has(report.event?.eventId)) this.pendingMvuReports.delete(nonce);
+            for(const message of host.messages()) {
+                if(removed.has(message.extra?.sdCoopSnapshot?.event?.id)) message.extra.sdCoopSnapshot.event=null;
+                for(const report of message.extra?.sdCoopReports?.reports || []) if(removed.has(report?.event?.eventId)) delete report.event;
+            }
+        };
         this.syncMvu=createMvuSync(host,this.store,()=>!this.disposed && this.lease?.scope===this.store.scope);
         const broadcast=host.broadcast;
         host.broadcast=document=>{
@@ -25,6 +37,9 @@ export class CoopRuntime {
     }
     onChange(fn) {this.listeners.add(fn);return ()=>this.listeners.delete(fn);}
     changed() {
+        if(this.job && [this.job.createdAt?.id,this.job.sourceId].filter(Boolean)
+            .some(id=>!this.host.messages().some(message=>message.sd_coop_id===id))) this.abort();
+        if(this.lease?.scope===this.store.scope && this.store.scope===this.host.scope() && !this.store.readonly && !this.disposed) void this.store.pruneEvents();
         const scene=this.occupies();
         if(scene!==this.scene) {this.scene=scene;this.host.sceneChanged?.(scene);}
         this.host.syncPrompts?.();
@@ -42,8 +57,12 @@ export class CoopRuntime {
         this.notices.unshift({code,message:chinese[code] || error.message,detail:error.message,at:Date.now()});
         this.notices=this.notices.slice(0,25);this.changed();
     }
-    state() {return this.store.state;}
+    state() {
+        if(this.usesMvuAffinity && this.store.state && this.store.scope===this.host.scope()) this.host.projectState(this.store.state);
+        return this.store.state;
+    }
     affinityActivity(characterId) {
+        if(this.usesMvuAffinity) return [];
         return affinityActivity({document:this.store.document,pending:this.store.pending,state:this.state(),
             sources:this.store.sources(),messages:this.host.messages(),outcomes:this.affinityOutcomes},characterId);
     }
@@ -135,10 +154,10 @@ export class CoopRuntime {
                 appendOperation(document,state,{id:uuid(),kind:'pause',characterId:roleId,
                     data:{eventId:previousEvent.id},refs:[],mode:'coop'},this.store.sources());
             }
-            configureRoster(document,state,input);
-            const nextState=project(document,this.store.sources());
+            configureRoster(document,state,this.usesMvuAffinity?{...input,acceptCap:true}:input);
+            const nextState=this.store.project(document);
             const p=nextState.profiles[roleId];
-            if(p.mode==='coop' && !p.lock && p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank]) {
+            if(!this.usesMvuAffinity && p.mode==='coop' && !p.lock && p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank]) {
                 appendOperation(document,nextState,{id:uuid(),kind:'activate',characterId:roleId,
                     data:{thresholds:clone(p.thresholds)},refs:[],mode:'coop'},this.store.sources());
             }
@@ -163,6 +182,7 @@ export class CoopRuntime {
         if(this.store.pending) fail('SAVE_PENDING','请先完成尚未确认的保存');
         const p=profileOf(this.state(),characterId);
         if(p.mode!=='coop' || !p.lock) fail('NOT_READY','该角色尚未解锁下一阶事件');
+        if(this.usesMvuAffinity && (!p.mvuReady || p.rank>=p.rankCount || p.affinity<p.thresholds[p.rank])) fail('NOT_READY','等待 MVU 好感达到下一阶门槛并锁定');
         if(this.store.readonly) fail('READ_ONLY');
         continuity(p);
         const existing=replanEventId?p.events[replanEventId]:null;
@@ -171,8 +191,10 @@ export class CoopRuntime {
         const history=hash(continuity(p)), controller=new AbortController();
         ensureMessageIds(this.host.messages());
         const contextRefs=[...this.store.sources().values()].slice(-24).map(ref);
+        const anchor=[...this.store.sources().values()].filter(source=>!source.isSystem).at(-1);
+        const createdAt=anchor?{id:anchor.id,index:anchor.index}:null;
         const contextKey=JSON.stringify(contextRefs);
-        const job={id:uuid(),characterId,controller,scope};this.job=job;this.changed();
+        const job={id:uuid(),characterId,controller,scope,createdAt};this.job=job;this.changed();
         try {
             let context=await this.host.contextText(p);
             const rounds=existing?.progress.length?existing.plan.rounds:this.store.document.settings.eventRounds;
@@ -194,7 +216,8 @@ export class CoopRuntime {
             const map=this.store.sources(), last=[...map.values()].filter(s=>!s.isSystem).at(-1);
             const refs=last?references(last):[];
             await this.store.operation(existing?'replan':'plan',characterId,
-                {eventId:existing?.id || 'event-'+uuid(),gateId:gate,plan:parsed,historySignature:historySignature(fresh)},refs);
+                {eventId:existing?.id || 'event-'+uuid(),gateId:gate,plan:parsed,historySignature:historySignature(fresh),
+                    ...(!existing && createdAt?{createdAt}:{})},refs);
         } catch(error) {
             if(error instanceof SyntaxError) error=Object.assign(new Error('事件设计返回格式不完整，请重试'),{code:'INVALID_PLAN'});
             if(!['CANCELLED','STALE_TASK'].includes(error.code)) this.notice(error);throw error;
@@ -236,7 +259,7 @@ export class CoopRuntime {
             this.host.messages()[s.index]?.extra?.sdCoopSnapshot?.event?.version===event.version).at(-1);
         if(!source) fail('INVALID_SOURCE','尚无用户回应后的收束正文，请继续当前事件');
         const version=event.version,scope=this.store.scope,controller=new AbortController();
-        const job={id:uuid(),characterId:p.id,controller,scope,label:'补齐事件归档'};this.job=job;this.changed();
+        const job={id:uuid(),characterId:p.id,controller,scope,label:'补齐事件归档',createdAt:event.createdAt,sourceId:source.id};this.job=job;this.changed();
         try {
             const messages=[{role:'system',content:[
                 '仅为已经发生的 Coop 事件核对并补齐归档，不继续创作剧情，不代写用户行动。',
@@ -281,8 +304,10 @@ export class CoopRuntime {
         const byExtra=extraModel(this.host.context());
         const snapshot={nonce:'turn-'+uuid(),scope:this.store.scope,userId:user.id,userVersion:user.version,
             byExtra,reportProducer:byExtra?'external':'inline',reportChannel:'mvu',roles:{},event:null};
+        if(this.usesMvuAffinity) snapshot.affinityAuthority='mvu';
+        const mvuKeys=this.usesMvuAffinity?mvuCharacterKeys(this.state()):null;
         profiles.forEach(p=>{snapshot.roles[p.id]={policyRevision:p.policyRevision,locked:!!p.lock,
-            rankCount:p.rankCount,thresholds:clone(p.thresholds)};});
+            rankCount:p.rankCount,thresholds:clone(p.thresholds),...(mvuKeys?{mvuKey:mvuKeys.get(p.id)}:{})};});
         const current=this.event();
         if(current) snapshot.event={id:current.id,characterId:current.characterId,version:current.version,phase:current.phase};
         this.snapshot=snapshot;this.snapshots.set(snapshot.nonce,snapshot);
@@ -309,7 +334,7 @@ export class CoopRuntime {
         const event=this.event(), user=[...this.store.sources().values()].filter(s=>s.isUser).at(-1);
         if(this.snapshot.userId!==user?.id || !matchesUserVersion(user,this.snapshot.userVersion)) return '';
         const held=event && event.playedUsers.includes(user?.id) && !['waiting_user','waiting_route'].includes(event.phase);
-        const profiles=Object.values(this.state().profiles).filter(p=>p.mode!=='off' && this.snapshot.roles[p.id]);
+        const profiles=Object.values(this.state().profiles).filter(p=>p.mode!=='off' && this.snapshot.roles[p.id] && (!this.usesMvuAffinity || p.mvuReady));
         const validEvent=!held && event?.id===this.snapshot.event?.id && event?.version===this.snapshot.event?.version?event:null;
         return reportContract(profiles,validEvent,this.snapshot,this.snapshot.byExtra);
     }
@@ -344,7 +369,7 @@ export class CoopRuntime {
                     rendered=true;message.mes=stripReport(message.mes);this.host.renderMessage?.(messageIndex);
                 }
             }
-            for(const proposal of (Array.isArray(report.affinity)?report.affinity:[]).slice(0,20)) {
+            for(const proposal of (this.usesMvuAffinity?[]:Array.isArray(report.affinity)?report.affinity:[]).slice(0,20)) {
                 try {
                     const p=this.state().profiles[proposal.characterId];
                     const data=validateAffinityProposal(proposal,p,source,snapshot.roles[proposal.characterId]);
@@ -367,6 +392,16 @@ export class CoopRuntime {
         this.store.reconcile();
     }
     async receiveMvu(variables) {
+        if(this.usesMvuAffinity) {
+            // 事件先按请求快照归档，再读取这一轮 MVU 更新后的数值；不再结算 affinity 回报。
+            this.mvuLive=null;
+            try {await this.receiveMvuReport(variables);this.mvuLive=variables;this.store.reconcile();}
+            finally {this.mvuLive=null;}
+            return;
+        }
+        return this.receiveMvuReport(variables);
+    }
+    async receiveMvuReport(variables) {
         const latest=this.host.messages().length-1, message=this.host.messages()[latest];
         if(message && !message.is_user && !message.is_system && parseReports(message.mes).length) await this.receive(latest);
         const report=readMvuReport(variables);
@@ -410,6 +445,7 @@ export class CoopRuntime {
             Date.now()-this.lastAutoFailure<60000) return;
         const roster=Object.values(this.state().profiles);
         const profiles=roster.filter(p=>p.mode==='coop' && p.lock && this.host.available(p,roster) &&
+            (!this.usesMvuAffinity || p.mvuReady && p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank]) &&
             !Object.values(p.events).some(e=>e.phase!=='completed')).sort((a,b)=>(a.scoreLog.at(-1)?.source.index ?? 0)-(b.scoreLog.at(-1)?.source.index ?? 0));
         if(profiles[0]) try {await this.generate(profiles[0].id);} catch {this.lastAutoFailure=Date.now();}
     }

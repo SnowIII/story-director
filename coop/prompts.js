@@ -55,11 +55,12 @@ export function renderScene(profile,event) {
 }
 export function reportContract(profiles,event,snapshot,byExtra=false) {
     if(!snapshot || !profiles.length) return '';
+    const mvu=snapshot.affinityAuthority==='mvu';
     const actors=profiles.map(p=>({id:p.id,name:p.name,aliases:p.aliases || [],mode:p.mode,affinity:p.affinity,rank:p.rank,
         rankCount:rankPolicy(p).rankCount,relationshipRank:rankPolicy(p).relationshipRank,thresholds:rankPolicy(p).thresholds,locked:!!p.lock,
-        traits:p.traits.slice(-4),boundaries:p.boundaries.slice(-3)}));
-    const sample={nonce:snapshot.nonce,affinity:[{characterId:profiles[0].id,delta:0,reason:'本次互动的影响',
-        userEvidence:'本轮用户消息中的准确短句',evidence:'本轮正文中的准确短句'}]};
+        traits:p.traits.slice(-4),boundaries:p.boundaries.slice(-3),...(mvu?{mvuKey:snapshot.roles[p.id].mvuKey,unlockAfterArchive:!!p.unlockAfterArchive}:{})}));
+    const sample={nonce:snapshot.nonce,...(mvu?{}:{affinity:[{characterId:profiles[0].id,delta:0,reason:'本次互动的影响',
+        userEvidence:'本轮用户消息中的准确短句',evidence:'本轮正文中的准确短句'}]})};
     if(event) sample.event={eventId:event.id,characterId:event.characterId,eventVersion:event.version,phase:event.phase,
         evidence:'本轮已实际发生的当前幕短句',
         ...(event.phase==='resolution'?{completion:{summary:'约100～200字的实际事件摘要',outcome:'实际局部结果',
@@ -67,22 +68,34 @@ export function reportContract(profiles,event,snapshot,byExtra=false) {
             traits:['新增／深化的习惯'],facts:['本阶公开且实际确认的人物事实'],boundaries:['关系边界变化'],
             openHooks:['尚未解决的事项'],closedHooks:['本次实际回收的旧伏笔'],sharedFacts:[],conflicts:[]}}:{})};
     const patch={op:'add',path:'/故事导演/Coop/回报',value:sample};
+    const direct=mvu?profiles.flatMap(p=>{
+        const key=snapshot.roles[p.id].mvuKey,path='/故事导演/Coop/角色/'+key.replace(/~/g,'~0').replace(/\//g,'~1');
+        return [{op:'replace',path:path+'/好感度',value:p.affinity},{op:'replace',path:path+'/好感锁定',value:!!p.lock}];
+    }):[];
+    const patches=mvu?[...direct,...(event?[patch]:[])]:[patch];
     const lines=['【本轮好感／Coop 变量更新契约】与故事导演其他变量一起，在本轮 <UpdateVariable> 中回报。',
-        '仅处理下列用户已经选中的角色，未选角色不得报分或建个人线；affinity 是当前已确认的好感值：',JSON.stringify(actors),
+        mvu?'好感度与好感锁定以 MVU 为唯一来源。只直接更新下列角色 mvuKey 对应的这两个字段，导演不会另行计分或用历史消息覆盖它们；affinity、locked 是当前 MVU 值：':
+            '仅处理下列用户已经选中的角色，未选角色不得报分或建个人线；affinity 是当前已确认的好感值：',JSON.stringify(actors),
         '只有本次用户实际行动产生影响才建议变化；普通闲聊0，体贴+1，理解／实际帮助+2，重要支持+3～5，冒犯−1～−3，严重背叛−5～−10。',
         '不把重复夸奖或回忆旧行动再加分；不同意见不必扣分。每个角色每次用户互动只计一次。',
-        'name 与 aliases 是同一人的不同称呼，只能用其固定 characterId 回报一次，不能为别名另报分或新建人物。结合现场和已有身份仍无法确认指代时，先澄清并保持0，不要仅凭代词或共用姓氏猜测。',
-        'locked=true 时变化必须是0，正负分都不结算，也不以后补发。',
+        mvu?'name 与 aliases 是同一人的不同称呼，每轮只更新一次，不能为别名另报分或新建人物。结合现场和已有身份仍无法确认指代时，先澄清并保持原值，不要仅凭代词或共用姓氏猜测。':
+            'name 与 aliases 是同一人的不同称呼，只能用其固定 characterId 回报一次，不能为别名另报分或新建人物。结合现场和已有身份仍无法确认指代时，先澄清并保持0，不要仅凭代词或共用姓氏猜测。',
+        mvu?'locked=true 时保持好感度不变，正负变化都不累积、不补发；未完成当前阶事件不得解锁。unlockAfterArchive=true 表示该阶已成功归档，本轮只将好感锁定改为 false，好感保持原值，下轮才能继续增减。':
+            'locked=true 时变化必须是0，正负分都不结算，也不以后补发。',
+        ...(mvu?['未锁定时按真实互动计算最终好感（0～100 整数）；coop 模式未满阶时，达到 thresholds[rank] 就封顶到该门槛并将好感锁定改为 true。已满阶不再新增门槛锁。',
+            '以下 JSONPatch 数值是当前值范例，请替换为本轮计算后的最终值；不变的字段可省略。不要提交 affinity/delta 计分回报，不修改 Rank、阶级方案、路线或档案。']:[]),
         '所有 evidence 必须准确引用对应消息原文；只引用已发生事实，不能把猜测写成事实或代写用户行为。',
         'event 回报仅在当前 phase 的任务完整写进正文后提供；waiting_user／waiting_route 不报完成。每次回复最多完成当前一幕。',
         'resolution 的 completion 必须包含实际选择、局部结果、人物变化、未解决与已回收伏笔，以及完整简短摘要。不可只写“任务完成”。',
         'completion.choiceEvidence 可引用用户首次或最新回应中的真实选择；普通闲聊不覆盖首次选择。角色的 relationshipRank 为路线确认阶级，该阶必须引用路线确认时的回应。rankCount 和 thresholds 已由用户锁定，模型不可更改。',
         '若共享 NPC／信物状态实际变化，可在 completion.sharedFacts 填 [{entityId:"稳定英文ID",name:"实体名",fact:"新事实",previousFact:"已有旧事实原文",evidence:"正文准确短句",knownBy:["user","当前角色ID"]}]；没有变化用空数组。',
-        '把本轮变化报告写到 故事导演.Coop.回报。不要直接改写角色最终好感、Rank、锁、路线或档案；程序校验后会将最终结果同步回变量。',
-        '必须使用本轮 nonce，不要引用历史回报。无变化的已选角色用 delta:0，不能把未收到回报当成0分。所有范例说明文字都要换成真实原文。',
+        ...(mvu?(event?['只有当前事件的进度和归档仍写到 故事导演.Coop.回报，使用本轮 nonce，不包含 affinity。本轮刚报告 completion 时仍保持锁定，等后续注入确认已归档再解锁。']:[]):[
+            '把本轮变化报告写到 故事导演.Coop.回报。不要直接改写角色最终好感、Rank、锁、路线或档案；程序校验后会将最终结果同步回变量。',
+            '必须使用本轮 nonce，不要引用历史回报。无变化的已选角色用 delta:0，不能把未收到回报当成0分。所有范例说明文字都要换成真实原文。']),
         '与本轮其他变量合用一个 <UpdateVariable> 和一个 <JSONPatch> 数组，把下面这一项追加到数组；不要重复输出变量块，不输出独立 CoopReport：',
-        JSON.stringify([patch],null,2),
-        '如果当前卡片使用 _.set 语法而不是 JSONPatch，在同一个 <UpdateVariable> 内写 _.set(\'故事导演.Coop.回报\', '+JSON.stringify(sample)+');，两种写法只选一种。'];
+        JSON.stringify(patches,null,2),
+        mvu?'若使用 _.set 语法，在同一 <UpdateVariable> 内直接写 _.set(\'故事导演.Coop.角色["角色名"].好感度\', 最终数值) 与对应的 好感锁定；路径中的角色名使用 mvuKey，不能另造字段。':
+            '如果当前卡片使用 _.set 语法而不是 JSONPatch，在同一个 <UpdateVariable> 内写 _.set(\'故事导演.Coop.回报\', '+JSON.stringify(sample)+');，两种写法只选一种。'];
     if(event?.routeSource) lines.push('本阶 completion.choiceEvidence 应引用路线确认对应回应的准确短句：'+event.routeSource.body,
         '若最新回应明确改变已确认的关系路线，event 使用 routeConflict:true、userEvidence:最新用户原文、evidence:正文接住该变化的原文，省略 completion。程序退回等待面板确认；普通补充不报冲突。');
     if(byExtra) lines.push('当前采用额外变量模型回填：讲故事的人不写变量命令；负责回填的变量模型按本契约，在它的 <UpdateVariable> 中提交完整报告。');

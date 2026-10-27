@@ -1,5 +1,5 @@
 import {hash,object} from './model.js';
-import {visibleBody,fingerprintBody,legacyBodyVariants,updateVariableBlocks} from './body.js';
+import {visibleBody,fingerprintBody,legacyBodyVariants,updateVariableBlocks,instructionBlocks,instructionSourceVariants} from './body.js';
 import {extractNsCommands,parseCommandLiteral} from '../model.js';
 export {visibleBody,stripReport} from './body.js';
 export const REPORT_TAG='CoopReport';
@@ -12,15 +12,19 @@ export function ensureMessageIds(messages) {
 }
 export function sourceMap(messages) {
     const sources=new Map();let user=null;
+    const blocks=[...new Set(messages.filter(message=>message?.is_user).flatMap(message=>instructionBlocks(message.mes)))].slice(-8);
+    const instructions=JSON.stringify(blocks);
     messages.forEach((message,index)=>{
         if(!message || !message.sd_coop_id) return;
         const salt='|'+(message.swipe_id ?? 0)+'|'+!!message.is_user;
         let cached=sourceCache.get(message);
-        if(!cached || cached.raw!==message.mes || cached.salt!==salt) {
+        if(!cached || cached.raw!==message.mes || cached.salt!==salt || cached.instructions!==instructions) {
             const options={keepImagePlaceholders:!!message.is_user};
             const body=visibleBody(message.mes,options), version='v2:'+hash(fingerprintBody(message.mes,options)+salt);
-            cached={raw:message.mes,salt,body,version,versions:[...new Set([
+            const variants=message.is_user?instructionSourceVariants(message.mes,blocks):[message.mes];
+            cached={raw:message.mes,salt,instructions,body,version,versions:[...new Set([
                 'v2:'+hash(fingerprintBody(message.mes,{keepImagePlaceholders:true})+salt),
+                ...variants.map(value=>'v2:'+hash(fingerprintBody(value,{...options,keepInstructions:true})+salt)),
                 ...legacyBodyVariants(message.mes,128,options).map(value=>hash(value+salt))])]};
             sourceCache.set(message,cached);
         }

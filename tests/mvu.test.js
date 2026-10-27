@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {initialState,clone} from '../coop/model.js';
-import {mergeCoopMvu,createMvuSync,bindingCapability,mvuCharacterKeys} from '../coop/mvu.js';
+import {mergeCoopMvu,createMvuSync,bindingCapability,mvuCharacterKeys,unwrap} from '../coop/mvu.js';
 
 function setup() {
     const state=initialState({a:{id:'a',name:'画家',mode:'coop',initialAffinity:7}});
@@ -60,6 +60,41 @@ test('MVU wrapped namespaces retain their wrappers and report',()=>{
     assert.equal(data.stat_data.故事导演[0].Coop[0].角色.画家.好感度,7);
     assert.equal(data.stat_data.故事导演[0].Coop[0].回报.nonce,'turn');
 });
+for(const nested of [false,true]) test('MVU insertion preserves role-table wrappers and field descriptions, nested='+nested,()=>{
+    const h=setup(),meta={extensible:true,template:{好感度:0}};
+    const roles={$meta:meta,画家:[{好感度:[99,'好感说明'],Rank:[3,'阶级说明'],过期字段:true,$meta:{required:['好感度']}},'角色说明'],
+        未管理角色:{好感度:100}};
+    const wrapped=nested?[[roles,'内层角色表说明'],'角色表说明']:[roles,'角色表说明'];
+    const data={stat_data:{生命:11,故事导演:{Coop:{角色:wrapped,回报:{nonce:'turn'}}}}};
+    assert.equal(mergeCoopMvu(data,h.store.state),true);
+    const actual=data.stat_data.故事导演.Coop.角色;
+    assert.equal(actual[1],'角色表说明');
+    if(nested) assert.equal(actual[0][1],'内层角色表说明');
+    const table=unwrap(actual),p=unwrap(table.画家);
+    assert.deepEqual(table.$meta,meta);assert.deepEqual(p.$meta,{required:['好感度']});
+    assert.equal(table.画家[1],'角色说明');
+    assert.deepEqual(p.好感度,[7,'好感说明']);assert.deepEqual(p.Rank,[0,'阶级说明']);
+    assert.equal(p.过期字段,undefined);assert.equal(table.未管理角色,undefined);
+    assert.equal(data.stat_data.生命,11);assert.equal(data.stat_data.故事导演.Coop.回报.nonce,'turn');
+    assert.equal(mergeCoopMvu(data,h.store.state),false,'preserved wrappers do not cause repeated writes');
+});
+test('inserting the first role into an empty wrapped table retains its description',()=>{
+    const h=setup(),data={stat_data:{故事导演:{Coop:{角色:[null,'角色表说明']}}}};
+    mergeCoopMvu(data,h.store.state);
+    assert.equal(data.stat_data.故事导演.Coop.角色[1],'角色表说明');
+    assert.equal(data.stat_data.故事导演.Coop.角色[0].画家.好感度,7);
+    assert.equal(mergeCoopMvu(data,h.store.state),false);
+});
+test('MVU character keys avoid reserved metadata without stealing an existing suffixed name',()=>{
+    const state=initialState({a:{id:'a',name:'$meta',initialAffinity:7},b:{id:'b',name:'$meta_2',initialAffinity:9}});
+    const data={stat_data:{故事导演:{Coop:{角色:{$meta:{extensible:true}}}}}};
+    assert.deepEqual([...mvuCharacterKeys(state).values()],['$meta_3','$meta_2']);
+    mergeCoopMvu(data,state);
+    const table=data.stat_data.故事导演.Coop.角色;
+    assert.deepEqual(table.$meta,{extensible:true});
+    assert.equal(table.$meta_3.名称,'$meta');assert.equal(table.$meta_3.好感度,7);
+    assert.equal(table.$meta_2.好感度,9);assert.equal(mergeCoopMvu(data,state),false);
+});
 test('sync writes both the concrete message snapshot and chat baseline without duplicate writes',async()=>{
     const h=setup();assert.equal(await h.sync(),true);
     assert.deepEqual(h.calls,[{type:'message',message_id:0},{type:'chat'}]);
@@ -106,6 +141,34 @@ test('an MVU write failure is retryable without changing Coop progress',async()=
     h.api.replaceMvuData=replace;await h.sync();
     assert.equal(h.sync.error,null);assert.equal(h.affinity('message'),7);
 });
+test('an invalid message namespace cannot block a valid chat mirror and can be retried after repair',async()=>{
+    const h=setup(),before=clone(h.store.state);
+    h.tables.message.stat_data.故事导演.Coop=0;
+    assert.equal(await h.sync(),false);
+    assert.equal(h.sync.error.code,'INVALID_MVU_NAMESPACE');assert.match(h.sync.status,/部分同步失败/);
+    assert.equal(h.affinity('chat'),7);assert.deepEqual(h.calls,[{type:'chat'}]);
+    assert.equal(h.tables.message.stat_data.故事导演.Coop,0);assert.deepEqual(clone(h.store.state),before);
+    h.tables.message.stat_data.故事导演.Coop={};
+    assert.equal(await h.sync(),true);assert.equal(h.sync.error,null);
+    assert.equal(h.affinity('message'),7);assert.equal(h.calls.length,2);
+});
+for(const target of ['message','chat']) for(const operation of ['read','write']) {
+    test('a '+target+' '+operation+' failure leaves the other MVU mirror available',async()=>{
+        const h=setup(),before=clone(h.store.state),get=h.api.getMvuData,replace=h.api.replaceMvuData;
+        if(operation==='read') h.api.getMvuData=options=>{
+            if(options.type===target) throw new Error('read failed');return get(options);
+        };
+        else h.api.replaceMvuData=async(data,options)=>{
+            if(options.type===target) throw new Error('write failed');await replace(data,options);
+        };
+        assert.equal(await h.sync(),false);assert.match(h.sync.error.message,/failed/);
+        assert.equal(h.affinity(target==='chat'?'message':'chat'),7);
+        assert.deepEqual(clone(h.store.state),before);
+        h.api.getMvuData=get;h.api.replaceMvuData=replace;
+        assert.equal(await h.sync(),true);assert.equal(h.sync.error,null);
+        assert.equal(h.affinity('message'),7);assert.equal(h.affinity('chat'),7);
+    });
+}
 test('MVU update hooks repair a model-written total using the confirmed Coop state',()=>{
     const h=setup(),live={stat_data:{故事导演:{Coop:{角色:{a:{好感度:99}},回报:{nonce:'new'}}}}};
     assert.equal(h.sync.updateLive(live),true);
