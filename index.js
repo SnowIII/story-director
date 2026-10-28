@@ -60,7 +60,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.40.3';
+const VERSION = '0.40.4';
 let coop = null;
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
@@ -611,12 +611,15 @@ function settings() {
 
 const save = () => saveSettingsDebounced();
 
-function chatKey() {
+function chatKey({ legacy = false } = {}) {
     try {
         const ctx = window.SillyTavern?.getContext?.();
         if (!ctx) return '';
         const id = (typeof ctx.getCurrentChatId === 'function' && ctx.getCurrentChatId()) || ctx.chatId || '';
-        return `${ctx.groupId || ''}::${id}`;
+        if (!id) return '';
+        const avatar = ctx.characters?.[ctx.characterId ?? ctx.chid]?.avatar;
+        const owner = ctx.groupId || (legacy ? '' : `character:${encodeURIComponent(avatar || (ctx.characterId ?? ctx.chid ?? ''))}`);
+        return `${owner}::${id}`;
     } catch { return ''; }
 }
 
@@ -694,6 +697,13 @@ function ensureChatSlice(s) {
     if (s.chatSliceKey === key) return false;
     if (!isPlainObject(s.chats)) s.chats = {};
     if (s.chatSliceKey) s.chats[s.chatSliceKey] = sliceFromSettings(s);
+    // 旧键没有角色身份：首次打开时迁移并移除旧键，避免另一张同名聊天的卡再次领走它。
+    const legacyKey = chatKey({ legacy: true });
+    if (key !== legacyKey && !isPlainObject(s.chats[key]) && isPlainObject(s.chats[legacyKey])) {
+        s.chats[key] = s.chats[legacyKey];
+        delete s.chats[legacyKey];
+        if (s.chats[key].run?.chatId === legacyKey) s.chats[key].run.chatId = key;
+    }
     if (!isPlainObject(s.chats[key])) {
         s.chats[key] = JSON.parse(JSON.stringify({ run: DEFAULT.run, chapters: {}, story: {} }));
         // ★ 第一次见到这个聊天 → 立刻播下「就位基准」（见 run.armedAt）：
@@ -702,11 +712,8 @@ function ensureChatSlice(s) {
     }
     applySliceToSettings(s, s.chats[key]);
     s.chatSliceKey = key;
-    // 只留最近 24 份，免得设置文件无限膨胀
-    const keys = Object.keys(s.chats);
-    if (keys.length > 24) {
-        for (const old of keys.slice(0, keys.length - 24)) delete s.chats[old];
-    }
+    // 这里保存的是每局唯一的计划，不能按缓存数量淘汰。
+    save();
     return true;
 }
 
@@ -932,6 +939,17 @@ async function pushTokens() {
         if (stableJson(getPath(ns, path)) === stableJson(want)) continue;
         setPath(ns, path, isPlainObject(want) || Array.isArray(want) ? JSON.parse(JSON.stringify(want)) : want);
         changed = true;
+    }
+    for (const kind of ['支线', '插曲']) {
+        for (const [id, entry] of Object.entries(story[kind] || {})) {
+            if (id.startsWith('$') || !isPlainObject(entry)) continue;
+            for (const key of ['已落', '状态']) {
+                const want = entry[key], path = `${kind}.${id}.${key}`;
+                if (want === undefined || stableJson(getPath(ns, path)) === stableJson(want)) continue;
+                setPath(ns, path, want);
+                changed = true;
+            }
+        }
     }
     if (!changed) return false;
     return writeMvu(d);
@@ -1456,8 +1474,7 @@ async function rememberChapter(main, { live = null } = {}) {
     });
     if (duplicate) return true;
 
-    let next = 1;
-    while (box[String(next)]) next++;
+    const next = Math.max(0, ...Object.keys(box).map(Number)) + 1;
     box[String(next)] = record;
 
     // 只留最近 8 章
@@ -1997,12 +2014,13 @@ function harvestReviewTag(messageId) {
         const selfMatch = before.match(new RegExp(
             `<${SELF_CHECK_TAG}>([\\s\\S]*?)<\\/${SELF_CHECK_TAG}>` + `|<!--\\s*${SELF_CHECK_TAG}\\s*([\\s\\S]*?)-->`, 'i'));
         const selfBlock = selfMatch ? (selfMatch[1] ?? selfMatch[2] ?? '') : '';
-        const thinking = String(selfBlock || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+        const fullThinking = String(selfBlock || '').replace(/\s+/g, ' ').trim();
+        const thinking = fullThinking.slice(0, 300);
         // 结论：自检块里最后那行「③ 结论：…」为准；读不出来再退回旧标签。
         let state = '';
-        if (thinking) {
-            const tail = thinking.match(/结论\s*[:：]([^\n]{0,40})/);
-            const where = tail ? tail[1] : thinking;
+        if (fullThinking) {
+            const tail = [...fullThinking.matchAll(/结论\s*[:：]/g)].at(-1);
+            const where = tail ? fullThinking.slice(tail.index + tail[0].length) : fullThinking;
             state = REVIEW_STATES.find((item) => where.includes(item)) || '';
         }
         const legacyVerdict = (before.match(new RegExp(`<${REVIEW_TAG}>([\\s\\S]*?)<\\/${REVIEW_TAG}>`, 'i')) || [])[1];
@@ -3553,11 +3571,14 @@ async function askOracle({ task = 'chapter', userText = '', regenerate = false, 
         if (!quiet) toast('没有可用的模型连接——需要启用「故事神谕」扩展。也可以在主线上直接手写。', 'warning');
         return null;
     }
+    const myId = genId, ctl = genCtl, origin = chatKey();
+    const current = () => !genAborted && !ctl?.signal?.aborted && myId === genId && origin === chatKey();
     const system = ephemeralSystem || (task === 'thread' ? buildThreadSystemPrompt()
         : task === 'side' ? buildInterludeSystemPrompt()
             : task === 'interlude' ? buildInterludeChapterSystemPrompt({ rejected })
                 : buildChapterSystemPrompt({ regenerate, rejected, keep, remaining: Math.max(0, Math.round(toNumber(remaining, 0))) }));
     const user = await buildUserPrompt(task, userText, taskOpts);
+    if (!current()) return ORACLE_CANCELLED;
     lastRequestChars = String(system).length + String(user).length;
     // ⚠ **绝不往神谕窗口里写东西**（这一条是补事故）。
     //   这里以前用 api.appendReply() 把「导演请求全文」和「模型原始回复」追加进神谕的对话里 ——
@@ -3568,8 +3589,6 @@ async function askOracle({ task = 'chapter', userText = '', regenerate = false, 
     //   不发 appendReply 就够了。真要排查，看控制台与面板「诊断」页（生成闸门 / 世界书 / 实际注入的引导全文）。
     if (!quiet) console.debug(`[故事导演] 本次生成（${task}）的提示词与原始回复不写入神谕窗口；需要排查见面板「诊断」页。`);
     // ★ 0.27.6：把中断信号交下去（真掐断请求），并顺手接住流式进度让前端那行会动。
-    const myId = genId;
-    const ctl = genCtl;
     let result;
     try {
         result = await api.run([
@@ -3577,10 +3596,10 @@ async function askOracle({ task = 'chapter', userText = '', regenerate = false, 
             { role: 'user', content: user },
         ], {
             signal: ctl?.signal,
-            onDelta: (full) => { genChars = String(full || '').length; },
+            onDelta: (full) => { if (current()) genChars = String(full || '').length; },
         });
     } catch (error) {
-        if (ctl?.signal?.aborted || genAborted || myId !== genId) {
+        if (!current()) {
             console.info('[故事导演] 这次生成被中断（用户取消），结果不再采用。');
             return ORACLE_CANCELLED;
         }
@@ -3588,7 +3607,7 @@ async function askOracle({ task = 'chapter', userText = '', regenerate = false, 
     }
     // ⚠ 必须同时判 `genAborted`：万一底层**不理会** signal（老版本神谕 / 非 fetch 路径），
     //   迟到的结果照样会 resolve —— 只比 genId 拦不住它（中断并不推进 genId）。
-    if (genAborted || myId !== genId) {
+    if (!current()) {
         console.info('[故事导演] 这次生成的结果已作废（用户中断 / 期间被新的一次生成取代）。');
         return ORACLE_CANCELLED;
     }
@@ -4649,7 +4668,7 @@ async function evaluateDirector({ live = null } = {}) {
             // ★ **篇章检查**（0.27.0，用户提的）：旧章刚演完、新章还不该立刻衔接 —— 正好趁间章这几轮，
             //   静默做一次「往后还没写的那几章，在已经发生的这些事之后还成立吗」。
             //   结果只有两种：照旧（不动）或只改没写的章；下一章回到主线时就已经用上新章表了。
-            if (s.autoEpic && s.auditEpic && !epicFinished(epicOf(rootOf(live)))
+            if (s.autoDirector && s.autoEpic && s.auditEpic && !epicFinished(epicOf(rootOf(live)))
                 && epicChapter(epicOf(rootOf(live))) > 0
                 && rt.closedChapter && rt.auditedFor !== rt.closedChapter
                 && !isPending(`epic:${chatKey()}`) && !blockedByCooldown(s, count, rt)
@@ -5103,8 +5122,7 @@ async function rememberInterlude(chapter, { live = null } = {}) {
         && String(unwrap(item[MAIN_TITLE]) ?? '').trim() === title
         && String(unwrap(item[MAIN_ARC]) ?? '').trim() === record[MAIN_ARC]);
     if (duplicate) return true;
-    let next = 1;
-    while (box[String(next)]) next++;
+    const next = Math.max(0, ...Object.keys(box).map(Number)) + 1;
     box[String(next)] = record;
     const keys = Object.keys(box).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
     while (keys.length > 8) delete box[String(keys.shift())];
@@ -6321,6 +6339,7 @@ async function clearStory() {
  */
 async function forceOpenStory() {
     const s = settings();
+    const origin = chatKey();
     if (typeof oracleApi()?.run !== 'function') {
         toast('读不到「故事神谕」的模型连接 —— 先确认故事神谕已安装并启用。', 'error');
         return;
@@ -6338,7 +6357,10 @@ async function forceOpenStory() {
     const epic = epicOf(rootOf());
     if (s.autoEpic && !epicStarted(epic)) {
         toast('先定篇章…');
-        const ok = await generateEpic({ quiet: false, force: true, mode: 'establish', entry: completedMainTitles(rootOf()).length });
+        const pending = generateEpic({ quiet: false, force: true, mode: 'establish', entry: completedMainTitles(rootOf()).length });
+        const owner = genId;
+        const ok = await pending;
+        if (chatKey() !== origin || genId !== owner || justAborted()) return;
         // ⚠ `justAborted()` 只用来「压掉失败提示 / 不再往下走」，**绝不能当进门闸** ——
         //   用户掐掉之后立刻再点一次「立刻开篇」是完全正常的操作（探针抓到过这个 bug）。
         if (!ok) {
@@ -6347,10 +6369,15 @@ async function forceOpenStory() {
         }
     }
     if (epicStarted(epicOf(rootOf()))) {
+        const owner = genId;
         await patchMain({ [MAIN_CLOSED]: false }, {});
+        if (chatKey() !== origin || genId !== owner) return;
     }
     // ★ 0.27.3：「立刻开篇」是**从第一拍开始**的入口，同样必须整章重来（别继承上一章的拍号）。
-    const opened = await generateChapter({ quiet: false, force: true, restart: true });
+    const pending = generateChapter({ quiet: false, force: true, restart: true });
+    const owner = genId;
+    const opened = await pending;
+    if (chatKey() !== origin || genId !== owner) return;
     if (!opened && justAborted()) return;   // 用户中断：不记失败、不弹错
     noteAttempt(opened, opened ? '' : '见控制台日志');
     if (!opened) toast('开章失败 —— 控制台里有 [故事导演] 的原始回复，发给我看看。', 'error');
@@ -7261,6 +7288,28 @@ function init() {
     window.setTimeout(() => { if (!document.getElementById('story-director-bubble')) init(); }, 1500);
 }
 
+/** 宿主 saveChat 会吞掉保存错误；刷新前回读存档核对，避免丢掉尚未落盘的消息和变量。 */
+async function saveChatBeforeReload() {
+    const ctx = window.SillyTavern?.getContext?.();
+    const id = ctx?.getCurrentChatId?.() || ctx?.chatId;
+    if (!id) return;
+    if (typeof ctx.saveChat !== 'function' || typeof ctx.getRequestHeaders !== 'function') throw new Error('无法确认聊天保存');
+    const origin = chatKey();
+    const snapshot = () => stableJson({ metadata: ctx.chatMetadata || {}, messages: ctx.chat || [] });
+    const expected = snapshot();
+    const character = ctx.characters?.[ctx.characterId ?? ctx.chid];
+    const body = ctx.groupId ? { id } : { file_name: id, ch_name: character?.name, avatar_url: character?.avatar };
+    await ctx.saveChat();
+    if (chatKey() !== origin) throw new Error('保存期间切换了聊天，暂不刷新');
+    const response = await fetch(ctx.groupId ? '/api/chats/group/get' : '/api/chats/get', {
+        method: 'POST', headers: ctx.getRequestHeaders(), body: JSON.stringify(body), cache: 'no-store',
+    });
+    if (!response.ok) throw new Error('无法核对聊天存档：HTTP ' + response.status);
+    const saved = await response.json();
+    if (!Array.isArray(saved) || stableJson({ metadata: saved[0]?.chat_metadata || {}, messages: saved.slice(1) }) !== expected
+        || chatKey() !== origin || snapshot() !== expected) throw new Error('聊天尚未完整保存，暂不刷新');
+}
+
 let appReady = false;
 const updateReloader = createUpdateReloader({
     version: VERSION,
@@ -7283,7 +7332,7 @@ const updateReloader = createUpdateReloader({
             await saveSettings();
             if (!saved) throw new Error('设置尚未保存，暂不刷新');
         } finally { eventSource.removeListener(event_types.SETTINGS_UPDATED, onSaved); }
-        await window.SillyTavern?.getContext?.()?.saveChat?.();
+        await saveChatBeforeReload();
     },
     reload: () => window.location.reload(),
     notify: () => toast('故事导演已更新，将在生成和保存完成、输入框清空后自动刷新。'),

@@ -1717,6 +1717,8 @@ export function applyNsCommand(statData, command, path) {
   if (type === 'insert' || type === 'assign') {
     if (args.length >= 3) {
       const key = parseCommandLiteral(args[1]);
+      const field = String(key);
+      if (UNSAFE_KEYS.has(field)) return true;
       const value = parseCommandLiteral(args[2]);
       const collection = getPath(statData, target);
       if (Array.isArray(collection) && (typeof key === 'number' || key === '-')) {
@@ -1725,7 +1727,6 @@ export function applyNsCommand(statData, command, path) {
       }
       if (!isPlainObject(collection)) setPath(statData, target, {});
       const box = getPath(statData, target);
-      const field = String(key);
       const previous = box[field];
       const next = coerceFieldValue(field, value, previous);
       box[field] = isPlainObject(next) && isPlainObject(previous) ? mergeDeep(previous, next) : next;
@@ -1880,24 +1881,50 @@ export function landingOpsInReply(text) {
   const out = { hasAnyOp: false, main: false, interlude: false };
   if (!src) return out;
   const kindOf = (section) => (section === '间章' ? 'interlude' : (section === '主线' ? 'main' : ''));
+  const operations = [];
   const mark = (section, field, value) => {
     const kind = kindOf(section);
     if (!kind) return;
     out.hasAnyOp = true;
-    if (field === KEY_BEAT_DONE && value === true) out[kind] = true;
+    if (field === KEY_BEAT_DONE) out[kind] = value === true;
   };
-  // ① 契约里的写法：`_.set('故事导演.主线.本拍已落', true)`（单/双/反引号、可带 stat_data. 前缀）
-  for (const m of src.matchAll(/_\.set\(\s*['"`](?:stat_data\.)?故事导演\.(主线|间章)\.([^'"`]+)['"`]\s*,\s*(true|false)\b/g)) {
+  // 读取完整参数，三参数 set 的末项才是新值。
+  for (const m of src.matchAll(/_\.set\(/g)) {
     if (insideFence(src, m.index)) continue;
-    mark(m[1], m[2].trim(), m[3] === 'true');
+    const start = m.index + m[0].length, end = findMatchingCloseParen(src, start);
+    if (end < 0) continue;
+    const args = splitTopLevel(src.slice(start, end));
+    if (args.length < 2) continue;
+    const path = /^(?:stat_data\.)?故事导演\.(主线|间章)\.(.+)$/.exec(String(parseCommandLiteral(args[0])));
+    if (path) operations.push({ index: m.index, section: path[1], field: path[2], value: parseCommandLiteral(args.at(-1)) });
   }
-  // ② MVU 额外模型的原生写法：`{ "op": "replace", "path": "/故事导演/主线/本拍已落", "value": true }`
-  for (const m of src.matchAll(/"path"\s*:\s*"\/(?:stat_data\/)?故事导演\/(主线|间章)\/([^"]+)"/g)) {
-    const tail = src.slice(m.index, m.index + 240);
-    const value = /"value"\s*:\s*(true|false)\b/.exec(tail);
-    if (!value) { out.hasAnyOp = true; continue; }      // 认得路径就算「有命令」，值读不出就不当落拍
-    mark(m[1], m[2].trim(), value[1] === 'true');
+  // 按 JSON 对象边界读取，不能借用下一条 patch 的 value；跳过字符串内的花括号。
+  let start = -1, depth = 0, quoted = false;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (start < 0) {
+      if (ch !== '{' || insideFence(src, i)) continue;
+      start = i; depth = 1; quoted = false;
+      continue;
+    }
+    if (quoted) {
+      if (ch === '\\') i++;
+      else if (ch === '"') quoted = false;
+      continue;
+    }
+    if (ch === '"') { quoted = true; continue; }
+    if (ch === '{') depth++;
+    if (ch !== '}' || --depth > 0) continue;
+    try {
+      const patch = JSON.parse(src.slice(start, i + 1));
+      const path = /^\/(?:stat_data\/)?故事导演\/(主线|间章)\/([^/]+)$/.exec(patch.path);
+      if (path && ['add', 'replace', 'remove'].includes(patch.op)) {
+        operations.push({ index: start, section: path[1], field: path[2], value: patch.op === 'remove' ? false : patch.value });
+      }
+    } catch { /* Malformed JSON cannot report a completed beat. */ }
+    start = -1;
   }
+  for (const op of operations.sort((a, b) => a.index - b.index)) mark(op.section, op.field, op.value);
   return out;
 }
 

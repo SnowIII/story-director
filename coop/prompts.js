@@ -85,6 +85,7 @@ export function reportContract(profiles,event,snapshot,byExtra=false) {
         ...(mvu?['未锁定时按真实互动计算最终好感（0～100 整数）；coop 模式未满阶时，达到 thresholds[rank] 就封顶到该门槛并将好感锁定改为 true。已满阶不再新增门槛锁。',
             '以下 JSONPatch 数值是当前值范例，请替换为本轮计算后的最终值；不变的字段可省略。不要提交 affinity/delta 计分回报，不修改 Rank、阶级方案、路线或档案。']:[]),
         '所有 evidence 必须准确引用对应消息原文；只引用已发生事实，不能把猜测写成事实或代写用户行为。',
+        'event.evidence 必须逐字引用本轮角色正文中实际发生的短句，不能引用用户消息、变量块或本契约范例；用户回应仅放在明确要求的 userEvidence／choiceEvidence 字段。',
         'event 回报仅在当前 phase 的任务完整写进正文后提供；waiting_user／waiting_route 不报完成。每次回复最多完成当前一幕。',
         'resolution 的 completion 必须包含实际选择、局部结果、人物变化、未解决与已回收伏笔，以及完整简短摘要。不可只写“任务完成”。',
         'completion.choiceEvidence 可引用用户首次或最新回应中的真实选择；普通闲聊不覆盖首次选择。角色的 relationshipRank 为路线确认阶级，该阶必须引用路线确认时的回应。rankCount 和 thresholds 已由用户锁定，模型不可更改。',
@@ -92,8 +93,8 @@ export function reportContract(profiles,event,snapshot,byExtra=false) {
         ...(mvu?(event?['只有当前事件的进度和归档仍写到 故事导演.Coop.回报，使用本轮 nonce，不包含 affinity。本轮刚报告 completion 时仍保持锁定，等后续注入确认已归档再解锁。']:[]):[
             '把本轮变化报告写到 故事导演.Coop.回报。不要直接改写角色最终好感、Rank、锁、路线或档案；程序校验后会将最终结果同步回变量。',
             '必须使用本轮 nonce，不要引用历史回报。无变化的已选角色用 delta:0，不能把未收到回报当成0分。所有范例说明文字都要换成真实原文。']),
-        '与本轮其他变量合用一个 <UpdateVariable> 和一个 <JSONPatch> 数组，把下面这一项追加到数组；不要重复输出变量块，不输出独立 CoopReport：',
-        JSON.stringify(patches,null,2),
+        '与本轮其他变量合用一个 <UpdateVariable> 和一个 <JSONPatch> 数组。JSON 数组必须在 <JSONPatch> 内，不能把裸数组直接放在 <UpdateVariable> 下。完整格式示例（合并已有变量，不重复输出变量块，不输出独立 CoopReport）：',
+        '<UpdateVariable>\n<JSONPatch>\n'+JSON.stringify(patches,null,2)+'\n</JSONPatch>\n</UpdateVariable>',
         mvu?'若使用 _.set 语法，在同一 <UpdateVariable> 内直接写 _.set(\'故事导演.Coop.角色["角色名"].好感度\', 最终数值) 与对应的 好感锁定；路径中的角色名使用 mvuKey，不能另造字段。':
             '如果当前卡片使用 _.set 语法而不是 JSONPatch，在同一个 <UpdateVariable> 内写 _.set(\'故事导演.Coop.回报\', '+JSON.stringify(sample)+');，两种写法只选一种。'];
     if(event?.routeSource) lines.push('本阶 completion.choiceEvidence 应引用路线确认对应回应的准确短句：'+event.routeSource.body,

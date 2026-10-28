@@ -47,6 +47,39 @@ async function fixture(t,{initial=5,name='画家',authority=true}={}) {
 test('the production host selects MVU as the affinity authority',()=>{
     assert.equal(createHost().affinityAuthority,'mvu');
 });
+
+test('the MVU contract shows a complete executable JSONPatch envelope and distinguishes narrative evidence',async t=>{
+    const h=await fixture(t);h.messages.push({is_user:true,mes:'我来帮你。'});await h.runtime.prepare();
+    const contract=h.runtime.variableContract();
+    const block=contract.match(/<UpdateVariable>\s*<JSONPatch>\s*([\s\S]*?)\s*<\/JSONPatch>\s*<\/UpdateVariable>/);
+    assert.ok(block);const patches=JSON.parse(block[1]);
+    assert.ok(patches.some(p=>p.path==='/故事导演/Coop/角色/画家/好感度' && p.value===5));
+    assert.ok(contract.includes('event.evidence 必须逐字引用本轮角色正文'));
+});
+
+test('an invalid old MVU event report is rejected once, including after reload; corrected evidence remains usable',async t=>{
+    const h=await fixture(t,{initial:30});h.write(30,true);await h.runtime.generate('a');
+    await h.turn({body:'她拿出旧画册。',event:{phase:'hook',evidence:'我愿意帮你核对资料。'}});
+    const old=clone(h.messages[2].extra.sdCoopReports.reports[0]);
+    const count=()=>h.runtime.notices.filter(x=>x.code==='INVALID_EVIDENCE').length;
+    assert.equal(count(),1);assert.equal(h.runtime.event().phase,'hook');
+    await h.turn({body:'她继续整理档案。'});
+    await h.runtime.receiveMvu(clone(h.messages[2].variables[0]));
+    await h.runtime.load();await h.runtime.receiveMvu(clone(h.messages[2].variables[0]));
+    assert.equal(count(),1);assert.equal(h.runtime.event().phase,'hook');
+    old.event.evidence='旧画册';await h.runtime.receive(2,old);
+    assert.equal(h.runtime.event().phase,'dilemma');
+    assert.equal(h.row().好感度,30);assert.equal(h.row().好感锁定,true);
+});
+
+test('failed event saves are not cached as rejected reports and remain retryable',async t=>{
+    const h=await fixture(t,{initial:30});h.write(30,true);await h.runtime.generate('a');
+    h.saveFailure(true);
+    await h.turn({body:'她拿出旧画册。',event:{phase:'hook',evidence:'旧画册'}});
+    assert.ok(h.runtime.store.pending);assert.equal(h.messages[2].extra.sdCoopEventRejections,undefined);
+    h.saveFailure(false);await h.runtime.store.retrySave();
+    assert.equal(h.runtime.event().phase,'dilemma');
+});
 test('MVU data remains accessible through TavernHelper when the Mvu global is absent',async()=>{
     let variables={stat_data:{故事导演:{Coop:{角色:{画家:{好感度:9,好感锁定:false}}}}}},target;
     const helper={getVariables:options=>{target=options;return clone(variables);},replaceVariables:(data,options)=>{target=options;variables=clone(data);}};

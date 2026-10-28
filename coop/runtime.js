@@ -380,13 +380,26 @@ export class CoopRuntime {
                 } catch(error) {this.affinityOutcome(source,proposal.characterId,error.code || 'INVALID_EVIDENCE');this.notice(error);}
             }
             if(report.event && snapshot.event) {
+                const rejectionKey=JSON.stringify({nonce:report.nonce,event:report.event});
+                const rejected=message.extra.sdCoopEventRejections;
+                const sameSource=Array.isArray(rejected?.reports) && matchesSourceVersion(source,rejected.version) && matchesUserVersion(source,rejected.userVersion);
+                if(sameSource && rejected.reports.includes(rejectionKey)) continue;
                 try {
                     const r=report.event, p=this.state().profiles[r.characterId], expected=snapshot.event;
                     if(!p || p.mode!=='coop' || snapshot.roles[p.id]?.policyRevision!==p.policyRevision) fail('NOT_MANAGED');
                     if(r.eventId!==expected.id || r.characterId!==expected.characterId || r.eventVersion!==expected.version || r.phase!==expected.phase) fail('STALE_EVENT');
                     await this.store.operation('beat',p.id,{...r,source},references(source),
                         'beat:'+r.eventId+':'+r.phase+':'+source.id+':'+source.version);
-                } catch(error) {this.notice(error);}
+                } catch(error) {
+                    // 已拒绝的旧回报不会因 MVU 保留该变量而反复重放；修正报告或正文后仍可重试。
+                    // 保存失败保留待保存操作，不能把它缓存成永久拒绝。
+                    if(!this.store.pending && !this.store.error && error.code!=='ALREADY_COMMITTED') {
+                        const cache=sameSource?rejected:{version:source.version,userVersion:source.userVersion,reports:[]};
+                        cache.reports=[...new Set([...cache.reports,rejectionKey])].slice(-20);
+                        message.extra.sdCoopEventRejections=cache;
+                    }
+                    this.notice(error);
+                }
             }
         }
         this.store.reconcile();
