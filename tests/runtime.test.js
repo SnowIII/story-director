@@ -223,6 +223,113 @@ test('archive recovery rejects a reply that the model confirms was not complete'
     assert.equal(h.runtime.state().profiles.a.rank,0);assert.ok(h.runtime.state().profiles.a.lock);
 });
 
+function archiveResult() {
+    return {ready:true,evidence:'核对资料',completion:{
+        summary:'她谈清画册与导师要求之间的困扰，用户愿意共同核对资料。她接受有限帮助，保留自己的判断，展览问题留待后续处理。',
+        outcome:'核对资料并接受帮助',outcomeEvidence:'接受有限帮助',choice:'愿意核对资料',choiceEvidence:'愿意帮你',
+        traits:['接受有限帮助'],facts:[],boundaries:[],openHooks:['展览'],closedHooks:[]}};
+}
+async function archiveSetup(t,{extra=false}={}) {
+    const h=await setup(t,{extra});await unlockAndStart(h);await progressToResolution(h);
+    const calls=[];h.host.autoAllowed=()=>true;h.host.ask=async messages=>{calls.push(messages);return JSON.stringify(archiveResult());};
+    return {...h,calls};
+}
+const resolutionBody='她决定核对资料，接受有限帮助。';
+
+test('one error is notified once and dismissal hides the banner without destroying diagnostics',async t=>{
+    const h=await setup(t),error=new Error('Got response status 502');
+    h.runtime.notice(error);h.runtime.notice(error);
+    assert.equal(h.runtime.notices.length,1);assert.match(h.runtime.currentNotice.message,/HTTP 502/);
+    h.runtime.dismissNotice();assert.equal(h.runtime.currentNotice,null);assert.equal(h.runtime.notices.length,1);
+    h.runtime.notice(new Error('Got response status 502'));
+    assert.ok(h.runtime.currentNotice);assert.equal(h.runtime.notices.length,1);
+});
+
+for(const extra of [false,true]) test('missing closure reports are checked and archived by one automatic call, extra='+extra,async t=>{
+    const h=await archiveSetup(t,{extra});
+    await h.send('我愿意帮你核对资料。',resolutionBody);await h.runtime.archiveCheckTask;
+    assert.equal(h.calls.length,1);assert.equal(h.runtime.state().profiles.a.rank,1);
+    assert.ok(h.calls[0][0].content.includes('ready'));assert.ok(h.calls[0][0].content.includes('completion'));
+    assert.ok(h.calls[0][1].content.includes(resolutionBody));
+    assert.equal(h.runtime.state().profiles.a.history.length,1);
+});
+
+for(const extra of [false,true]) test('normal complete and explicit not-ready reports need no extra API call, extra='+extra,async t=>{
+    const h=await archiveSetup(t,{extra});
+    await h.send('我愿意帮你核对资料。','她还在犹豫。',snapshot=>({event:{eventId:snapshot.event.id,
+        characterId:'a',eventVersion:snapshot.event.version,phase:'resolution',ready:false}}));
+    await h.runtime.archiveCheckTask;assert.equal(h.calls.length,0);assert.equal(h.runtime.state().profiles.a.rank,0);
+    assert.ok(!h.runtime.notices.some(n=>n.code==='SUMMARY_MISSING'));
+    await h.send('我继续帮你核对资料。',resolutionBody,snapshot=>({event:{eventId:snapshot.event.id,
+        characterId:'a',eventVersion:snapshot.event.version,phase:'resolution',...archiveResult()}}));
+    await h.runtime.archiveCheckTask;
+    assert.equal(h.calls.length,0);assert.equal(h.runtime.state().profiles.a.rank,1);
+});
+
+test('not-complete automatic decisions are quiet, cached across callbacks and reload, and manually retryable',async t=>{
+    const h=await archiveSetup(t);h.host.ask=async messages=>{h.calls.push(messages);return '{"ready":false,"reason":"尚未收束"}';};
+    const index=await h.send('我愿意帮你核对资料。','她还在犹豫。');await h.runtime.archiveCheckTask;
+    assert.equal(h.calls.length,1);assert.equal(h.runtime.currentNotice,null);
+    await h.runtime.afterMessage(index);await h.runtime.receiveMvu({stat_data:{}});await h.runtime.archiveCheckTask;
+    await h.runtime.load();await h.runtime.afterMessage(index);await h.runtime.archiveCheckTask;
+    assert.equal(h.calls.length,1);assert.equal(h.runtime.state().profiles.a.rank,0);assert.ok(h.runtime.state().profiles.a.lock);
+    await assert.rejects(h.runtime.recoverArchive(),{code:'NOT_COMPLETE'});assert.equal(h.calls.length,2);
+    h.host.ask=async messages=>{h.calls.push(messages);return JSON.stringify(archiveResult());};
+    await h.send('我继续帮你核对资料。',resolutionBody);await h.runtime.archiveCheckTask;
+    assert.equal(h.calls.length,3);assert.equal(h.runtime.state().profiles.a.rank,1);
+});
+
+test('an extra-model turn waits for its MVU callback and repeated callbacks share one check',async t=>{
+    const h=await archiveSetup(t,{extra:true});let finish;
+    h.host.ask=async messages=>{h.calls.push(messages);return new Promise(resolve=>{finish=resolve;});};
+    h.messages.push({is_user:true,mes:'我愿意帮你核对资料。'});await h.runtime.prepare();
+    h.messages.push({is_user:false,mes:resolutionBody});const index=h.messages.length-1;
+    await h.runtime.afterMessage(index);assert.equal(h.calls.length,0);
+    await h.runtime.receiveMvu({stat_data:{}});assert.equal(h.calls.length,1);
+    const checking=h.runtime.archiveCheckTask;
+    await h.runtime.receiveMvu({stat_data:{}});await h.runtime.afterMessage(index);assert.equal(h.calls.length,1);
+    finish(JSON.stringify(archiveResult()));await checking;assert.equal(h.runtime.state().profiles.a.rank,1);
+});
+
+test('an early MVU callback is remembered until the reply snapshot is bound',async t=>{
+    const h=await archiveSetup(t,{extra:true});
+    h.messages.push({is_user:true,mes:'我愿意帮你核对资料。'});await h.runtime.prepare();
+    h.messages.push({is_user:false,mes:resolutionBody});const index=h.messages.length-1;
+    await h.runtime.receiveMvu({stat_data:{}});assert.equal(h.calls.length,0);
+    await h.runtime.afterMessage(index);await h.runtime.archiveCheckTask;
+    assert.equal(h.calls.length,1);assert.equal(h.runtime.state().profiles.a.rank,1);
+});
+
+for(const blocked of ['switch-off','readonly','save-pending','paused']) test('automatic archive makes no request when '+blocked,async t=>{
+    const h=await archiveSetup(t);h.host.autoAllowed=()=>false;
+    await h.send('我愿意帮你核对资料。',resolutionBody);
+    h.host.autoAllowed=()=>blocked!=='switch-off';
+    if(blocked==='readonly') h.runtime.store.readonly=true;
+    if(blocked==='save-pending') h.runtime.store.pending={};
+    if(blocked==='paused') await h.runtime.pause('a',h.runtime.event().id);
+    await h.runtime.maybeAutoArchive();assert.equal(h.calls.length,0);
+});
+
+test('automatic request failures are shown once and are not retried for the same unchanged reply',async t=>{
+    const h=await archiveSetup(t);h.host.ask=async messages=>{h.calls.push(messages);throw new Error('Got response status 502');};
+    const index=await h.send('我愿意帮你核对资料。',resolutionBody);await h.runtime.archiveCheckTask;
+    assert.equal(h.calls.length,1);assert.equal(h.runtime.notices.length,1);
+    h.runtime.dismissNotice();await h.runtime.afterMessage(index);await h.runtime.archiveCheckTask;
+    assert.equal(h.calls.length,1);assert.equal(h.runtime.currentNotice,null);
+    h.host.ask=async messages=>{h.calls.push(messages);return JSON.stringify(archiveResult());};
+    await h.runtime.recoverArchive();assert.equal(h.calls.length,2);assert.equal(h.runtime.state().profiles.a.rank,1);
+});
+
+test('deleting a floor cancels an automatic archive check and rejects its late result',async t=>{
+    const h=await archiveSetup(t);let finish;
+    h.host.ask=async messages=>{h.calls.push(messages);return new Promise(resolve=>{finish=resolve;});};
+    await h.send('我愿意帮你核对资料。',resolutionBody);const checking=h.runtime.archiveCheckTask;
+    h.messages.pop();h.runtime.store.reconcile();assert.equal(h.runtime.job,null);
+    finish(JSON.stringify(archiveResult()));await checking;
+    assert.equal(h.runtime.state().profiles.a.rank,0);assert.equal(h.runtime.state().profiles.a.history.length,0);
+    assert.equal(h.runtime.currentNotice,null);
+});
+
 test('display decoration after completion preserves Rank, archive and the unlock across reload',async t=>{
     const h=await setup(t);await completeFirst(h);
     const message=h.messages.at(-1), eventId=h.runtime.state().profiles.a.history[0].eventId;

@@ -7,7 +7,7 @@ import {createHost} from '../coop/host.js';
 import {mergeCoopMvu,mvuApiFor} from '../coop/mvu.js';
 import {applyNsCommands,setCoopScene,setCoopMvuAuthority} from '../model.js';
 
-async function fixture(t,{initial=5,name='画家',authority=true}={}) {
+async function fixture(t,{initial=5,name='画家',authority=true,rankCount=4}={}) {
     const empty=()=>({stat_data:{生命:11,故事导演:{Coop:{角色:{}}}}});
     const metadata={},messages=[{is_user:false,mes:'画家在整理资料。',variables:[empty()]}];
     let baseline=empty(),failSave=false;
@@ -23,7 +23,7 @@ async function fixture(t,{initial=5,name='画家',authority=true}={}) {
         replaceMvuData:async(data,target)=>{if(target.type==='chat') baseline=clone(data);else messages[target.message_id].variables=[clone(data)];}};
     host.mvu=()=>api;
     const runtime=new CoopRuntime(host);await runtime.load();t.after(()=>runtime.dispose());
-    await runtime.configure({id:'a',name,mode:'coop',rankCount:4,initialAffinity:initial});await runtime.syncMvu();
+    await runtime.configure({id:'a',name,mode:'coop',rankCount,initialAffinity:initial});await runtime.syncMvu();
     const row=(index=messages.length-1)=>messages[index].variables[0].stat_data.故事导演.Coop.角色[name];
     const write=(value,locked)=>{Object.assign(row(),{好感度:value,好感锁定:locked});runtime.store.reconcile();};
     async function turn({value,locked,user='我愿意帮你核对资料。',body='她放心地交给你资料。',event=null}={}) {
@@ -46,6 +46,52 @@ async function fixture(t,{initial=5,name='画家',authority=true}={}) {
 
 test('the production host selects MVU as the affinity authority',()=>{
     assert.equal(createHost().affinityAuthority,'mvu');
+});
+
+async function autoArchiveFixture(t,rankCount=4) {
+    const affinity={4:30,7:15,10:10}[rankCount];
+    const h=await fixture(t,{initial:affinity,rankCount});h.write(affinity,true);await h.runtime.generate('a');
+    await h.turn({body:'她拿出旧画册。',event:{evidence:'旧画册'}});
+    await h.turn({body:'她提出疑问，等待用户回应。',event:{evidence:'提出疑问'}});
+    const result={ready:true,evidence:'核对资料',completion:{
+        summary:'她说明画册和导师要求之间的矛盾，用户愿意共同核对资料。她接受有限帮助，保留自己的判断，展览问题仍待后续处理。',
+        outcome:'核对资料并接受帮助',outcomeEvidence:'接受有限帮助',choice:'愿意帮助核对',choiceEvidence:'愿意帮你',
+        traits:['接受有限帮助'],facts:[],boundaries:[],openHooks:['展览'],closedHooks:[]}};
+    let calls=0;h.host.autoAllowed=()=>true;h.host.ask=async()=>{calls++;return JSON.stringify(result);};
+    return {...h,result,affinity,calls:()=>calls};
+}
+
+for(const rankCount of [4,7,10]) test('automatic MVU archive uses one check and preserves values and rollback, ranks='+rankCount,async t=>{
+    const h=await autoArchiveFixture(t,rankCount);
+    await h.turn({body:'她决定核对资料，接受有限帮助。'});await h.runtime.archiveCheckTask;
+    assert.equal(h.calls(),1);assert.equal(h.runtime.state().profiles.a.rank,1);
+    assert.equal(h.row().好感度,h.affinity);assert.equal(h.row().好感锁定,true);
+    const archived=clone(h.messages.at(-1).variables[0]);
+    await h.runtime.receiveMvu(archived);await h.runtime.afterMessage(h.messages.length-1);await h.runtime.archiveCheckTask;
+    assert.equal(h.calls(),1);
+    h.messages.pop();h.runtime.store.reconcile();
+    assert.equal(h.runtime.state().profiles.a.rank,0);assert.equal(h.runtime.state().profiles.a.history.length,0);
+});
+
+test('complete and not-ready MVU reports each avoid an automatic archive request',async t=>{
+    const h=await autoArchiveFixture(t);
+    await h.turn({body:'她还在犹豫。',event:{ready:false}});await h.runtime.archiveCheckTask;
+    assert.equal(h.calls(),0);assert.equal(h.runtime.state().profiles.a.rank,0);
+    await h.turn({body:'她决定核对资料，接受有限帮助。',event:h.result});await h.runtime.archiveCheckTask;
+    assert.equal(h.calls(),0);assert.equal(h.runtime.state().profiles.a.rank,1);
+});
+
+test('an automatic archive save can be retried without another model request',async t=>{
+    const h=await autoArchiveFixture(t),persist=h.host.persist;let failing=true;
+    h.host.persist=async document=>{
+        if(failing && document.journal.at(-1)?.id.startsWith('archive:')) throw new Error('offline');
+        return persist(document);
+    };
+    await h.turn({body:'她决定核对资料，接受有限帮助。'});await h.runtime.archiveCheckTask;
+    assert.equal(h.calls(),1);assert.ok(h.runtime.store.pending);assert.equal(h.runtime.state().profiles.a.rank,0);
+    assert.equal(h.row().好感度,30);assert.equal(h.row().好感锁定,true);
+    failing=false;await h.runtime.store.retrySave();
+    assert.equal(h.calls(),1);assert.equal(h.runtime.state().profiles.a.rank,1);
 });
 
 test('the MVU contract shows a complete executable JSONPatch envelope and distinguishes narrative evidence',async t=>{

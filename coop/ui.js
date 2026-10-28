@@ -82,7 +82,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
                 '好感 '+p.affinity+' 已锁定。事件结束并归档成功后解锁。')+'</p>'+
             (event.phase==='waiting_route' || event.phase==='resolution' && event.targetRank===rankPolicy(p).relationshipRank?'<p>请根据你的真实回应确认关系路线。确认后继续聊天，演绎收束；改变心意时可以重新选择。</p>'+
                 '<button data-action="route" data-route="friendship">确认为挚友／伙伴</button> <button data-action="route" data-route="romance">确认为恋人</button>':'')+
-            (event.phase==='resolution'?'<p>若本阶已经在正文中收束，但回报缺失，可只补齐归档。</p><button data-action="archive">核对并补齐归档</button>':'')+
+            (event.phase==='resolution'?'<p>总开关开启时，每轮自动核对本阶是否已在正文中收束，已收束时补齐归档；也可手动核对。</p><button data-action="archive">核对并补齐归档</button>':'')+
             '<div class="sdc-actions"><button data-action="pause" data-id="'+esc(p.id)+'" data-event="'+esc(event.id)+'">暂停演出</button></div>'+
             '<details><summary>幕后计划（包含剧透）</summary><pre>'+esc(JSON.stringify(plan,null,2))+'</pre></details>';
     }
@@ -160,12 +160,12 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         panel.innerHTML=(embedded?'':'<header><strong>♡ Coop／羁绊</strong><button data-action="close" aria-label="关闭 Coop 面板">✕</button></header>')+
             '<nav>'+[['roles','管理角色'],['event','当前事件'],['archive','历阶摘要'],['settings','设置']].map(([key,label])=>
                 '<button data-tab="'+key+'" aria-pressed="'+(tab===key)+'">'+label+'</button>').join('')+'</nav>'+
-            '<div class="sdc-body">'+(!state?'<p>'+esc(runtime.notices[0]?.message || '请先打开一个可保存的角色聊天。')+'</p>':
+            '<div class="sdc-body">'+(!state?'<p>'+esc(runtime.currentNotice?.message || '请先打开一个可保存的角色聊天。')+'</p>':
                 (runtime.store.readonly?'<p class="sdc-warning">当前窗口只读。<button data-action="takeover">接管写入</button></p>':'')+
                 (runtime.store.pending?'<p class="sdc-warning">归档待保存。'+(runtime.store.error?esc(runtime.store.error.message)+' <button data-action="retry">重试保存</button>':'正在等待服务器确认……')+'</p>':'')+
-                (runtime.notices[0]?'<p role="status">'+esc(runtime.notices[0].message)+' <button data-action="dismiss">知道了</button></p>':'')+
+                (runtime.currentNotice?'<p role="status">'+esc(runtime.currentNotice.message)+' <button data-action="dismiss">关闭提示</button></p>':'')+
                 ({roles:roles,event:eventPage,archive:archive,settings:settings}[tab])(state))+'</div>';
-        if(runtime.store.readonly || runtime.store.pending) panel.querySelectorAll('form button,form input,form textarea,form select,[data-action="start"],[data-action="resume"],[data-action="route"],[data-action="delete"],[data-action="import"],#sdc-import').forEach(node=>{node.disabled=true;});
+        if(runtime.store.readonly || runtime.store.pending) panel.querySelectorAll('form button,form input,form textarea,form select,[data-action="start"],[data-action="resume"],[data-action="route"],[data-action="archive"],[data-action="delete"],[data-action="import"],#sdc-import').forEach(node=>{node.disabled=true;});
     }
     panel.addEventListener('click',event=> {
         const button=event.target.closest('button');if(!button) return;
@@ -187,7 +187,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         if(action==='abort') runtime.abort();
         if(action==='retry') run(async()=>{await runtime.store.retrySave();await runtime.ensureCurrentCharacters();render();});
         if(action==='takeover') run(()=>runtime.takeover());
-        if(action==='dismiss'){runtime.notices.shift();render();}
+        if(action==='dismiss'){button.closest('[role="status"]')?.remove();runtime.dismissNotice();}
         if(action==='import') panel.querySelector('#sdc-import')?.click();
         if(action==='export') {
             const url=URL.createObjectURL(new Blob([runtime.export()],{type:'application/json'}));

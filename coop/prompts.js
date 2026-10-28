@@ -63,7 +63,7 @@ export function reportContract(profiles,event,snapshot,byExtra=false) {
         userEvidence:'本轮用户消息中的准确短句',evidence:'本轮正文中的准确短句'}]})};
     if(event) sample.event={eventId:event.id,characterId:event.characterId,eventVersion:event.version,phase:event.phase,
         evidence:'本轮已实际发生的当前幕短句',
-        ...(event.phase==='resolution'?{completion:{summary:'约100～200字的实际事件摘要',outcome:'实际局部结果',
+        ...(event.phase==='resolution'?{ready:true,completion:{summary:'约100～200字的实际事件摘要',outcome:'实际局部结果',
             outcomeEvidence:'正文准确短句',choice:'用户真实选择',choiceEvidence:'用户实际回应准确短句',
             traits:['新增／深化的习惯'],facts:['本阶公开且实际确认的人物事实'],boundaries:['关系边界变化'],
             openHooks:['尚未解决的事项'],closedHooks:['本次实际回收的旧伏笔'],sharedFacts:[],conflicts:[]}}:{})};
@@ -86,7 +86,8 @@ export function reportContract(profiles,event,snapshot,byExtra=false) {
             '以下 JSONPatch 数值是当前值范例，请替换为本轮计算后的最终值；不变的字段可省略。不要提交 affinity/delta 计分回报，不修改 Rank、阶级方案、路线或档案。']:[]),
         '所有 evidence 必须准确引用对应消息原文；只引用已发生事实，不能把猜测写成事实或代写用户行为。',
         'event.evidence 必须逐字引用本轮角色正文中实际发生的短句，不能引用用户消息、变量块或本契约范例；用户回应仅放在明确要求的 userEvidence／choiceEvidence 字段。',
-        'event 回报仅在当前 phase 的任务完整写进正文后提供；waiting_user／waiting_route 不报完成。每次回复最多完成当前一幕。',
+        'event 回报仅在当前 phase 的任务完整写进正文后提供；waiting_user／waiting_route 不报完成。每次回复最多完成当前一幕。resolution 尚未收束时的 ready:false 只表示继续演出，不推进事件。',
+        'resolution 阶段每轮在同一份回报中判断本阶是否已收束：尚未达到本阶局部目标时写 event.ready:false，不填 completion；已收束时写 ready:true 并填写 completion。完整回报会直接归档，无需额外核对请求。',
         'resolution 的 completion 必须包含实际选择、局部结果、人物变化、未解决与已回收伏笔，以及完整简短摘要。不可只写“任务完成”。',
         'completion.choiceEvidence 可引用用户首次或最新回应中的真实选择；普通闲聊不覆盖首次选择。角色的 relationshipRank 为路线确认阶级，该阶必须引用路线确认时的回应。rankCount 和 thresholds 已由用户锁定，模型不可更改。',
         '若共享 NPC／信物状态实际变化，可在 completion.sharedFacts 填 [{entityId:"稳定英文ID",name:"实体名",fact:"新事实",previousFact:"已有旧事实原文",evidence:"正文准确短句",knownBy:["user","当前角色ID"]}]；没有变化用空数组。',
