@@ -126,7 +126,7 @@ test('report tags are data, malformed reports are not evaluated',()=>{
     assert.deepEqual(parseReports('<CoopReport>globalThis.compromised=true</CoopReport>'),[]);
     assert.equal(visibleBody('正文<CoopReport>{"x":1}</CoopReport>'),'正文');
 });
-test('A17/A18/A42: replay removes score and gate when its actual source is edited',()=>{
+test('A17/A18/A42: replay keeps edited sources and rolls back deleted sources',()=>{
     const doc=newDocument('scope');doc.roster.a=config();
     const messages=[{is_user:true,mes:'我帮你整理资料。'},{is_user:false,mes:'她放松了。'}];
     ensureMessageIds(messages);let map=sourceMap(messages),s=project(doc,map);
@@ -135,6 +135,8 @@ test('A17/A18/A42: replay removes score and gate when its actual source is edite
         data:{characterId:'a',delta:5,interactionId:src.userId,source:src}},map);
     assert.equal(project(doc,map).profiles.a.affinity,5);
     messages[0].mes='我拒绝帮助。';map=sourceMap(messages);
+    assert.equal(project(doc,map).profiles.a.affinity,5);
+    messages.shift();map=sourceMap(messages);
     assert.equal(project(doc,map).profiles.a.affinity,0);assert.equal(project(doc,map).skipped[0].code,'STALE_SOURCE');
 });
 test('A32: roster mode changes do not erase already earned scores on replay',()=>{

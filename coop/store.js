@@ -8,22 +8,29 @@ export class CoopStore {
         this.host=host;this.document=null;this.state=null;this.scope='';this.queue=Promise.resolve();
         this.error=null;this.pending=null;this.readonly=false;this.onChange=()=>{};this.excluded=new Map();this.generation=0;
         this.eventPruneTask=null;
+        this.confirmationMigration=false;
     }
     load() {
         this.generation++;
         const scope=this.host.scope();
-        this.scope=scope;this.excluded.clear();this.pending=null;this.error=null;
+        this.scope=scope;this.excluded.clear();this.pending=null;this.error=null;this.confirmationMigration=false;
         if(!scope) {this.scope='';this.document=null;this.state=null;return;}
         this.document=readDocument(this.host.metadata()?.[STORAGE_KEY],scope);
         if(this.host.affinityAuthority==='mvu') this.document.settings.affinityAuthority='mvu';
         this.reconcile();
     }
-    sources() {
-        const map=sourceMap(this.host.messages());
+    sources(options) {
+        const map=sourceMap(this.host.messages(),options);
         for(const [key,version] of this.excluded) if(matchesSourceVersion(map.get(key),version)) map.delete(key);
         return map;
     }
     project(document=this.document) {
+        if(document.journal.some(op=>op.confirmed===undefined)) {
+            // 首次升级固定旧档当前有效分支，保留已废弃记录供诊断，不复活早先被替换的计划。
+            const applied=new Set(project(document,this.sources({legacyStatus:true})).applied);
+            for(const op of document.journal) if(op.confirmed===undefined) op.confirmed=applied.has(op.id);
+            this.confirmationMigration=true;
+        }
         const state=project(document,this.sources());
         return this.host.projectState?.(state) || state;
     }

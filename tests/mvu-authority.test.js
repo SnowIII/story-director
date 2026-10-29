@@ -51,6 +51,22 @@ test('the production host selects MVU as the affinity authority',()=>{
     assert.equal(createHost().affinityAuthority,'mvu');
 });
 
+test('editing confirmed Coop dialogue keeps Rank and archive while deleting the floor still rolls back',async t=>{
+    const h=await fixture(t,{initial:30});h.write(30,true);await h.runtime.generate('a');
+    await h.turn({body:'她拿出旧画册。',event:{evidence:'旧画册'}});
+    await h.turn({body:'她提出疑问，等待用户回应。',event:{evidence:'提出疑问'}});
+    await h.turn({body:'她接受有限帮助，决定核对资料。',event:{evidence:'接受有限帮助',completion:{
+        summary:'用户愿意共同核对资料，她接受有限帮助并保留自己的判断，后续展览仍需准备。',outcome:'核对资料',outcomeEvidence:'核对资料',
+        choice:'愿意帮忙',choiceEvidence:'愿意帮你',traits:['接受帮助'],facts:[],boundaries:[],openHooks:[],closedHooks:[]}}});
+    const history=clone(h.runtime.state().profiles.a.history);
+    h.messages[2].mes='玩家改写了开场。';h.messages.at(-2).mes='玩家改写了回应。';h.messages.at(-1).mes='玩家改写了收束正文。';
+    h.runtime.store.reconcile();await h.runtime.load();
+    assert.equal(h.runtime.state().profiles.a.rank,1);
+    assert.equal(h.runtime.state().profiles.a.history[0].summary,history[0].summary);
+    assert.equal(h.row().好感度,30);assert.equal(h.row().好感锁定,true);
+    h.messages.pop();h.runtime.store.reconcile();assert.equal(h.runtime.state().profiles.a.rank,0);
+});
+
 async function autoArchiveFixture(t,rankCount=4) {
     const affinity={4:30,7:15,10:10}[rankCount];
     const h=await fixture(t,{initial:affinity,rankCount});h.write(affinity,true);await h.runtime.generate('a');

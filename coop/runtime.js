@@ -97,6 +97,9 @@ export class CoopRuntime {
         await this.releaseLease();
         try {this.store.load();} catch(error) {this.store.state=null;this.notice(error);return;}
         await this.acquireLease();
+        if(this.store.confirmationMigration && !this.store.readonly) {
+            try {await this.store.enqueue(()=>{});this.store.confirmationMigration=false;} catch(error) {this.notice(error);}
+        }
         if(globalThis.window && typeof globalThis.BroadcastChannel==='function' && this.store.scope) {
             this.channel=new BroadcastChannel('story-director-coop:'+this.store.scope);
             this.channel.onmessage=event=>{
@@ -444,6 +447,7 @@ export class CoopRuntime {
                 if(sameSource && rejected.reports.includes(rejectionKey)) continue;
                 try {
                     const r=report.event, p=this.state().profiles[r.characterId], expected=snapshot.event;
+                    if(p?.events[r.eventId]?.phase==='completed') continue;
                     if(!p || p.mode!=='coop' || snapshot.roles[p.id]?.policyRevision!==p.policyRevision) fail('NOT_MANAGED');
                     if(r.eventId!==expected.id || r.characterId!==expected.characterId || r.eventVersion!==expected.version || r.phase!==expected.phase) fail('STALE_EVENT');
                     if(r.phase==='resolution' && r.ready===false && r.routeConflict!==true) continue;

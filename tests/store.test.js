@@ -25,6 +25,22 @@ function holdSave(host) {
     host.persist=async document=>{entered.resolve();await finished.promise;await persist(document);};
     return {entered:entered.promise,finish:finished.resolve,fail:finished.reject};
 }
+
+test('legacy migration pins its current valid branch and never revives superseded records after edits',async()=>{
+    const h=await setup();await h.score();
+    const legacy=clone(h.metadata[STORAGE_KEY]),abandoned=clone(legacy.journal[0]);
+    delete legacy.journal[0].confirmed;delete abandoned.confirmed;
+    abandoned.id='superseded-score';abandoned.data.interactionId='discarded-interaction';
+    abandoned.refs[0].version='not-the-confirmed-source';legacy.journal.push(abandoned);
+    h.metadata[STORAGE_KEY]=legacy;h.store.load();
+    assert.deepEqual(h.store.document.journal.map(op=>op.confirmed),[true,false]);
+    assert.equal(h.store.state.profiles.a.affinity,30);
+    await h.store.enqueue(()=>{});
+    h.messages[1].mes='玩家重新编辑了整段正文。';h.store.load();
+    assert.equal(h.store.state.profiles.a.affinity,30);
+    assert.equal(h.store.state.skipped.find(op=>op.id==='superseded-score').code,'SUPERSEDED');
+    h.messages.pop();h.store.reconcile();assert.equal(h.store.state.profiles.a.affinity,29);
+});
 for(const change of ['edit','delete','swipe','exclude']) test('save confirmation rechecks current sources after '+change,async()=>{
     const h=await setup(),save=holdSave(h.host),published=[];
     h.store.onChange=()=>published.push(h.store.state.profiles.a.affinity);
@@ -35,10 +51,10 @@ for(const change of ['edit','delete','swipe','exclude']) test('save confirmation
     if(change==='swipe') h.messages[1].swipe_id=1;
     if(change==='exclude') h.store.excluded.set(h.source.id,h.source.version);
     h.store.reconcile();save.finish();await pending;
-    assert.equal(h.store.state.profiles.a.affinity,29);
-    assert.equal(h.store.state.profiles.a.lock,null);
-    assert.equal(h.store.state.skipped[0].code,'STALE_SOURCE');
-    assert.ok(published.every(value=>value===29),'an obsolete gate was published');
+    const kept=['edit','swipe'].includes(change);
+    assert.equal(h.store.state.profiles.a.affinity,kept?30:29);
+    assert.equal(!!h.store.state.profiles.a.lock,kept);
+    if(!kept) {assert.equal(h.store.state.skipped[0].code,'STALE_SOURCE');assert.ok(published.every(value=>value===29));}
     assert.equal(h.store.pending,null);
     assert.equal(h.metadata[STORAGE_KEY].journal.length,1);
 });
@@ -51,8 +67,8 @@ test('failed save, retry, source edit and reload retain only the valid projectio
     const save=holdSave(h.host),retry=h.store.retrySave();await save.entered;
     const original=h.messages[1].mes;
     h.messages[1].mes='她没有接受帮助。';save.finish();await retry;
-    assert.equal(h.store.state.profiles.a.affinity,29);
-    h.store.load();assert.equal(h.store.state.profiles.a.affinity,29);
+    assert.equal(h.store.state.profiles.a.affinity,30);
+    h.store.load();assert.equal(h.store.state.profiles.a.affinity,30);
     h.messages[1].mes=original;h.store.reconcile();
     assert.equal(h.store.state.profiles.a.affinity,30);
     h.store.load();assert.equal(h.store.state.profiles.a.affinity,30);

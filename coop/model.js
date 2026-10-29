@@ -162,10 +162,10 @@ export function replanEvent(state,input) {
     if(e.questionSource) for(const key of ['dilemma','question']) plan[key]=e.plan[key];
     e.plan=plan;e.historySignature=input.historySignature || historySignature(p);e.version++;p.revision++;
 }
-export function acceptAnswer(state,input) {
+export function acceptAnswer(state,input,{replay=false}={}) {
     const {p,e}=eventOf(state,input.characterId,input.eventId);
     if (e.paused || !['waiting_user','waiting_route','resolution'].includes(e.phase) || !input.source?.isUser ||
-        input.source.index<=e.questionSource?.index || !text(input.source.body)) fail('WAITING_USER');
+        input.source.index<=e.questionSource?.index || !replay && !text(input.source.body)) fail('WAITING_USER');
     e.initialAnswerSource=e.initialAnswerSource || clone(input.source);
     e.answerSource=clone(input.source);
     e.phase=e.targetRank===rankPolicy(p).relationshipRank && !e.route ? 'waiting_route':'resolution'; e.version++; p.revision++;
@@ -175,21 +175,21 @@ export function chooseRoute(state,input) {
     if (e.targetRank!==rankPolicy(p).relationshipRank || !['waiting_route','resolution'].includes(e.phase) || !e.answerSource || !['friendship','romance'].includes(input.route)) fail('INVALID_ROUTE');
     e.route=input.route; e.routeSource=clone(e.answerSource); e.phase='resolution'; e.version++; p.revision++;
 }
-export function acceptBeat(state,input) {
+export function acceptBeat(state,input,{replay=false}={}) {
     const {p,e}=eventOf(state,input.characterId,input.eventId), s=input.source;
     if(p.mode!=='coop' || e.paused || state.activeEventId!==e.id) fail('NOT_ACTIVE');
     if(e.version!==input.eventVersion || input.phase!==e.phase) fail('STALE_EVENT');
-    if(!s || s.isUser || !s.userId || !hasEvidence(s.body,text(input.evidence))) fail('INVALID_EVIDENCE');
+    if(!s || s.isUser || !s.userId || !replay && !hasEvidence(s.body,text(input.evidence))) fail('INVALID_EVIDENCE');
     if(e.playedUsers.includes(s.userId)) fail('WAITING_USER','同一用户互动只能完成一个演出阶段');
     if(input.routeConflict===true) {
         if(e.phase!=='resolution' || e.targetRank!==rankPolicy(p).relationshipRank || !e.route ||
             s.userId!==e.answerSource?.id || (s.userVersion && s.userVersion!==e.answerSource.version) ||
             e.answerSource.id===e.routeSource?.id && e.answerSource.version===e.routeSource.version) fail('INVALID_ROUTE');
-        if(!hasEvidence(e.answerSource.body,text(input.userEvidence))) fail('INVALID_EVIDENCE');
+        if(!replay && !hasEvidence(e.answerSource.body,text(input.userEvidence))) fail('INVALID_EVIDENCE');
         e.route=null;e.routeSource=null;e.phase='waiting_route';e.version++;p.revision++;
         return e;
     }
-    if(e.phase==='resolution') return completeEvent(state,input);
+    if(e.phase==='resolution') return completeEvent(state,input,{replay});
     if(!['hook','dilemma'].includes(e.phase)) fail('WAITING_USER');
     e.playedUsers.push(s.userId); e.progress.push({phase:e.phase,evidence:text(input.evidence,500),source:clone(s)});
     if(e.phase==='hook' && e.plan.rounds!==2) e.phase='dilemma';
@@ -197,7 +197,7 @@ export function acceptBeat(state,input) {
     e.version++; p.revision++;
     return e;
 }
-export function completeEvent(state,input) {
+export function completeEvent(state,input,{replay=false}={}) {
     const {p,e}=eventOf(state,input.characterId,input.eventId), report=input.completion, s=input.source;
     if(e.phase!=='resolution' || !e.answerSource || s.userIndex<=e.questionSource.index) fail('WAITING_USER');
     if(s.userId!==e.answerSource.id || (s.userVersion && e.answerSource.version && s.userVersion!==e.answerSource.version)) fail('STALE_SOURCE');
@@ -206,8 +206,8 @@ export function completeEvent(state,input) {
     if(!object(report)) fail('SUMMARY_MISSING');
     const outcome=text(report.outcome,600), choice=text(report.choice,600);
     const choiceSources=e.targetRank===rankPolicy(p).relationshipRank?[e.routeSource]:[e.initialAnswerSource,e.answerSource];
-    if(!outcome || !choice || !hasEvidence(s.body,text(report.outcomeEvidence)) ||
-        !choiceSources.some(source=>hasEvidence(source?.body,text(report.choiceEvidence)))) fail('INVALID_EVIDENCE');
+    if(!outcome || !choice || !replay && (!hasEvidence(s.body,text(report.outcomeEvidence)) ||
+        !choiceSources.some(source=>hasEvidence(source?.body,text(report.choiceEvidence))))) fail('INVALID_EVIDENCE');
     let summary=text(report.summary,1200);
     const traits=lines(report.traits), facts=lines(report.facts), boundaries=lines(report.boundaries);
     const openHooks=lines(report.openHooks), closedHooks=lines(report.closedHooks);
@@ -218,7 +218,7 @@ export function completeEvent(state,input) {
     if(Array.isArray(report.conflicts) && report.conflicts.length) fail('CONTINUITY_CONFLICT');
     const shared=[];
     for(const item of (Array.isArray(report.sharedFacts)?report.sharedFacts:[]).slice(0,12)) {
-        if(!object(item) || !text(item.entityId) || !text(item.fact) || !hasEvidence(s.body,text(item.evidence))) fail('INVALID_EVIDENCE');
+        if(!object(item) || !text(item.entityId) || !text(item.fact) || !replay && !hasEvidence(s.body,text(item.evidence))) fail('INVALID_EVIDENCE');
         const key=id(item.entityId), old=state.sharedFacts[key];
         if(old && old.fact!==text(item.fact,600) && item.previousFact!==old.fact) fail('CONTINUITY_CONFLICT','共享实体状态发生冲突：'+key);
         shared.push({entityId:key,name:text(item.name,120),fact:text(item.fact,600),knownBy:lines(item.knownBy,30),

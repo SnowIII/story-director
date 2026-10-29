@@ -68,7 +68,7 @@ export function directorReportBlocks(body) {
     clean=clean.replace(/<content\b[^>]*>[\s\S]*?<\/content\s*>/gi,'').replace(/```[\s\S]*?```/g,'');
     return [...clean.matchAll(/<CoopReport\b[^>]*>([\s\S]*?)<\/CoopReport\s*>/gi)].map(match=>match[1]);
 }
-export function visibleBody(body,{keepImagePlaceholders=false,keepInstructions=false}={}) {
+export function visibleBody(body,{keepImagePlaceholders=false,keepInstructions=false,keepStatusPlaceholders=false}={}) {
     let result=withoutAnalysis(body,{keepInstructions});
     for(const [from,to] of variableRanges(result).reverse()) result=result.slice(0,from)+result.slice(to);
     result=result
@@ -77,6 +77,7 @@ export function visibleBody(body,{keepImagePlaceholders=false,keepInstructions=f
         .replace(/<(故事导演(?:自检|审查|审查说明))>[\s\S]*?<\/\1>/gi,'')
         .replace(/(\r?\n)?\[igs-img:\d+\](\r?\n)?/gi,(_all,before,after)=>before && after?'\n':'');
     if(!keepImagePlaceholders) result=result.replace(/(?:\r?\n)?<IMG>\s*\d+\s*<\/IMG>(?:\r?\n)?/gi,'');
+    if(!keepStatusPlaceholders) result=result.replace(/<StatusPlaceHolderImpl\s*\/>|<StatusPlaceHolderImpl\s*>\s*<\/StatusPlaceHolderImpl\s*>/gi,'');
     return result.replace(/\r\n?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
 }
 

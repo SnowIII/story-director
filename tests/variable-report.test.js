@@ -117,7 +117,8 @@ test('editing an earlier variable-report story preserves later independent valid
     const h=await setup(t),first=await h.send(2);await h.send(3);
     assert.equal(h.profile().affinity,5);
     h.messages[first.index].mes='她拒绝了。';h.runtime.store.reconcile();
-    assert.equal(h.profile().affinity,3);
+    assert.equal(h.profile().affinity,5);
+    h.messages.splice(first.index-1,2);h.runtime.store.reconcile();assert.equal(h.profile().affinity,3);
 });
 test('variable payload cannot supply its own evidence and changing only patches preserves source version',async t=>{
     const h=await setup(t),{index}=await h.send(2,{body:'她拒绝了。'});

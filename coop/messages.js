@@ -4,29 +4,34 @@ import {extractNsCommands,parseCommandLiteral} from '../model.js';
 export {visibleBody,stripReport} from './body.js';
 export const REPORT_TAG='CoopReport';
 const sourceCache=new WeakMap();
+const legacySourceCache=new WeakMap();
 export const matchesSourceVersion=(source,version)=>!!source && (source.version===version || source.versions?.includes(version));
 export const matchesUserVersion=(source,version)=>source?.userVersion===version || !!source?.userVersions?.includes(version);
 export function uuid() { return globalThis.crypto?.randomUUID?.() || 'c-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2); }
 export function ensureMessageIds(messages) {
     for(const message of messages) if(message && !message.sd_coop_id) message.sd_coop_id=uuid();
 }
-export function sourceMap(messages) {
+export function sourceMap(messages,{legacyStatus=false}={}) {
     const sources=new Map();let user=null;
+    const cache=legacyStatus?legacySourceCache:sourceCache;
     const blocks=[...new Set(messages.filter(message=>message?.is_user).flatMap(message=>instructionBlocks(message.mes)))].slice(-8);
     const instructions=JSON.stringify(blocks);
     messages.forEach((message,index)=>{
         if(!message || !message.sd_coop_id) return;
         const salt='|'+(message.swipe_id ?? 0)+'|'+!!message.is_user;
-        let cached=sourceCache.get(message);
+        let cached=cache.get(message);
         if(!cached || cached.raw!==message.mes || cached.salt!==salt || cached.instructions!==instructions) {
-            const options={keepImagePlaceholders:!!message.is_user};
+            const options={keepImagePlaceholders:!!message.is_user,keepStatusPlaceholders:legacyStatus};
             const body=visibleBody(message.mes,options), version='v2:'+hash(fingerprintBody(message.mes,options)+salt);
             const variants=message.is_user?instructionSourceVariants(message.mes,blocks):[message.mes];
             cached={raw:message.mes,salt,instructions,body,version,versions:[...new Set([
-                'v2:'+hash(fingerprintBody(message.mes,{keepImagePlaceholders:true})+salt),
+                'v2:'+hash(fingerprintBody(message.mes,{keepImagePlaceholders:true,keepStatusPlaceholders:legacyStatus})+salt),
+                // 旧版曾把状态栏占位符计入指纹；只重建已知显示标记，不信任缓存声称的旧哈希。
+                ...(legacyStatus?[]:[message.mes,String(message.mes || '')+'\n<StatusPlaceHolderImpl/>'].flatMap(value=>[false,true].map(keepImagePlaceholders=>
+                    'v2:'+hash(fingerprintBody(value,{...options,keepImagePlaceholders:keepImagePlaceholders || options.keepImagePlaceholders,keepStatusPlaceholders:true})+salt)))),
                 ...variants.map(value=>'v2:'+hash(fingerprintBody(value,{...options,keepInstructions:true})+salt)),
                 ...legacyBodyVariants(message.mes,128,options).map(value=>hash(value+salt))])]};
-            sourceCache.set(message,cached);
+            cache.set(message,cached);
         }
         const source={id:message.sd_coop_id,version:cached.version,versions:cached.versions,
             index,body:cached.body,isUser:!!message.is_user,isSystem:!!message.is_system};

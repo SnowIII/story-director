@@ -34,6 +34,26 @@ test('evidence tolerates display whitespace but still requires actual words',()=
     assert.equal(hasEvidence('她拒绝核对','她愿意核对'),false);
     assert.equal(hasEvidence('任何正文','<build>不应当作为依据</build>'),false);
 });
+
+test('status-bar placeholders are presentation only and cannot supply narrative evidence',()=>{
+    const body='<content>她接受了帮助。</content>',expected=fingerprintBody(body);
+    for(const marker of ['<StatusPlaceHolderImpl/>','<StatusPlaceHolderImpl />','<StatusPlaceHolderImpl></StatusPlaceHolderImpl>']) {
+        assert.equal(fingerprintBody(body+'\n\n'+marker),expected);
+        assert.equal(hasEvidence(marker,marker),false);
+        assert.equal(visibleBody(body+'\n'+marker),body);
+    }
+});
+
+test('pre-fix v2 references with a status placeholder survive its removal while actual edits stay invalid',()=>{
+    const body='<content>她接受了帮助。</content>\n<StatusPlaceHolderImpl/>';
+    const old='v2:'+hash(fingerprintBody(body,{keepStatusPlaceholders:true})+'|0|false');
+    const message={sd_coop_id:'m',is_user:false,mes:body};
+    assert.ok(matchesSourceVersion(sourceMap([message]).get('m'),old));
+    message.mes=body.replace('\n<StatusPlaceHolderImpl/>','');
+    assert.ok(matchesSourceVersion(sourceMap([message]).get('m'),old));
+    message.mes=message.mes.replace('接受','拒绝');
+    assert.equal(matchesSourceVersion(sourceMap([message]).get('m'),old),false);
+});
 test('format and IGS decoration have stable fingerprints; actual rewrites and swipes do not',()=>{
     const messages=[{sd_coop_id:'m',mes:'<content>她愿意一起核对。</content>',is_user:false,swipe_id:0}];
     const original=sourceMap(messages).get('m').version;

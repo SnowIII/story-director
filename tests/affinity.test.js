@@ -79,7 +79,8 @@ test('A3: removing old automatic instructions restores legacy cumulative scores 
     assert.equal(h.profile().affinity,9);assert.equal(h.profile().scoreLog.length,3);
     h.messages[0].mes=h.messages[0].mes.replace('帮你核对','拒绝核对');
     h.runtime.store.reconcile();
-    assert.equal(h.profile().affinity,7,'an actual user edit still revokes only its own score');
+    assert.equal(h.profile().affinity,9,'editing a retained floor preserves its confirmed score');
+    h.messages.splice(0,2);h.runtime.store.reconcile();assert.equal(h.profile().affinity,7);
 });
 
 test('B: mentioning an UpdateVariable opener in a build block must not erase the story evidence', async t => {
@@ -95,7 +96,7 @@ test('B: mentioning an UpdateVariable opener in a build block must not erase the
 });
 
 for (const mode of ['affinity', 'coop']) {
-    test('C: an invalid older score must not remove a later independent valid score, mode=' + mode, async t => {
+    test('C: editing keeps confirmed scores and deleting removes only the related score, mode=' + mode, async t => {
         const h = await setup(t, mode);
         const firstIndex = await h.send(2);
         const secondIndex = await h.send(3);
@@ -107,16 +108,18 @@ for (const mode of ['affinity', 'coop']) {
         assert.equal(sourceMap(h.messages).get(secondMessage.sd_coop_id).version, secondVersion);
         t.diagnostic('later source unchanged=true, score=' + h.profile().affinity
             + ', skipped=' + JSON.stringify(h.runtime.state().skipped.map(x => x.code)));
-        assert.equal(h.profile().affinity, 3, 'an independent later interaction was discarded because the old total changed');
+        assert.equal(h.profile().affinity, 5);
+        h.messages.splice(firstIndex-1,2);h.runtime.store.reconcile();assert.equal(h.profile().affinity,3);
     });
 }
 
-test('control: a real rewrite of the only scored interaction must still revoke that score', async t => {
+test('control: rewriting retains a confirmed interaction while deleting its floor revokes it', async t => {
     const h = await setup(t);
     const index = await h.send(1);
     h.messages[index].mes = '<content>她拒绝了帮助。</content>';
     h.runtime.store.reconcile();
-    assert.equal(h.profile().affinity, 0);
+    assert.equal(h.profile().affinity,1);
+    h.messages.pop();h.runtime.store.reconcile();assert.equal(h.profile().affinity,0);
     assert.equal(h.runtime.state().skipped[0].code, 'STALE_SOURCE');
 });
 
@@ -147,7 +150,7 @@ test('old score journals verify legacy sources and rebase independent points bef
     h.messages[first].mes=h.messages[first].mes.replace('<content>','<content>[igs-img:1]\n');
     await h.runtime.load();assert.equal(h.profile().affinity,5);
     h.messages[first].mes='她拒绝了这次帮助。';h.runtime.store.reconcile();
-    assert.equal(h.profile().affinity,3);
+    assert.equal(h.profile().affinity,5);
 });
 
 test('a persisted legacy request remains bound to its cached report after a fresh prepare',async t=>{

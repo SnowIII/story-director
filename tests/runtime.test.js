@@ -53,6 +53,15 @@ test('runtime default empty roster produces no score or model call',async t=>{
     await h.send('我来帮你。','她放松了。',{affinity:[{characterId:'stranger',delta:5,evidence:'放松',userEvidence:'帮你'}]});
     assert.equal(Object.keys(h.runtime.state().profiles).length,0);assert.equal(calls,0);
 });
+
+test('loading a legacy chat saves confirmed progress before later edits and reloads',async t=>{
+    const h=await setup(t);await h.configure('affinity',0);await h.send('我来帮你。','她放松了。',h.score(2));
+    const legacy=clone(h.meta[STORAGE_KEY]);for(const op of legacy.journal) delete op.confirmed;
+    h.meta[STORAGE_KEY]=legacy;await h.runtime.load();
+    assert.ok(h.meta[STORAGE_KEY].journal.every(op=>op.confirmed===true));
+    h.messages.at(-1).mes='玩家编辑后的正文。';await h.runtime.load();
+    assert.equal(h.runtime.state().profiles.a.affinity,2);
+});
 for(const extra of [false,true]) test('end-to-end rank completion and persistent summary, extra='+extra,async t=>{
     const h=await setup(t,{extra});await unlockAndStart(h);
     assert.equal(h.runtime.state().profiles.a.affinity,30);assert.ok(h.runtime.state().profiles.a.lock);
@@ -69,10 +78,24 @@ for(const extra of [false,true]) test('end-to-end rank completion and persistent
     assert.ok(h.meta[STORAGE_KEY].journal.some(op=>op.kind==='beat' && op.data.phase==='resolution'));
     const restarted=new CoopRuntime(h.host);await restarted.load();t.after(()=>restarted.dispose());
     assert.equal(restarted.state().profiles.a.rank,1);assert.equal(restarted.state().profiles.a.history[0].summary,p.history[0].summary);
-    // A source edit invalidates completion, its summary and the unlock together.
+    // Edits preserve confirmed progress; deleting the resolution floor rolls it back.
     h.messages.at(-1).mes='这件事并没有解决。';restarted.store.reconcile();
+    assert.equal(restarted.state().profiles.a.rank,1);
+    h.messages.pop();restarted.store.reconcile();
     assert.equal(restarted.state().profiles.a.rank,0);assert.ok(restarted.state().profiles.a.lock);assert.equal(restarted.state().profiles.a.history.length,0);
 });
+test('manual archive corrections survive body edits and reload while deleted floors still roll back',async t=>{
+    const h=await setup(t);await completeFirst(h);
+    const eventId=h.runtime.state().profiles.a.history[0].eventId;
+    const summary='用户帮忙核对画册资料，她接受有限支持并继续保留自己的判断。';
+    await h.runtime.editSummary('a',eventId,summary);
+    h.messages.at(-1).mes='玩家重新编辑了收束正文。';await h.runtime.load();
+    assert.equal(h.runtime.state().profiles.a.history[0].summary,summary);
+    assert.equal(h.runtime.state().profiles.a.history[0].manuallyReviewed,true);
+    h.messages.pop();h.runtime.store.reconcile();
+    assert.equal(h.runtime.state().profiles.a.history.length,0);
+});
+
 test('locked pending event rejects negative as well as positive source reports',async t=>{
     const h=await setup(t);await h.configure();await h.send('我来帮你。','她放松了。',h.score(1));
     await h.send('我不会帮你。','她不再放松。',h.score(-5));
@@ -120,7 +143,7 @@ test('same-interaction group reply gets a hold instruction, not the next act',as
     assert.ok(h.runtime.injection().includes('本次用户互动已推进过一幕'));
     assert.equal(h.runtime.event().phase,'dilemma');
 });
-test('swiping a scored reply allows the new version to replace, not add to it',async t=>{
+test('swiping a retained floor preserves its confirmed score without double counting',async t=>{
     const h=await setup(t);await h.configure('affinity',0);
     const index=await h.send('我来帮你。','她放松了。',h.score(2));
     assert.equal(h.runtime.state().profiles.a.affinity,2);
@@ -129,7 +152,7 @@ test('swiping a scored reply allows the new version to replace, not add to it',a
     const snapshot=h.runtime.snapshot;
     h.messages[index].mes+='<CoopReport>'+JSON.stringify({nonce:snapshot.nonce,...h.score(1)})+'</CoopReport>';
     await h.runtime.afterMessage(index);
-    assert.equal(h.runtime.state().profiles.a.affinity,1);
+    assert.equal(h.runtime.state().profiles.a.affinity,2);assert.equal(h.runtime.state().profiles.a.scoreLog.length,1);
 });
 test('thirty distinct chat metadata documents retain independent archives',async t=>{
     const h=await setup(t);await h.configure('affinity',0);
@@ -341,13 +364,35 @@ test('display decoration after completion preserves Rank, archive and the unlock
     assert.equal(h.runtime.state().profiles.a.rank,1);
 });
 
-test('points earned after an invalidated Rank keep their actual arc dependency',async t=>{
+test('late MVU status placeholders do not revoke event progress or completed archives',async t=>{
+    const h=await setup(t);await unlockAndStart(h);
+    await h.send('我问起画册。','她带来了旧画册。',snapshot=>({event:{...snapshot.event,eventId:snapshot.event.id,
+        eventVersion:snapshot.event.version,evidence:'旧画册'}}));
+    h.messages.at(-1).mes+='\n<StatusPlaceHolderImpl/>';h.runtime.store.reconcile();
+    assert.equal(h.runtime.event().phase,'dilemma');
+    await h.send('我继续听她说。','她提出疑问，等待回应。',snapshot=>({event:{...snapshot.event,eventId:snapshot.event.id,
+        eventVersion:snapshot.event.version,evidence:'提出疑问'}}));
+    h.messages.at(-1).mes+='\n<StatusPlaceHolderImpl/>';h.runtime.store.reconcile();
+    assert.equal(h.runtime.event().phase,'waiting_user');
+    await h.send('我愿意帮你核对资料。','她决定核对资料，接受有限帮助。',snapshot=>({event:{...snapshot.event,eventId:snapshot.event.id,
+        eventVersion:snapshot.event.version,evidence:'核对资料',...archiveResult()}}));
+    h.messages.at(-1).mes+='\n<StatusPlaceHolderImpl/>';h.runtime.store.reconcile();
+    assert.equal(h.runtime.state().profiles.a.rank,1);
+    await h.runtime.load();assert.equal(h.runtime.state().profiles.a.rank,1);
+    assert.ok(h.messages.at(-1).mes.endsWith('<StatusPlaceHolderImpl/>'),'the actual status bar remains in the saved message');
+    h.messages.at(-1).mes=h.messages.at(-1).mes.replace('决定核对资料','拒绝核对资料');h.runtime.store.reconcile();
+    assert.equal(h.runtime.state().profiles.a.rank,1);
+    h.messages.pop();h.runtime.store.reconcile();
+    assert.equal(h.runtime.state().profiles.a.rank,0);
+});
+
+test('points earned after a deleted Rank source keep their actual arc dependency',async t=>{
     const h=await setup(t);await completeFirst(h);
     const resolution=h.messages.at(-1);
     await h.send('我继续帮你。','她放松了。',h.score(2));
     const scoreId=h.runtime.store.document.journal.at(-1).id;
     assert.equal(h.runtime.state().profiles.a.affinity,32);
-    resolution.mes='这次事件尚未收束。';h.runtime.store.reconcile();
+    h.messages.splice(h.messages.indexOf(resolution),1);h.runtime.store.reconcile();
     assert.equal(h.runtime.state().profiles.a.rank,0);assert.equal(h.runtime.state().profiles.a.affinity,30);
     assert.equal(h.runtime.state().skipped.find(op=>op.id===scoreId).code,'STALE_DEPENDENCY');
 });
@@ -363,25 +408,24 @@ for(const change of ['edit','delete','swipe']) for(const delta of [4,5]) test('a
     if(change==='delete') h.messages.splice(first-1,2);
     if(change==='swipe') h.messages[first].swipe_id=1;
     h.runtime.store.reconcile();
-    if(delta===5) {
+    if(change!=='delete' || delta===5) {
         assert.equal(h.runtime.event()?.id,eventId);assert.equal(h.runtime.event().phase,'dilemma');
         assert.equal(h.runtime.state().profiles.a.affinity,30);
-        assert.deepEqual(h.runtime.state().skipped.map(op=>op.code),['STALE_SOURCE']);
+        assert.deepEqual(h.runtime.state().skipped.map(op=>op.code),change==='delete'?['STALE_SOURCE']:[]);
         await h.runtime.load();assert.equal(h.runtime.event()?.id,eventId);
     } else {
         assert.equal(h.runtime.event(),null);assert.equal(h.runtime.state().profiles.a.lock,null);
         assert.equal(h.runtime.state().profiles.a.affinity,29);
     }
 });
-test('legacy event journals retain conservative preconditions when dependencies are unknown',async t=>{
+test('confirmed event journals keep progress after edits even without detailed dependency hashes',async t=>{
     const h=await setup(t);await h.configure('affinity',25);
     const first=await h.send('我来帮你。','她放松了。',h.score(2));
     await h.send('我继续帮你。','她放松了。',h.score(5));
     await h.runtime.configure({...h.runtime.state().profiles.a,mode:'coop',acceptCap:true});await h.runtime.generate('a');
     for(const op of h.runtime.store.document.journal) delete op.dependencies;
     h.messages[first].mes='她拒绝了帮助。';h.runtime.store.reconcile();
-    assert.equal(h.runtime.event(),null);
-    assert.ok(h.runtime.state().skipped.some(op=>op.code==='STALE_DEPENDENCY'));
+    assert.equal(h.runtime.event().phase,'hook');assert.equal(h.runtime.state().skipped.length,0);
 });
 test('replanning after the opening keeps the original rounds in both the request and the resumed event',async t=>{
     const h=await setup(t);await unlockAndStart(h);
@@ -460,6 +504,8 @@ for(const recovery of [false,true]) test('Rank 3 route conflict survives persist
     assert.equal(h.runtime.state().profiles.a.history.at(-1).initialAnswerSource.id,firstAnswer);
     await h.runtime.load();assert.equal(h.runtime.state().profiles.a.route,'friendship');
     h.messages[conflict].mes='她还未回应。';h.runtime.store.reconcile();
+    assert.equal(h.runtime.state().profiles.a.rank,3);assert.equal(h.runtime.state().profiles.a.route,'friendship');
+    h.messages.splice(conflict,1);h.runtime.store.reconcile();
     assert.equal(h.runtime.state().profiles.a.rank,2);assert.ok(h.runtime.state().profiles.a.lock);
 });
 test('replan generation is rejected when its paused event changes without new messages',async t=>{
@@ -474,7 +520,7 @@ test('replan generation is rejected when its paused event changes without new me
     assert.equal(h.runtime.store.document.journal.filter(op=>op.kind==='replan').length,0);
 });
 
-for(const change of ['edit','delete']) test('a resolution source invalidated during saving never publishes its Rank, '+change,async t=>{
+for(const change of ['edit','delete']) test('saving preserves edited resolutions and rejects deleted resolution floors, '+change,async t=>{
     const h=await setup(t);await unlockAndStart(h);await progressToResolution(h);
     const published=[],persist=h.host.persist;
     const unsubscribe=h.runtime.onChange(()=>published.push(h.runtime.state().profiles.a.rank));t.after(unsubscribe);
@@ -494,9 +540,11 @@ for(const change of ['edit','delete']) test('a resolution source invalidated dur
     await saving;
     if(change==='edit') h.messages.at(-1).mes='她仍在犹豫，尚未解决。';else h.messages.pop();
     h.runtime.store.reconcile();release();await pending;
-    assert.ok(published.every(rank=>rank===0));assert.equal(h.runtime.state().profiles.a.rank,0);
-    assert.ok(h.runtime.state().profiles.a.lock);
-    await h.runtime.load();assert.equal(h.runtime.state().profiles.a.rank,0);
+    const expected=change==='delete'?0:1;
+    if(!expected) assert.ok(published.every(rank=>rank===0));
+    assert.equal(h.runtime.state().profiles.a.rank,expected);
+    assert.equal(!!h.runtime.state().profiles.a.lock,!expected);
+    await h.runtime.load();assert.equal(h.runtime.state().profiles.a.rank,expected);
 });
 
 test('a new role enters both MVU mirrors only after its registration is saved',async t=>{
@@ -533,6 +581,8 @@ test('MVU mirrors confirmed scores, retains the old total on save failure and fo
     h.host.persist=persist;await h.runtime.store.retrySave();await h.runtime.syncMvu();
     assert.equal(affinity('message'),1);assert.equal(affinity('chat'),1);
     h.messages[index].mes='她拒绝了帮助。';h.runtime.store.reconcile();await h.runtime.syncMvu();
+    assert.equal(affinity('message'),1);assert.equal(affinity('chat'),1);
+    h.messages.pop();h.runtime.store.reconcile();await h.runtime.syncMvu();
     assert.equal(affinity('message'),0);assert.equal(affinity('chat'),0);
     assert.equal(tables.message.stat_data.生命,11);assert.equal(tables.chat.stat_data.生命,11);
 });

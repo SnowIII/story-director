@@ -54,7 +54,7 @@ function operationDependencies(state,op) {
             question:sourceRef(e.questionSource),initialAnswer:sourceRef(e.initialAnswerSource),
             answer:sourceRef(e.answerSource),route:e.route,routeSource:sourceRef(e.routeSource)})):null};
 }
-export function applyOperation(state,op) {
+export function applyOperation(state,op,{replay=false}={}) {
     const p=state.profiles[op.characterId], oldMode=p?.mode;
     if(p && op.mode) p.mode=op.mode;
     let result;
@@ -68,9 +68,9 @@ export function applyOperation(state,op) {
             case 'replan':result=replanEvent(state,{...op.data,characterId:op.characterId});break;
             case 'pause':result=pauseEvent(state,op.characterId,op.data.eventId);break;
             case 'resume':result=resumeEvent(state,op.characterId,op.data.eventId);break;
-            case 'answer':result=acceptAnswer(state,{...op.data,characterId:op.characterId});break;
+            case 'answer':result=acceptAnswer(state,{...op.data,characterId:op.characterId},{replay});break;
             case 'route':result=chooseRoute(state,{...op.data,characterId:op.characterId});break;
-            case 'beat':result=acceptBeat(state,{...op.data,characterId:op.characterId});break;
+            case 'beat':result=acceptBeat(state,{...op.data,characterId:op.characterId},{replay});break;
             default:fail('INVALID_OPERATION');
         }
     } finally { if(p) p.mode=oldMode; }
@@ -84,9 +84,12 @@ export function project(document,sources) {
     for(const op of document.journal) {
         if(ids.has(op.id)) continue;
         ids.add(op.id);
+        if(op.confirmed===false) {skipped.push({id:op.id,code:'SUPERSEDED'});continue;}
+        const confirmed=op.confirmed===true;
         const hadCompletion=priorCompletions.has(op.characterId);
         if(op.kind==='beat' && op.data?.phase==='resolution') priorCompletions.add(op.characterId);
-        if(!validRefs(op.refs,sources)) {skipped.push({id:op.id,code:'STALE_SOURCE'});continue;}
+        // 已确认的记录不因编辑正文而撤销；只有引用楼层被删除才回退。
+        if(!(confirmed?(op.refs || []).every(ref=>sources.has(ref.id)):validRefs(op.refs,sources))) {skipped.push({id:op.id,code:'STALE_SOURCE'});continue;}
         const p=state.profiles[op.characterId];
         const history=p?.history.map(h=>h.eventId) || [];
         // Points depend on their actual interaction and completed arc, not the old total.
@@ -94,7 +97,11 @@ export function project(document,sources) {
         const dependencyValid=op.kind==='affinity' ?
             (op.affinityHistory!==undefined ? Array.isArray(op.affinityHistory) && JSON.stringify(op.affinityHistory)===JSON.stringify(history) :
                 !op.precondition || op.precondition===roleSignature(state,op.characterId) || !hadCompletion && !history.length) :
-            op.dependencies!==undefined ? JSON.stringify(op.dependencies)===JSON.stringify(operationDependencies(state,op)) :
+            op.dependencies!==undefined ? confirmed? (()=>{
+                const {event:_expectedEvent,...expected}=op.dependencies;
+                const {event:_actualEvent,...actual}=operationDependencies(state,op);
+                return JSON.stringify(expected)===JSON.stringify(actual);
+            })() : JSON.stringify(op.dependencies)===JSON.stringify(operationDependencies(state,op)) :
                 !op.precondition || op.precondition===roleSignature(state,op.characterId);
         if(!dependencyValid) {
             skipped.push({id:op.id,code:'STALE_DEPENDENCY'});continue;
@@ -104,12 +111,12 @@ export function project(document,sources) {
             const hydrated=clone(op);
             if(hydrated.data?.source?.id) {
                 const source=sources.get(hydrated.data.source.id);
-                if(matchesSourceVersion(source,hydrated.data.source.version)) hydrated.data.source=clone(source);
+                if(source && (confirmed || matchesSourceVersion(source,hydrated.data.source.version))) hydrated.data.source=clone(source);
             }
-            applyOperation(state,hydrated);
+            applyOperation(state,hydrated,{replay:confirmed});
             for(const p of Object.values(state.profiles)) for(const h of p.history) {
                 const edit=document.summaryEdits?.[h.eventId];
-                if(edit && matchesSourceVersion(sources.get(h.source.id),edit.sourceVersion) && typeof edit.summary==='string' && edit.summary.length>=20) {
+                if(edit && (confirmed?sources.has(h.source.id):matchesSourceVersion(sources.get(h.source.id),edit.sourceVersion)) && typeof edit.summary==='string' && edit.summary.length>=20) {
                     h.summary=edit.summary.slice(0,1200);h.summaryVersion=edit.version;h.manuallyReviewed=true;
                 }
             }
@@ -132,6 +139,7 @@ export function appendOperation(document,state,op,sources) {
     const candidate=clone(state);
     applyOperation(candidate,op);assertState(candidate);
     const durable=clone(op);
+    durable.confirmed=true;
     durable.precondition=roleSignature(state,op.characterId);
     if(op.kind==='affinity') durable.affinityHistory=state.profiles[op.characterId].history.map(h=>h.eventId);
     else durable.dependencies=operationDependencies(state,op);
