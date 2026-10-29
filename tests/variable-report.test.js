@@ -49,6 +49,16 @@ test('report parser accepts only data and rejects prototype keys or executable e
     assert.deepEqual(parseReports('<UpdateVariable><JSONPatch>[{"op":"add","path":"/故事导演/Coop/回报","value":{"__proto__":{},"nonce":"n"}}]</JSONPatch></UpdateVariable>'),[]);
 });
 
+test('director transport accepts complete tags only outside analysis, story, variables and code examples',()=>{
+    const report={nonce:'current',event:{eventId:'event',phase:'hook'}},tag='<CoopReport>'+JSON.stringify(report)+'</CoopReport>';
+    assert.deepEqual(parseReports('她放下画册。'+tag,{directorOnly:true}),[report]);
+    for(const hidden of ['<build>'+tag+'</build>','<analysis>'+tag+'</analysis>','<content>'+tag+'</content>',
+        '<UpdateVariable>'+tag+'</UpdateVariable>','```json\n'+tag+'\n```',tag.replace('</CoopReport>','')]) {
+        assert.deepEqual(parseReports(hidden,{directorOnly:true}),[]);
+    }
+    assert.deepEqual(parseReports('<CoopReport>{"__proto__":{},"nonce":"n"}</CoopReport>',{directorOnly:true}),[]);
+});
+
 async function setup(t,{extra=false,initial=0,mode='affinity'}={}) {
     const messages=[],metadata={},context={extensionSettings:{mvu_settings:{更新方式:extra?'额外模型解析':'随AI输出'}}};
     const host={scope:()=> 'variable-fixture',metadata:()=>metadata,messages:()=>messages,context:()=>context,

@@ -111,7 +111,7 @@ export function readMvuAffinity(host,state,{live=null,previous=null}={}) {
     }
     return state;
 }
-export function mergeCoopMvu(variables,state,{authority=false}={}) {
+export function mergeCoopMvu(variables,state,{authority=false,removeReport=false}={}) {
     if(!state || !object(variables?.stat_data)) return false;
     const keys=mvuCharacterKeys(state);
     let profiles=Object.fromEntries(Object.values(state.profiles).map(p=>[keys.get(p.id),
@@ -131,10 +131,12 @@ export function mergeCoopMvu(variables,state,{authority=false}={}) {
         }
     }
     profiles=mirrorValue(coop?.角色,profiles);
-    if(JSON.stringify(coop?.角色)===JSON.stringify(profiles) && Object.hasOwn(coop,'回报')) return false;
+    const hasReport=Object.hasOwn(coop || {},'回报');
+    if(JSON.stringify(coop?.角色)===JSON.stringify(profiles) && (removeReport?!hasReport:authority || hasReport)) return false;
     if(!ns) ns=ensureWrappedObject(root,'故事导演');
     if(!coop) coop=ensureWrappedObject(ns,'Coop');
-    if(!Object.hasOwn(coop,'回报')) coop.回报=null;
+    if(removeReport) delete coop.回报;
+    else if(!authority && !Object.hasOwn(coop,'回报')) coop.回报=null;
     coop.角色=profiles;
     return true;
 }
@@ -162,7 +164,7 @@ export function createMvuSync(host,store,canWrite) {
                         const raw=api.getMvuData(target);
                         if(!object(raw?.stat_data)) continue;
                         const data=clone(raw);
-                        if(mergeCoopMvu(data,state,{authority})) await api.replaceMvuData(data,target);
+                        if(mergeCoopMvu(data,state,{authority,removeReport:authority && host.directorReports?.()})) await api.replaceMvuData(data,target);
                         ready.push(target.type==='message'?'最新楼层':'聊天变量');
                     } catch(error) {failure=failure || error;}
                 }
@@ -181,7 +183,7 @@ export function createMvuSync(host,store,canWrite) {
     sync.error=null;
     sync.status='尚未同步';
     sync.capLive=variables=>allowed() && authority?capLiveAffinities(variables,store.state):false;
-    sync.updateLive=variables=>allowed()?mergeCoopMvu(variables,store.state,{authority}):false;
+    sync.updateLive=variables=>allowed()?mergeCoopMvu(variables,store.state,{authority,removeReport:authority && host.directorReports?.()}):false;
     return sync;
 }
 export function bindingCapability(api) {

@@ -47,8 +47,8 @@ function variableRanges(body) {
     return ranges;
 }
 
-function withoutAnalysis(body,{keepInstructions=false}={}) {
-    let result=stripReport(body);
+function withoutAnalysis(body,{keepInstructions=false,keepReports=false}={}) {
+    let result=keepReports?String(body || ''):stripReport(body);
     if(!keepInstructions) result=result.replace(instructionPattern,'');
     result=result.replace(/<(build|think|thinking|analysis)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,'');
     // An unfinished analysis block cannot consume a following explicit story.
@@ -61,6 +61,12 @@ function withoutAnalysis(body,{keepInstructions=false}={}) {
 export function updateVariableBlocks(body) {
     const clean=withoutAnalysis(body);
     return variableRanges(clean).map(([from,to])=>clean.slice(from,to)).filter(block=>/<\/UpdateVariable\s*>$/i.test(block));
+}
+export function directorReportBlocks(body) {
+    let clean=withoutAnalysis(body,{keepReports:true});
+    for(const [from,to] of variableRanges(clean).reverse()) clean=clean.slice(0,from)+clean.slice(to);
+    clean=clean.replace(/<content\b[^>]*>[\s\S]*?<\/content\s*>/gi,'').replace(/```[\s\S]*?```/g,'');
+    return [...clean.matchAll(/<CoopReport\b[^>]*>([\s\S]*?)<\/CoopReport\s*>/gi)].map(match=>match[1]);
 }
 export function visibleBody(body,{keepImagePlaceholders=false,keepInstructions=false}={}) {
     let result=withoutAnalysis(body,{keepInstructions});

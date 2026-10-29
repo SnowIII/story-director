@@ -3,7 +3,7 @@ import {continuity,publicMemory} from './history.js';
 import {BLUEPRINTS_BY_RANK} from './blueprints.js';
 export {BLUEPRINTS_BY_RANK} from './blueprints.js';
 export const BLUEPRINTS=BLUEPRINTS_BY_RANK[4];
-export function designMessages(profile,context='') {
+export function designMessages(profile,context='',templates={}) {
     const policy=rankPolicy(profile),blueprints=BLUEPRINTS_BY_RANK[policy.rankCount];
     const rules=[
         '你是 Coop 羁绊事件设计师。目标角色已锁定 '+policy.rankCount+' 阶方案，门槛为 '+policy.thresholds.join('、')+'；只设计当前一阶，不写死整条剧本，不代替用户说话、答应、行动或作情感选择。',
@@ -23,9 +23,11 @@ export function designMessages(profile,context='') {
         'resolution 只规定可随回应变化的收束条件，不规定用户必做什么。若已有 seeds，四个字段必须原样复用。'
     ].join('\n');
     const user=['目标角色：'+profile.name+' ['+profile.id+']','同一人的别名／简称：'+((profile.aliases || []).join('、') || '未设置'),'目标 Rank：'+(profile.rank+1),
-        '本阶定位：'+blueprints[profile.rank],'补充设定（可选）：\n'+(profile.description || '未填写，请从下面的现场资料和有效历史中提取已有设定。'),continuity(profile),
+        '本阶定位：'+(templates.blueprint || blueprints[profile.rank]),'补充设定（可选）：\n'+(profile.description || '未填写，请从下面的现场资料和有效历史中提取已有设定。'),continuity(profile),
         '【当前现场／相关世界书】\n'+context].join('\n\n');
-    return [{role:'system',content:rules},{role:'user',content:user}];
+    const constraints='【程序契约】角色已锁定 '+policy.rankCount+' 阶，门槛 '+policy.thresholds.join('、')+'，关系确认阶级 '+policy.relationshipRank+'。只设计 Rank '+(profile.rank+1)+
+        '；轮数遵守指定值，不修改进度、路线或历史，不代写用户选择。仅输出 JSON：targetRank,rounds,title,scene,conflict,goal,hook,dilemma,question,resolution,seeds:{persona,desire,shadow,friction},usedHistory:全部前阶事件ID数组,references:[],conflicts:[]。已有 seeds 原样复用，已确认路线原样沿用，关系确认必须等待用户与面板选择。';
+    return [{role:'system',content:[templates.rules || rules,constraints].join('\n\n')},{role:'user',content:user}];
 }
 export function renderScene(profile,event) {
     if(!event || event.paused) return '';
@@ -52,6 +54,38 @@ export function renderScene(profile,event) {
         '本阶成长目标：'+p.goal);
     lines.push(publicMemory(profile));
     return lines.filter(Boolean).join('\n');
+}
+export function affinityContract(profiles,snapshot,byExtra=false) {
+    if(!profiles.length) return '';
+    const actors=profiles.map(p=>({name:p.name,aliases:p.aliases || [],mvuKey:snapshot.roles[p.id].mvuKey,
+        affinity:p.affinity,locked:!!p.lock,mode:p.mode,nextThreshold:p.rank<p.rankCount?p.thresholds[p.rank]:null,
+        unlockAfterArchive:!!p.unlockAfterArchive}));
+    const first=actors[0],path='/故事导演/Coop/角色/'+first.mvuKey.replace(/~/g,'~0').replace(/\//g,'~1');
+    return ['【Coop 角色数值更新】好感度与好感锁定以 MVU 为唯一来源，只更新下列 mvuKey 对应的两个字段：',JSON.stringify(actors),
+        '同一人的主名与别名只处理一次；不新建人物。指代不明时保持原值，不凭代词或共用姓氏猜测。只有本轮真实行动才产生变化：闲聊0，体贴+1，理解／实际帮助+2，重要支持+3～5，冒犯−1～−3，严重背叛−5～−10。重复夸奖或旧行动不重复计分。',
+        '未锁定时计算 0～100 的整数最终值；coop 模式达到 nextThreshold 就封顶到该门槛并锁定，满阶不再新增门槛锁。超过100强制按100处理。',
+        'locked=true 时好感保持不变，正负变化都不累积、不补发。只有 unlockAfterArchive=true 才解除锁定，解锁当轮好感保持原值，下轮再增减。',
+        '只更新角色好感度与好感锁定，不修改 Rank、路线、阶级方案或档案。事件进度与摘要由故事导演直接接收，变量模型不生成事件回报。',
+        '与其他变量共用一个变量块和 JSONPatch 数组；不变字段可省略。下例数值须替换为本轮最终值，其他角色同理：',
+        '<UpdateVariable>\n<JSONPatch>\n'+JSON.stringify([{op:'replace',path:path+'/好感度',value:first.affinity},
+            {op:'replace',path:path+'/好感锁定',value:first.locked}])+'\n</JSONPatch>\n</UpdateVariable>',
+        '若卡片使用 _.set，在同一变量块写 _.set(\'故事导演.Coop.角色["角色名"].好感度\', 最终值) 及对应的 好感锁定；角色名使用 mvuKey，两种格式只选一种。',
+        byExtra?'当前由额外变量模型更新角色数值；正文模型只负责叙事和导演事件回报。':'当前随 AI 输出，写完正文后更新角色数值。'].join('\n');
+}
+export function directorReportContract(event,snapshot) {
+    if(!event || snapshot?.reportChannel!=='director') return '';
+    const sample={nonce:snapshot.nonce,event:{eventId:event.id,characterId:event.characterId,eventVersion:event.version,phase:event.phase,
+        evidence:'本轮角色正文中已实际发生的准确短句',...(event.phase==='resolution'?{ready:true,completion:{
+            summary:'约100～200字的实际事件摘要',outcome:'实际局部结果',outcomeEvidence:'本轮正文准确短句',
+            choice:'用户真实选择',choiceEvidence:'用户实际回应准确短句',traits:[],facts:[],boundaries:[],openHooks:[],closedHooks:[],sharedFacts:[],conflicts:[]}}:{})}};
+    return ['【仅交给故事导演的事件回报】由写正文的模型在回复末尾、<UpdateVariable> 外提交一次，不交给 MVU 或额外变量模型。导演会读取并隐藏标签，保存到当前消息和 Coop 档案。',
+        '只有本轮当前幕的任务已完整写进正文才回报，每轮最多一幕；waiting_user／waiting_route 不报完成，不代写用户行为。',
+        'event.evidence 必须逐字引用本轮角色正文，不能引用用户消息、变量块或本示例。所有事实须已实际发生。',
+        'resolution 每轮判断是否已收束：未完成时只写 ready:false，不写 completion；已完成才写 ready:true 和完整 completion，无需额外核对请求。',
+        'completion 写清真实选择、局部结果、人物变化、伏笔和摘要。choiceEvidence 可引用首次或最新真实回应；普通闲聊不覆盖首次选择，关系确认阶级引用路线确认对应的真实回应。',
+        '若最新回应明确改变已确认路线，回报 routeConflict:true、userEvidence:最新用户原文、evidence:本轮正文接住该变化的原文，省略 completion，等待面板重新确认。',
+        '共享世界事实有实际变化时，sharedFacts 使用 [{entityId:"稳定英文ID",name:"实体名",fact:"新事实",previousFact:"旧事实原文",evidence:"本轮正文原文",knownBy:["user","当前角色ID"]}]；没有用空数组。',
+        '<CoopReport>'+JSON.stringify(sample)+'</CoopReport>'].join('\n');
 }
 export function reportContract(profiles,event,snapshot,byExtra=false) {
     if(!snapshot || !profiles.length) return '';

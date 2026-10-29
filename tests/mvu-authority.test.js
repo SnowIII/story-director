@@ -7,12 +7,12 @@ import {createHost} from '../coop/host.js';
 import {mergeCoopMvu,mvuApiFor} from '../coop/mvu.js';
 import {applyNsCommands,setCoopScene,setCoopMvuAuthority} from '../model.js';
 
-async function fixture(t,{initial=5,name='画家',authority=true,rankCount=4}={}) {
+async function fixture(t,{initial=5,name='画家',authority=true,rankCount=4,extra=false,legacy=false}={}) {
     const empty=()=>({stat_data:{生命:11,故事导演:{Coop:{角色:{}}}}});
     const metadata={},messages=[{is_user:false,mes:'画家在整理资料。',variables:[empty()]}];
     let baseline=empty(),failSave=false;
     const host={affinityAuthority:authority?'mvu':undefined,scope:()=> 'mvu-owner',metadata:()=>metadata,
-        messages:()=>messages,context:()=>({}),available:()=>true,autoAllowed:()=>false,contextText:async()=> '画家整理资料。',
+        messages:()=>messages,context:()=>({extensionSettings:{mvu_settings:{更新方式:extra?'额外模型解析':'随AI输出'}}}),available:()=>true,autoAllowed:()=>false,contextText:async()=> '画家整理资料。',
         locks:{request:async(name,options,callback)=>callback({name})},persist:async document=>{
             if(failSave) throw new Error('offline');metadata.storyDirectorCoop=clone(document);
         },ask:async()=>JSON.stringify({targetRank:runtime.state().profiles.a.rank+1,title:'旧画册',scene:'画室',
@@ -29,15 +29,18 @@ async function fixture(t,{initial=5,name='画家',authority=true,rankCount=4}={}
     async function turn({value,locked,user='我愿意帮你核对资料。',body='她放心地交给你资料。',event=null}={}) {
         const old=clone(messages.findLast(message=>message.variables)?.variables[0]);
         messages.push({is_user:true,mes:user});await runtime.prepare();
-        const snapshot=runtime.snapshot,report=event?{nonce:snapshot.nonce,event:{...snapshot.event,eventId:snapshot.event.id,
+        const snapshot=runtime.snapshot;
+        if(legacy) Object.assign(snapshot,{reportChannel:'mvu',reportProducer:extra?'external':'inline'});
+        const report=event?{nonce:snapshot.nonce,event:{...snapshot.event,eventId:snapshot.event.id,
             eventVersion:snapshot.event.version,...event}}:null;
         const patches=report?[{op:'add',path:'/故事导演/Coop/回报',value:report}]:[];
-        messages.push({is_user:false,mes:body+(report?'<UpdateVariable><JSONPatch>'+JSON.stringify(patches)+'</JSONPatch></UpdateVariable>':''),variables:[old]});
+        messages.push({is_user:false,mes:body+(report?(legacy?'<UpdateVariable><JSONPatch>'+JSON.stringify(patches)+'</JSONPatch></UpdateVariable>':
+            '<CoopReport>'+JSON.stringify(report)+'</CoopReport>'):''),variables:[old]});
         await runtime.afterMessage(messages.length-1);
         const updated=clone(old),coop=updated.stat_data.故事导演.Coop;
         if(value!==undefined) coop.角色[name].好感度=value;
         if(locked!==undefined) coop.角色[name].好感锁定=locked;
-        if(report) coop.回报=report;
+        if(report && legacy) coop.回报=report;
         await runtime.receiveMvu(updated);messages.at(-1).variables=[updated];await runtime.syncMvu();runtime.store.reconcile();
         return snapshot;
     }
@@ -94,17 +97,75 @@ test('an automatic archive save can be retried without another model request',as
     assert.equal(h.calls(),1);assert.equal(h.runtime.state().profiles.a.rank,1);
 });
 
-test('the MVU contract shows a complete executable JSONPatch envelope and distinguishes narrative evidence',async t=>{
+test('the MVU contract shows only executable character updates without event payloads',async t=>{
     const h=await fixture(t);h.messages.push({is_user:true,mes:'我来帮你。'});await h.runtime.prepare();
     const contract=h.runtime.variableContract();
     const block=contract.match(/<UpdateVariable>\s*<JSONPatch>\s*([\s\S]*?)\s*<\/JSONPatch>\s*<\/UpdateVariable>/);
     assert.ok(block);const patches=JSON.parse(block[1]);
     assert.ok(patches.some(p=>p.path==='/故事导演/Coop/角色/画家/好感度' && p.value===5));
-    assert.ok(contract.includes('event.evidence 必须逐字引用本轮角色正文'));
+    assert.ok(!/nonce|completion|eventId|CoopReport|\/Coop\/回报/.test(contract));
+});
+
+for(const extra of [false,true]) test('director reports advance and archive without an MVU report namespace, extra='+extra,async t=>{
+    const h=await fixture(t,{initial:30,extra});h.write(30,true);await h.runtime.generate('a');
+    await h.turn({body:'她拿出旧画册。',event:{evidence:'旧画册'}});
+    assert.equal(h.runtime.event().phase,'dilemma');
+    const first=h.messages.at(-1);
+    assert.ok(!first.mes.includes('<CoopReport>'));assert.equal(first.extra.sdCoopReports.reportProducer,'director');
+    assert.equal(first.variables[0].stat_data.故事导演.Coop.回报,undefined);
+    await h.turn({body:'她提出疑问，等待用户回应。',event:{evidence:'提出疑问'}});
+    h.messages.push({is_user:true,mes:'我愿意帮你核对资料。'});await h.runtime.prepare();
+    assert.ok(h.runtime.injection().includes('<CoopReport>'));
+    assert.ok(h.runtime.injection().includes(h.runtime.snapshot.nonce));
+    assert.ok(!/nonce|eventId|completion|CoopReport/.test(h.runtime.variableContract()));
+    h.messages.pop();
+    await h.turn({body:'她接受有限帮助，决定核对资料。',event:{ready:true,evidence:'接受有限帮助',completion:{
+        summary:'用户愿意共同核对资料，她接受有限帮助，保留自己的判断，后续展览仍待准备。',outcome:'接受帮助核对资料',outcomeEvidence:'核对资料',
+        choice:'愿意帮忙',choiceEvidence:'愿意帮你',traits:['接受帮助'],facts:[],boundaries:[],openHooks:[],closedHooks:[]}}});
+    assert.equal(h.runtime.state().profiles.a.rank,1);assert.equal(h.row().好感度,30);assert.equal(h.row().好感锁定,true);
+    assert.equal(h.messages.at(-1).variables[0].stat_data.故事导演.Coop.回报,undefined);
+    await h.runtime.load();await h.runtime.afterMessage(h.messages.length-1);
+    assert.equal(h.runtime.state().profiles.a.rank,1);assert.equal(h.runtime.state().profiles.a.history.length,1);
+    h.messages.pop();h.runtime.store.reconcile();
+    assert.equal(h.runtime.state().profiles.a.rank,0);assert.equal(h.runtime.state().profiles.a.history.length,0);
+});
+
+test('a new director turn clears legacy MVU reports while keeping character values and wrappers',async t=>{
+    const h=await fixture(t),data=h.messages[0].variables[0],row=h.row();
+    row.好感度=[9,'说明'];data.stat_data.故事导演.Coop.回报={nonce:'old',event:{completion:{summary:'很长的旧摘要'}}};
+    await h.turn();await h.runtime.syncMvu();
+    assert.equal(h.messages.at(-1).variables[0].stat_data.故事导演.Coop.回报,undefined);
+    assert.deepEqual(h.row().好感度,[9,'说明']);
+    const current=h.api.getMvuData({type:'chat'}).stat_data.故事导演.Coop;
+    assert.equal(current.回报,undefined);assert.equal(h.runtime.state().profiles.a.affinity,9);
+});
+
+for(const extra of [false,true]) test('a new event accepts only director reports and ignores MVU transport, extra='+extra,async t=>{
+    const h=await fixture(t,{initial:30,extra});h.write(30,true);await h.runtime.generate('a');
+    h.messages.push({is_user:true,mes:'我问起那本旧画册。'});await h.runtime.prepare();
+    const snapshot=h.runtime.snapshot,report={nonce:snapshot.nonce,event:{eventId:snapshot.event.id,characterId:'a',
+        eventVersion:snapshot.event.version,phase:'hook',evidence:'旧画册'}};
+    h.messages.push({is_user:false,mes:'她拿出旧画册。'});const index=h.messages.length-1;
+    await h.runtime.afterMessage(index);
+    await h.runtime.receiveMvu({stat_data:{故事导演:{Coop:{回报:report}}}});
+    assert.equal(h.runtime.event().phase,'hook');
+    h.messages[index].mes+='<CoopReport>'+JSON.stringify(report)+'</CoopReport>';
+    await h.runtime.afterMessage(index);assert.equal(h.runtime.event().phase,'dilemma');
+    assert.equal(h.messages[index].extra.sdCoopReports.reportProducer,'director');
+});
+
+test('event design reads the latest editable template on every request without a second model call',async t=>{
+    const h=await fixture(t,{initial:30});h.write(30,true);let style='旧车站',calls=0;
+    h.host.designTemplates=async()=>({rules:'克制叙事',blueprint:style});
+    const ask=h.host.ask;h.host.ask=async(messages,signal)=>{calls++;assert.ok(messages[0].content.includes('克制叙事'));
+        assert.ok(messages[1].content.includes(style));return ask(messages,signal);};
+    await h.runtime.generate('a');assert.equal(calls,1);
+    const id=h.runtime.event().id;await h.runtime.pause('a',id);style='修复钟表';
+    await h.runtime.generate('a',{replanEventId:id});assert.equal(calls,2);
 });
 
 test('an invalid old MVU event report is rejected once, including after reload; corrected evidence remains usable',async t=>{
-    const h=await fixture(t,{initial:30});h.write(30,true);await h.runtime.generate('a');
+    const h=await fixture(t,{initial:30,legacy:true});h.write(30,true);await h.runtime.generate('a');
     await h.turn({body:'她拿出旧画册。',event:{phase:'hook',evidence:'我愿意帮你核对资料。'}});
     const old=clone(h.messages[2].extra.sdCoopReports.reports[0]);
     const count=()=>h.runtime.notices.filter(x=>x.code==='INVALID_EVIDENCE').length;

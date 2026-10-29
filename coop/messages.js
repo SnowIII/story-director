@@ -1,5 +1,5 @@
 import {hash,object} from './model.js';
-import {visibleBody,fingerprintBody,legacyBodyVariants,updateVariableBlocks,instructionBlocks,instructionSourceVariants} from './body.js';
+import {visibleBody,fingerprintBody,legacyBodyVariants,updateVariableBlocks,directorReportBlocks,instructionBlocks,instructionSourceVariants} from './body.js';
 import {extractNsCommands,parseCommandLiteral} from '../model.js';
 export {visibleBody,stripReport} from './body.js';
 export const REPORT_TAG='CoopReport';
@@ -57,9 +57,13 @@ export function modelJson(value) {
     if(body.startsWith(fence)) body=body.slice(body.indexOf('\n')+1).replace(new RegExp(fence+'\\s*$'),'').trim();
     return safeJson(body);
 }
-export function parseReports(body) {
+export function parseReports(body,{directorOnly=false}={}) {
     const reports=[];
     const add=value=>{if(object(value) && !reports.some(report=>JSON.stringify(report)===JSON.stringify(value))) reports.push(value);};
+    if(directorOnly) {
+        for(const block of directorReportBlocks(body)) try {add(safeJson(block.trim()));} catch { /* Only complete data reports outside narrative and analysis are accepted. */ }
+        return reports;
+    }
     let variableReport=null;
     for(const block of updateVariableBlocks(body)) {
         for(const match of block.matchAll(/<JSONPatch\b[^>]*>([\s\S]*?)<\/JSONPatch\s*>/gi)) {

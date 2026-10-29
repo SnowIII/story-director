@@ -5,7 +5,7 @@ import {appendOperation,project,readDocument} from './timeline.js';
 import {validateAffinityProposal} from './affinity.js';
 import {continuity,publicMemory} from './history.js';
 import {ensureMessageIds,sourceMap,sourceForId,ref,references,parseReports,stripReport,uuid,modelJson,matchesSourceVersion,matchesUserVersion} from './messages.js';
-import {designMessages,renderScene,reportContract} from './prompts.js';
+import {designMessages,renderScene,reportContract,affinityContract,directorReportContract} from './prompts.js';
 import {extraModel,readMvuReport,createMvuSync,readMvuAffinity,mvuCharacterKeys} from './mvu.js';
 import {affinityActivity} from './activity.js';
 
@@ -17,6 +17,7 @@ export class CoopRuntime {
         this.disposed=false;this.queue=Promise.resolve();this.lastAutoFailure=0;this.pendingMvuReports=new Map();
         this.affinityOutcomes=new Map();this.pendingCharacters=[];
         this.usesMvuAffinity=host.affinityAuthority==='mvu';this.mvuLive=null;
+        host.directorReports=()=>this.snapshot?.reportChannel==='director';
         if(this.usesMvuAffinity) host.projectState=state=>this.store.scope===host.scope()?
             readMvuAffinity(host,state,{live:this.mvuLive,previous:this.store.state}):state;
         host.pruneEventCaches=removed=>{
@@ -216,7 +217,9 @@ export class CoopRuntime {
                 plan:existing.plan,progress:existing.progress,initialAnswer:existing.initialAnswerSource?.body,
                 answer:existing.answerSource?.body,route:existing.route,routeResponse:existing.routeSource?.body});
             if(controller.signal.aborted) fail('CANCELLED');
-            const messages=designMessages(p,context);
+            const templates=await this.host.designTemplates?.(p) || {};
+            if(controller.signal.aborted || this.job!==job || scope!==this.host.scope()) fail('STALE_TASK');
+            const messages=designMessages(p,context,templates);
             const raw=await this.host.ask(messages,controller.signal,()=>this.changed());
             if(controller.signal.aborted || this.job!==job || this.store.scope!==scope) fail('STALE_TASK');
             ensureMessageIds(this.host.messages());
@@ -313,8 +316,8 @@ export class CoopRuntime {
         const source=this.archiveSource(event),message=this.host.messages().at(-1);
         if(!source || source.index!==this.host.messages().length-1 || !source.body.trim()) return Promise.resolve();
         const extra=message.extra,snapshot=extra?.sdCoopSnapshot;
-        // 等正常 MVU 回填完成再补漏，避免在额外变量模型之前抢发一次相同核对。
-        if((this.usesMvuAffinity || snapshot?.byExtra) && !matchesSourceVersion(source,extra.sdCoopMvuVersion)) return Promise.resolve();
+        // 旧轮次等 MVU 回填；新轮次由正文直接回报，不必等待额外变量模型。
+        if(snapshot?.reportChannel!=='director' && (this.usesMvuAffinity || snapshot?.byExtra) && !matchesSourceVersion(source,extra.sdCoopMvuVersion)) return Promise.resolve();
         const saved=extra.sdCoopReports;
         if(matchesSourceVersion(source,saved?.version) && Array.isArray(saved.reports) && saved.reports.some(r=>r.nonce===snapshot.nonce &&
             r.event?.eventId===event.id && r.event.eventVersion===event.version && r.event.phase==='resolution' &&
@@ -349,7 +352,7 @@ export class CoopRuntime {
         const byExtra=extraModel(this.host.context());
         const snapshot={nonce:'turn-'+uuid(),scope:this.store.scope,userId:user.id,userVersion:user.version,
             byExtra,reportProducer:byExtra?'external':'inline',reportChannel:'mvu',roles:{},event:null};
-        if(this.usesMvuAffinity) snapshot.affinityAuthority='mvu';
+        if(this.usesMvuAffinity) Object.assign(snapshot,{affinityAuthority:'mvu',reportProducer:'director',reportChannel:'director'});
         const mvuKeys=this.usesMvuAffinity?mvuCharacterKeys(this.state()):null;
         profiles.forEach(p=>{snapshot.roles[p.id]={policyRevision:p.policyRevision,locked:!!p.lock,
             rankCount:p.rankCount,thresholds:clone(p.thresholds),...(mvuKeys?{mvuKey:mvuKeys.get(p.id)}:{})};});
@@ -366,22 +369,30 @@ export class CoopRuntime {
         const held=event && event.playedUsers.includes(user?.id) && !['waiting_user','waiting_route'].includes(event.phase);
         if(event) parts.push(held?'【Coop 等待新的用户互动】本次用户互动已推进过一幕，只接住当前余温，不演下一幕，不代替用户回应。':
             renderScene(this.state().profiles[event.characterId],event));
+        const turn=this.turnContext();
+        if(turn?.event) parts.push(directorReportContract(turn.event,this.snapshot));
         const roster=Object.values(this.state().profiles);
         const profiles=roster.filter(p=>p.mode!=='off' && (this.host.available(p,roster) || p.id===event?.characterId));
         const memories=profiles.map(publicMemory).filter(Boolean);
         if(memories.length) parts.push('【Coop 已确认记忆；仅在场景相关时自然体现】\n'+memories.join('\n'));
         return parts.filter(Boolean).join('\n\n');
     }
-    variableContract() {
-        if(!this.state() || this.store.readonly || this.snapshot?.scope!==this.store.scope || this.store.scope!==this.host.scope()) return '';
+    turnContext() {
+        if(!this.state() || this.store.readonly || this.snapshot?.scope!==this.store.scope || this.store.scope!==this.host.scope()) return null;
         const latestUser=this.host.messages().findLast(message=>message?.is_user && !message.is_system);
-        if(latestUser?.sd_coop_id!==this.snapshot.userId) return '';
+        if(latestUser?.sd_coop_id!==this.snapshot.userId) return null;
         const event=this.event(), user=[...this.store.sources().values()].filter(s=>s.isUser).at(-1);
-        if(this.snapshot.userId!==user?.id || !matchesUserVersion(user,this.snapshot.userVersion)) return '';
+        if(this.snapshot.userId!==user?.id || !matchesUserVersion(user,this.snapshot.userVersion)) return null;
         const held=event && event.playedUsers.includes(user?.id) && !['waiting_user','waiting_route'].includes(event.phase);
         const profiles=Object.values(this.state().profiles).filter(p=>p.mode!=='off' && this.snapshot.roles[p.id] && (!this.usesMvuAffinity || p.mvuReady));
         const validEvent=!held && event?.id===this.snapshot.event?.id && event?.version===this.snapshot.event?.version?event:null;
-        return reportContract(profiles,validEvent,this.snapshot,this.snapshot.byExtra);
+        return {profiles,event:validEvent};
+    }
+    variableContract() {
+        const turn=this.turnContext();
+        if(!turn) return '';
+        return this.snapshot.reportChannel==='director'?affinityContract(turn.profiles,this.snapshot,this.snapshot.byExtra):
+            reportContract(turn.profiles,turn.event,this.snapshot,this.snapshot.byExtra);
     }
     async receive(messageIndex,external=null) {
         if(!this.store.document || this.store.readonly || this.store.scope!==this.host.scope()) return;
@@ -390,7 +401,8 @@ export class CoopRuntime {
         if(!message || message.is_user || message.is_system) return;
         const source=sourceForId(this.host.messages(),messageIndex);
         if(!source?.userId) return;
-        const reports=external?[external]:parseReports(message.mes);
+        const direct=parseReports(message.mes,{directorOnly:true});
+        const reports=external?[external]:direct.length?direct:parseReports(message.mes);
         const saved=message.extra?.sdCoopReports;
         const parsed=reports.length?reports:(matchesSourceVersion(source,saved?.version)?saved.reports:[]);
         const viaExternal=!!external || !reports.length && !!saved?.byExtra,accepted=[];
@@ -403,6 +415,7 @@ export class CoopRuntime {
                 continue;
             }
             const producer=snapshot.reportProducer || (snapshot.byExtra?'external':'inline');
+            if(producer==='director' && (viaExternal || reports.length && !direct.includes(report))) continue;
             if(producer==='external' && !viaExternal) continue;
             if(!snapshot.reportProducer && snapshot.reportChannel!=='mvu' && viaExternal!==!!snapshot.byExtra) continue;
             snapshot.messageId=source.id;snapshot.messageVersion=source.version;
@@ -485,12 +498,12 @@ export class CoopRuntime {
             ensureMessageIds(this.host.messages());
             const source=sourceForId(this.host.messages(),index);
             const message=this.host.messages()[index], saved=message.extra?.sdCoopReports;
-            const nonce=parseReports(message.mes)[0]?.nonce;
+            const nonce=(parseReports(message.mes,{directorOnly:true})[0] || parseReports(message.mes)[0])?.nonce;
             const inlineSnapshot=nonce && this.snapshots.get(nonce);
             const persisted=message.extra?.sdCoopSnapshot;
             const reusable=persisted?.scope===this.store.scope && persisted.userId===source?.userId && matchesUserVersion(source,persisted.userVersion) &&
                 (matchesSourceVersion(source,persisted.messageVersion) || matchesSourceVersion(source,saved?.version));
-            assigned=(inlineSnapshot && !inlineSnapshot.byExtra && inlineSnapshot.reportProducer!=='external'?inlineSnapshot:null) || (reusable?persisted:null) ||
+            assigned=(inlineSnapshot && (inlineSnapshot.reportProducer==='director' || !inlineSnapshot.byExtra && inlineSnapshot.reportProducer!=='external')?inlineSnapshot:null) || (reusable?persisted:null) ||
                 [...this.snapshots.values()].findLast(s=>s.userId===source?.userId && (!s.messageId || s.messageId===source.id));
             if(assigned && source?.userId===assigned.userId) {
                 message.extra=message.extra || {};
