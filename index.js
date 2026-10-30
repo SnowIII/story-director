@@ -61,7 +61,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.41.2';
+const VERSION = '0.41.3';
 let coop = null;
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
@@ -5604,6 +5604,7 @@ function renderNowTab() {
                 <button type="button" class="sd-btn sd-regen-interlude" title="换一批日常素材（当前这段作废）">换一段间章</button>
                 <button type="button" class="sd-btn sd-end-interlude" title="现在收掉间章，接着开主线的新一章">现在回主线</button>
                 <button type="button" class="sd-btn sd-next-ilbeat" title="模型忘了写「这个画面演过了」时，手动推进一个">手动推进一个画面</button>
+                <button type="button" class="sd-btn sd-prev-ilbeat" title="这个画面演歪了：退回上一个画面重演（画面号 -1，清掉「已落」）">退回一个画面</button>
             </div>` : `
             ${arc ? `<p class="sd-sub">${esc(arc)}</p>` : ''}
             ${goal ? `<p class="sd-line"><b>章目标</b>${esc(goal)}</p>` : ''}
@@ -5613,6 +5614,7 @@ function renderNowTab() {
                 <button type="button" class="sd-btn sd-generate-chapter" title="${title ? '按当前处境重写整章的拍（拍号会回到第 1 拍）' : '按当前处境设计下一章的拍列表'}">${title ? '重新生成本章' : '设计下一章'}</button>
                 <button type="button" class="sd-btn sd-force-open" title="跳过等待，现在就定篇章 + 开第一章">立刻开篇</button>
                 <button type="button" class="sd-btn sd-next-beat" title="正文模型忘了写「本拍已落」时，手动把它推进一拍">手动推进一拍</button>
+                <button type="button" class="sd-btn sd-prev-beat" title="这一拍演歪了 / 演早了：退回上一拍重演（拍号 -1，清掉「已落」）">退回一拍</button>
                 <button type="button" class="sd-btn sd-finish-chapter" title="这一章演够了：标成收尾，之后自动换章或进间章">本章收尾</button>
                 <button type="button" class="sd-btn sd-start-interlude" title="主线收尾后的间隙演一段日常（不要求跑完）">开一段间章</button>
             </div>`}
@@ -5666,6 +5668,9 @@ function renderNowTab() {
     host.querySelector('.sd-next-beat')?.addEventListener('click', () => {
         void manualAdvanceBeat();
     });
+    host.querySelector('.sd-prev-beat')?.addEventListener('click', () => {
+        void manualRewindBeat();
+    });
     host.querySelector('.sd-finish-chapter')?.addEventListener('click', () => {
         void finishChapter();
     });
@@ -5690,6 +5695,9 @@ function renderNowTab() {
     });
     host.querySelector('.sd-next-ilbeat')?.addEventListener('click', () => {
         void manualAdvanceInterludeBeat();
+    });
+    host.querySelector('.sd-prev-ilbeat')?.addEventListener('click', () => {
+        void manualRewindInterludeBeat();
     });
 
     renderDiagnostics();
@@ -6492,6 +6500,9 @@ function exposeDiagnostics() {
             why: () => firstChapterBlocker(),
             oracle: () => oracleCompatReport(),
             forceOpen: () => forceOpenStory(),   // 排查用：立刻走一遍「定篇章 + 开章」全路径
+            // ★ 0.41.3：手动回退一拍（面板「退回一拍」按钮走的就是它；也方便排查与探针驱动）
+            rewindBeat: () => manualRewindBeat(),
+            rewindInterlude: () => manualRewindInterludeBeat(),
             migrate: () => migrateLegacyKeysBothScopes({ notify: true }),   // 老存档字段名迁移（见 0.21.1/0.21.2）
             // ★ 0.27.6：中断这次生成（面板上那个「中断」按钮走的就是它）+ 查一下现在在生成什么。
             abort: () => { abortGenerate(); return true; },
@@ -6587,6 +6598,62 @@ function exposeDiagnostics() {
 }
 
 /** 手动推进间章的一个日常画面。 */
+/**
+ * ★ 0.41.3（用户提的）：**退回一拍**。
+ *
+ * 什么时候用：这一拍演歪了 / 演早了 / 想重来一遍，但不想整章重写 ——
+ * 以前只能「手动推进」（往前走），退回去得靠删楼（`syncBeatBackOnRollback` 走的是那条）。
+ * 现在给一个手动入口：拍号 -1，并把「已落 / 章目标达成 / 可进下一章」一起清掉，
+ * 让这一拍重新进入「没演」的状态。
+ *
+ * 三条纪律：
+ *   · **不越过第 1 拍**：再往前就是上一章，那是另一台机器（「重新生成本章」/ 篇章页）；
+ *   · **刹车重新计时**（`beatAt = 现在`）：不然刚退回去，下一轮心跳又按旧的「已落」推上来；
+ *   · **不动`已收尾`**：那一格表示「主线正收着（交给间章了）」，退一拍不该把幕搅乱。
+ */
+async function manualRewindBeat() {
+    const main = mainState();
+    const beats = beatsOf(main);
+    if (!beats.length) { toast('还没有拍列表。', 'warning'); return; }
+    const beat = currentBeat(main);
+    const target = Math.max(1, Math.min(beats.length, beat - 1));
+    if (target === beat) {
+        toast('已经在这一章第 1 拍了 —— 再往前就是上一章；要整章重来请用「重新生成本章」。', 'info');
+        return;
+    }
+    await patchMain({ [KEY_BEAT]: target, [KEY_BEAT_DONE]: false, [KEY_CHAPTER_DONE]: false, [KEY_READY]: false });
+    const rt = settings().run;
+    rt.focusBeat = target;
+    rt.beatAt = aiMessageCount();          // 退回来之后别急着又推上去
+    rt.focusBeatSince = aiMessageCount();
+    rt.focusStale = '';
+    rt.landedHold = '';
+    rt.setupNote = '';
+    rt.beatNote = '';
+    save();
+    syncMainInjection();
+    render();
+    toast(`退回第 ${target} 拍（共 ${beats.length} 拍）—— 这一拍会重新演。`, 'success');
+}
+
+/** ★ 0.41.3：间章的「退回一个日常画面」（与主线那条同源，只是换了字段）。 */
+async function manualRewindInterludeBeat() {
+    const chapter = interludeChapterOf(rootOf());
+    const beats = interludeBeatsOf(chapter);
+    const beat = interludeBeat(chapter);
+    if (!beats.length) { toast('这段间章还没有日常画面。', 'warning'); return; }
+    const target = Math.max(1, Math.min(beats.length, beat - 1));
+    if (target === beat) { toast('已经是第 1 个画面了。', 'info'); return; }
+    await patchInterlude({ [IL.beat]: target, [IL.beatDone]: false, [IL.ready]: false });
+    const rt = settings().run;
+    rt.focusInterlude = target;
+    rt.beatAt = aiMessageCount();
+    save();
+    syncMainInjection();
+    render();
+    toast(`间章退回第 ${target} 个日常画面（共 ${beats.length} 个）。`, 'success');
+}
+
 async function manualAdvanceInterludeBeat() {
     const chapter = interludeChapterOf(rootOf());
     const beats = interludeBeatsOf(chapter);
@@ -6679,6 +6746,7 @@ function renderInterludeTab(host = panel?.querySelector('.sd-main-tab')) {
 
     host.querySelector('.sd-save-interlude')?.addEventListener('click', () => { void saveInterludeFromForm(); });
     host.querySelector('.sd-next-ilbeat')?.addEventListener('click', () => { void manualAdvanceInterludeBeat(); });
+    host.querySelector('.sd-prev-ilbeat')?.addEventListener('click', () => { void manualRewindInterludeBeat(); });
     host.querySelector('.sd-end-interlude')?.addEventListener('click', () => { void endInterludeNow(); });
     host.querySelector('.sd-regen-interlude')?.addEventListener('click', () => { void generateInterludeChapter({ quiet: false, force: true }); });
 }
