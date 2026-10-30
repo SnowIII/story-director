@@ -1,4 +1,4 @@
-import {text,hash,activeEvent,rankPolicy,RANK_COUNTS} from './model.js';
+import {text,hash,activeEvent,unfinishedEvent,rankPolicy,RANK_COUNTS} from './model.js';
 import {safeJson,uuid} from './messages.js';
 import {bindingCapability,mvuCharacterKeys} from './mvu.js';
 const esc=value=>String(value ?? '').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
@@ -22,6 +22,8 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         const helpId='sdc-profile-'+hash(p.id);
         const mvuPath='故事导演.Coop.角色['+JSON.stringify(mvuCharacterKeys(runtime.state()).get(p.id))+'].好感度';
         const unfinished=Object.values(p.events).find(e=>e.phase!=='completed');
+        const owner=unfinishedEvent(runtime.state()),queued=!!owner && owner.characterId!==p.id;
+        const queueAttributes=queued?' disabled title="等待当前 Rank 事件完成"':'';
         const next=p.rank<p.rankCount?p.thresholds[p.rank]:'—';
         return '<article class="sdc-card"><div class="sdc-row"><strong>'+esc(p.name)+'</strong></div>'+
             ((p.aliases || []).length?'<p class="sdc-field-help">别名／简称：'+esc(p.aliases.join('、'))+'</p>':'')+
@@ -30,10 +32,11 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
             (bindingCapability(runtime.host.mvu?.()).available?'<p class="sdc-field-help">MVU 好感度路径：<code>'+esc(mvuPath)+'</code></p>':'')+
             (p.lock?'<p class="sdc-lock">'+(p.unlockAfterArchive?'本阶已归档，下一轮 MVU 更新将解除好感锁定。':
                 '完成 Rank '+p.lock.targetRank+' 羁绊事件后解锁；增减均暂停，不补发积分。')+'</p>':'')+
+            (queued && p.lock?'<p class="sdc-field-help">事件排队中，等待 '+esc(runtime.state().profiles[owner.characterId].name)+' 的 Rank '+owner.targetRank+' 事件结束。</p>':'')+
             '<div class="sdc-actions">'+
-            (p.mode==='coop' && p.lock && !unfinished && (!runtime.usesMvuAffinity || p.mvuReady && p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank])?'<button data-action="start" data-id="'+esc(p.id)+'">开始下一阶事件</button>':'')+
-            (p.mode==='coop' && unfinished?'<button data-action="'+(unfinished.paused?'resume':'pause')+'" data-id="'+esc(p.id)+'" data-event="'+esc(unfinished.id)+'">'+(unfinished.paused?'继续事件':'暂停事件')+'</button>':'')+
-            (p.mode==='coop' && unfinished?.paused?'<button data-action="replan" data-id="'+esc(p.id)+'" data-event="'+esc(unfinished.id)+'">重设未演部分</button>':'')+
+            (p.mode==='coop' && p.lock && !unfinished && (!runtime.usesMvuAffinity || p.mvuReady && p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank])?'<button data-action="start" data-id="'+esc(p.id)+'"'+queueAttributes+'>开始下一阶事件</button>':'')+
+            (p.mode==='coop' && unfinished?'<button data-action="'+(unfinished.paused?'resume':'pause')+'" data-id="'+esc(p.id)+'" data-event="'+esc(unfinished.id)+'"'+(unfinished.paused?queueAttributes:'')+'>'+(unfinished.paused?'继续事件':'暂停事件')+'</button>':'')+
+            (p.mode==='coop' && unfinished?.paused?'<button data-action="replan" data-id="'+esc(p.id)+'" data-event="'+esc(unfinished.id)+'"'+queueAttributes+'>重设未演部分</button>':'')+
             '<button data-action="history" data-id="'+esc(p.id)+'">历阶摘要／档案</button>'+
             '<button data-action="delete" data-id="'+esc(p.id)+'">删除角色</button></div>'+
             '<details class="sdc-disclosure"><summary class="sdc-disclosure-trigger"><svg class="sdc-disclosure-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15Z"/></svg><span class="sdc-disclosure-label">编辑角色说明</span><span class="sdc-disclosure-indicator" aria-hidden="true"></span></summary><form data-edit="'+esc(p.id)+'">'+
@@ -72,7 +75,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         if(runtime.job) return '<p>'+esc(runtime.job.label || '正在设计所选角色的当前阶事件')+'……</p><button data-action="abort">中断生成</button>';
         if(!event) {
             const pending=Object.values(state.profiles).filter(p=>p.mode==='coop' && p.lock);
-            return '<p>当前没有正在演出的 Coop 事件。</p>'+pending.map(card).join('');
+            return '<p>当前没有正在演出的 Coop 事件。</p><p class="sdc-field-help">Rank 事件依次进行；暂停中的事件仍占队列。前一阶归档后，自动接续还会等待当前现场实际结束。</p>'+pending.map(card).join('');
         }
         const p=state.profiles[event.characterId], plan=event.plan;
         return '<h3>'+esc(p.name)+' · Rank '+event.targetRank+' · '+esc(plan.title)+'</h3>'+
@@ -82,7 +85,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
                 '好感 '+p.affinity+' 已锁定。事件结束并归档成功后解锁。')+'</p>'+
             (event.phase==='waiting_route' || event.phase==='resolution' && event.targetRank===rankPolicy(p).relationshipRank?'<p>请根据你的真实回应确认关系路线。确认后继续聊天，演绎收束；改变心意时可以重新选择。</p>'+
                 '<button data-action="route" data-route="friendship">确认为挚友／伙伴</button> <button data-action="route" data-route="romance">确认为恋人</button>':'')+
-            (event.phase==='resolution'?'<p>总开关开启时，每轮自动核对本阶是否已在正文中收束，已收束时补齐归档；也可手动核对。</p><button data-action="archive">核对并补齐归档</button>':'')+
+            (event.phase==='resolution'?'<p>当前目标与现场危机实际收束后才会归档。仅制定方案或开始行动会继续当前事件，其他 Rank 保持排队；也可手动核对。</p><button data-action="archive">核对并补齐归档</button>':'')+
             '<div class="sdc-actions"><button data-action="pause" data-id="'+esc(p.id)+'" data-event="'+esc(event.id)+'">暂停演出</button></div>'+
             '<details><summary>幕后计划（包含剧透）</summary><pre>'+esc(JSON.stringify(plan,null,2))+'</pre></details>';
     }
@@ -143,7 +146,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
     }
     function settings() {
         return '<label>新事件默认轮数<select id="sdc-rounds"><option value="3"'+(runtime.store.document.settings.eventRounds===3?' selected':'')+'>三轮：切入、困境、收束</option><option value="2"'+(runtime.store.document.settings.eventRounds===2?' selected':'')+'>两轮：切入与困境合并</option></select></label>'+
-            '<p>角色可参与、场景空闲且全局允许自动生成时，自动开始已就绪事件。始终只处理管理名单中的角色。</p>'+
+            '<p>角色可参与、现场已结束且全局允许自动生成时，按队列开始已就绪事件。未完成或暂停中的 Rank 会阻止其他 Rank；归档当轮不立即接续。</p>'+
             '<p>MVU 同步：'+esc(bindingCapability(runtime.host.mvu?.()).reason)+'</p>'+
             '<p>'+esc(runtime.syncMvu.status)+' <button type="button" data-action="sync-mvu">'+(runtime.usesMvuAffinity?'刷新 MVU 状态':'立即同步 MVU')+'</button></p>'+
             (runtime.syncMvu.error?'<p role="status">MVU 同步暂未完成：'+esc(runtime.syncMvu.error.message)+'</p>':'')+

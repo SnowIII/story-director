@@ -1,13 +1,14 @@
-import {clone,fail,text,hash,activeEvent,profileOf,historySignature,rankPolicy,RANK_COUNTS} from './model.js';
+import {clone,fail,text,hash,activeEvent,unfinishedEvent,profileOf,historySignature,rankPolicy,RANK_COUNTS} from './model.js';
 import {CoopStore} from './store.js';
 import {configureRoster,removeRoster,candidates} from './roster.js';
 import {appendOperation,project,readDocument} from './timeline.js';
 import {validateAffinityProposal} from './affinity.js';
 import {continuity,publicMemory} from './history.js';
 import {ensureMessageIds,sourceMap,sourceForId,ref,references,parseReports,stripReport,uuid,modelJson,matchesSourceVersion,matchesUserVersion} from './messages.js';
-import {designMessages,renderScene,reportContract,affinityContract,directorReportContract} from './prompts.js';
+import {designMessages,renderScene,reportContract,affinityContract,directorReportContract,sceneQueueContract} from './prompts.js';
 import {extraModel,readMvuReport,createMvuSync,readMvuAffinity,mvuCharacterKeys} from './mvu.js';
 import {affinityActivity} from './activity.js';
+import {hasEvidence} from './body.js';
 
 export class CoopRuntime {
     constructor(host) {
@@ -194,7 +195,9 @@ export class CoopRuntime {
         });
     }
     async generate(characterId,{replanEventId=null}={}) {
-        if(this.job || this.event()) fail('SCENE_BUSY','请先暂停当前事件或等待生成完成');
+        if(this.job || this.event()) fail('SCENE_BUSY','当前 Rank 事件尚未结束或正在生成，请先继续并完成原事件');
+        const owner=unfinishedEvent(this.state());
+        if(owner && (owner.id!==replanEventId || owner.characterId!==characterId)) fail('SCENE_BUSY','当前 Rank 事件尚未结束，请继续原事件；其他角色的事件正在排队');
         if(this.store.pending) fail('SAVE_PENDING','请先完成尚未确认的保存');
         const p=profileOf(this.state(),characterId);
         if(p.mode!=='coop' || !p.lock) fail('NOT_READY','该角色尚未解锁下一阶事件');
@@ -286,11 +289,12 @@ export class CoopRuntime {
         try {
             const messages=[{role:'system',content:[
                 '仅为已经发生的 Coop 事件核对并补齐归档，不继续创作剧情，不代写用户行动。',
-                '若现有正文未实际达到本阶局部目标，输出 {"ready":false,"reason":"缺什么"}。',
+                '逐项核对本阶目标、收束条件以及现场仍在进行的危机。仅制定方案、开始行动、调动援军、表明决心，都不能代替实际收束。若仍有当前救援／战斗／对峙，或关键决定仍等用户回应，输出 {"ready":false,"reason":"缺什么"}。长线伏笔可保留，当前阻断性冲突必须先结束。',
                 '若最新回应明确改变已确认的关系路线，输出 {"ready":false,"routeConflict":true,"userEvidence":"最新用户原文","evidence":"正文承接该变化的原文"}，等待面板重新确认。',
-                '若已完成，输出 {"ready":true,"evidence":"收束正文准确短句","completion":{summary,outcome,outcomeEvidence,choice,choiceEvidence,traits:[],facts:[],boundaries:[],openHooks:[],closedHooks:[],conflicts:[]}}。',
+                '若已完成，输出 {"ready":true,"evidence":"收束正文准确短句","completion":{summary,outcome,outcomeEvidence,choice,choiceEvidence,traits:[],facts:[],boundaries:[],openHooks:[],closedHooks:[],conflicts:[],scene:{goalAchieved:true,closed:true,awaitingUser:false,blockingConflicts:[],evidence:"本轮正文中现场已告一段落的准确短句"}}}。',
                 '所有依据必须逐字引用提供的原文。摘要约100～200字，区分事实、猜测和未解决事项。只输出JSON。'
             ].join('\n')},{role:'user',content:JSON.stringify({targetRank:event.targetRank,goal:event.plan.goal,
+                resolutionCondition:event.plan.resolution,currentConflict:event.plan.conflict,
                 route:event.route,question:event.plan.question,initialUserResponse:event.initialAnswerSource?.body,userResponse:event.answerSource.body,
                 routeResponse:event.routeSource?.body,currentReply:source.body,
                 earlierActs:event.progress.map(v=>({phase:v.phase,evidence:v.evidence})),history:continuity(p)})}];
@@ -303,7 +307,7 @@ export class CoopRuntime {
             const result=modelJson(raw);
             if(automatic && result.ready===false && result.routeConflict!==true) return false;
             if(result.ready!==true && result.routeConflict!==true) fail('NOT_COMPLETE',text(result.reason,400) || '当前正文尚未达到收束条件');
-            await this.store.operation('beat',p.id,{eventId:event.id,characterId:p.id,eventVersion:version,
+            await this.store.operation('beat',p.id,{eventId:event.id,characterId:p.id,eventVersion:version,requireSceneClosure:true,
                 phase:'resolution',source,evidence:result.evidence,completion:result.completion,
                 routeConflict:result.routeConflict,userEvidence:result.userEvidence},references(source),
                 'archive:'+event.id+':'+source.id+':'+source.version);
@@ -354,13 +358,15 @@ export class CoopRuntime {
         const profiles=roster.filter(p=>p.mode!=='off' && (this.host.available(p,roster) || p.id===this.event()?.characterId));
         const byExtra=extraModel(this.host.context());
         const snapshot={nonce:'turn-'+uuid(),scope:this.store.scope,userId:user.id,userVersion:user.version,
-            byExtra,reportProducer:byExtra?'external':'inline',reportChannel:'mvu',roles:{},event:null};
+            byExtra,reportProducer:byExtra?'external':'inline',reportChannel:'mvu',completionPolicy:'scene-closed-v1',roles:{},event:null};
         if(this.usesMvuAffinity) Object.assign(snapshot,{affinityAuthority:'mvu',reportProducer:'director',reportChannel:'director'});
         const mvuKeys=this.usesMvuAffinity?mvuCharacterKeys(this.state()):null;
         profiles.forEach(p=>{snapshot.roles[p.id]={policyRevision:p.policyRevision,locked:!!p.lock,
             rankCount:p.rankCount,thresholds:clone(p.thresholds),...(mvuKeys?{mvuKey:mvuKeys.get(p.id)}:{})};});
         const current=this.event();
         if(current) snapshot.event={id:current.id,characterId:current.characterId,version:current.version,phase:current.phase};
+        snapshot.sceneCheckRequired=!current && !unfinishedEvent(this.state()) && roster.some(p=>p.history.length) && profiles.some(p=>
+            p.mode==='coop' && p.lock && p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank] && (!this.usesMvuAffinity || p.mvuReady));
         this.snapshot=snapshot;this.snapshots.set(snapshot.nonce,snapshot);
         while(this.snapshots.size>80) this.snapshots.delete(this.snapshots.keys().next().value);
         this.changed();
@@ -374,6 +380,7 @@ export class CoopRuntime {
             renderScene(this.state().profiles[event.characterId],event));
         const turn=this.turnContext();
         if(turn?.event) parts.push(directorReportContract(turn.event,this.snapshot));
+        else if(turn && this.snapshot.sceneCheckRequired && this.snapshot.reportChannel==='director') parts.push(sceneQueueContract(this.snapshot));
         const roster=Object.values(this.state().profiles);
         const profiles=roster.filter(p=>p.mode!=='off' && (this.host.available(p,roster) || p.id===event?.characterId));
         const memories=profiles.map(publicMemory).filter(Boolean);
@@ -423,6 +430,12 @@ export class CoopRuntime {
             if(!snapshot.reportProducer && snapshot.reportChannel!=='mvu' && viaExternal!==!!snapshot.byExtra) continue;
             snapshot.messageId=source.id;snapshot.messageVersion=source.version;
             message.extra=message.extra || {};message.extra.sdCoopSnapshot=clone(snapshot);
+            if(snapshot.sceneCheckRequired && !snapshot.event && report.sceneClearance) {
+                const scene=report.sceneClearance;
+                message.extra.sdCoopSceneClearance={version:source.version,userVersion:source.userVersion,scope:this.store.scope,
+                    clear:scene.closed===true && scene.awaitingUser===false && Array.isArray(scene.blockingConflicts) &&
+                        !scene.blockingConflicts.length && hasEvidence(source.body,text(scene.evidence))};
+            }
             if(reports.length) {
                 accepted.push(report);
                 message.extra.sdCoopReports={version:source.version,reports:[...accepted],byExtra:viaExternal,reportProducer:producer};
@@ -451,7 +464,7 @@ export class CoopRuntime {
                     if(!p || p.mode!=='coop' || snapshot.roles[p.id]?.policyRevision!==p.policyRevision) fail('NOT_MANAGED');
                     if(r.eventId!==expected.id || r.characterId!==expected.characterId || r.eventVersion!==expected.version || r.phase!==expected.phase) fail('STALE_EVENT');
                     if(r.phase==='resolution' && r.ready===false && r.routeConflict!==true) continue;
-                    await this.store.operation('beat',p.id,{...r,source},references(source),
+                    await this.store.operation('beat',p.id,{...r,source,requireSceneClosure:r.phase==='resolution' && r.routeConflict!==true},references(source),
                         'beat:'+r.eventId+':'+r.phase+':'+source.id+':'+source.version);
                 } catch(error) {
                     // 已拒绝的旧回报不会因 MVU 保留该变量而反复重放；修正报告或正文后仍可重试。
@@ -526,8 +539,17 @@ export class CoopRuntime {
         void this.maybeAutoArchive();
     }
     async maybeAuto() {
-        if(!this.store.document || this.store.readonly || this.occupies() || !this.host.autoAllowed?.() ||
+        if(!this.store.document || this.store.readonly || this.store.pending || this.archiveCheckTask || this.occupies() || unfinishedEvent(this.state()) || !this.host.autoAllowed?.() ||
             Date.now()-this.lastAutoFailure<60000) return;
+        const latestUser=[...this.store.sources().values()].filter(source=>source.isUser && !source.isSystem).at(-1);
+        const closedAt=Math.max(-1,...Object.values(this.state().profiles).flatMap(profile=>profile.history).map(history=>history.source.index));
+        if(closedAt>=0 && (!latestUser || latestUser.index<=closedAt)) return;
+        if(closedAt>=0) {
+            const latest=this.host.messages().at(-1),source=sourceForId(this.host.messages(),this.host.messages().length-1);
+            const clearance=latest?.extra?.sdCoopSceneClearance;
+            if(!source || source.isUser || source.isSystem || clearance?.scope!==this.store.scope || clearance.clear!==true ||
+                !matchesSourceVersion(source,clearance.version) || !matchesUserVersion(source,clearance.userVersion)) return;
+        }
         const roster=Object.values(this.state().profiles);
         const profiles=roster.filter(p=>p.mode==='coop' && p.lock && this.host.available(p,roster) &&
             (!this.usesMvuAffinity || p.mvuReady && p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank]) &&

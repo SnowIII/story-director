@@ -3,6 +3,15 @@ import {continuity,publicMemory} from './history.js';
 import {BLUEPRINTS_BY_RANK} from './blueprints.js';
 export {BLUEPRINTS_BY_RANK} from './blueprints.js';
 export const BLUEPRINTS=BLUEPRINTS_BY_RANK[4];
+const closureSample=()=>({goalAchieved:true,closed:true,awaitingUser:false,blockingConflicts:[],evidence:'本轮正文中目标已实现且现场已告一段落的准确短句'});
+const closureRule='事件轮数是最低互动结构，不是完成倒计时。心理转变、决定帮忙、制定方案、调动援军或开始行动，不能代替眼前危机的实际收束。当前救援／战斗／对峙仍在进行，或关键决定还等用户回应时，必须 ready:false，继续当前 Rank；不得插入其他人的 Rank 事件。长线伏笔可以保留，当前阻断性冲突必须先结束。';
+export function sceneQueueContract(snapshot) {
+    return ['【Coop Rank 队列：先确认现有场景已结束】已有其他角色达到门槛；本轮先延续当前剧情，不创造新的个人线矛盾。',
+        '即使前一阶已归档，若救援、战斗、对峙仍在进行，或关键决定仍等待用户，sceneClearance.closed 必须为 false，不因归档或角色暂时不在场就插入另一个 Rank。',
+        '只有眼前危机已结束、已有场景转入安全余韵或自然过场，且没有待回应的关键选择，才报告 closed:true；evidence 必须引用本轮实际收束的正文。',
+        '回复末尾在变量块之外提交一份 <CoopReport>'+JSON.stringify({nonce:snapshot.nonce,sceneClearance:{closed:false,awaitingUser:true,
+            blockingConflicts:['按实际现场填写尚未结束的冲突；已结束时为空数组'],evidence:'本轮正文的准确短句'}})+'</CoopReport>，不复述给读者。'].join('\n');
+}
 export function designMessages(profile,context='',templates={}) {
     const policy=rankPolicy(profile),blueprints=BLUEPRINTS_BY_RANK[policy.rankCount];
     const rules=[
@@ -26,7 +35,7 @@ export function designMessages(profile,context='',templates={}) {
         '本阶定位：'+(templates.blueprint || blueprints[profile.rank]),'补充设定（可选）：\n'+(profile.description || '未填写，请从下面的现场资料和有效历史中提取已有设定。'),continuity(profile),
         '【当前现场／相关世界书】\n'+context].join('\n\n');
     const constraints='【程序契约】角色已锁定 '+policy.rankCount+' 阶，门槛 '+policy.thresholds.join('、')+'，关系确认阶级 '+policy.relationshipRank+'。只设计 Rank '+(profile.rank+1)+
-        '；轮数遵守指定值，不修改进度、路线或历史，不代写用户选择。仅输出 JSON：targetRank,rounds,title,scene,conflict,goal,hook,dilemma,question,resolution,seeds:{persona,desire,shadow,friction},usedHistory:全部前阶事件ID数组,references:[],conflicts:[]。已有 seeds 原样复用，已确认路线原样沿用，关系确认必须等待用户与面板选择。';
+        '；轮数遵守指定值，不修改进度、路线或历史，不代写用户选择。仅输出 JSON：targetRank,rounds,title,scene,conflict,goal,hook,dilemma,question,resolution,seeds:{persona,desire,shadow,friction},usedHistory:全部前阶事件ID数组,references:[],conflicts:[]。已有 seeds 原样复用，已确认路线原样沿用，关系确认必须等待用户与面板选择。明确本场需要解决的阻断性冲突与可留待后阶的长线伏笔，不把开始执行写成事件结束。';
     return [{role:'system',content:[templates.rules || rules,constraints].join('\n\n')},{role:'user',content:user}];
 }
 export function renderScene(profile,event) {
@@ -51,7 +60,7 @@ export function renderScene(profile,event) {
         ...(event.routeSource?['路线确认对应的真实回应：'+event.routeSource.body,
             '如果用户最新回应与所选路线冲突，尊重最新回应，回报 routeConflict:true 及 userEvidence 原文，等待面板重新确认，不报完成。']:[]),
         '只根据真实回应演绎人物变化、局部结果与余温，不提前开下一阶。',
-        '本阶成长目标：'+p.goal);
+        '本阶成长目标：'+p.goal,closureRule);
     lines.push(publicMemory(profile));
     return lines.filter(Boolean).join('\n');
 }
@@ -77,11 +86,13 @@ export function directorReportContract(event,snapshot) {
     const sample={nonce:snapshot.nonce,event:{eventId:event.id,characterId:event.characterId,eventVersion:event.version,phase:event.phase,
         evidence:'本轮角色正文中已实际发生的准确短句',...(event.phase==='resolution'?{ready:true,completion:{
             summary:'约100～200字的实际事件摘要',outcome:'实际局部结果',outcomeEvidence:'本轮正文准确短句',
-            choice:'用户真实选择',choiceEvidence:'用户实际回应准确短句',traits:[],facts:[],boundaries:[],openHooks:[],closedHooks:[],sharedFacts:[],conflicts:[]}}:{})}};
+            choice:'用户真实选择',choiceEvidence:'用户实际回应准确短句',traits:[],facts:[],boundaries:[],openHooks:[],closedHooks:[],sharedFacts:[],conflicts:[],scene:closureSample()}}:{})}};
     return ['【仅交给故事导演的事件回报】由写正文的模型在回复末尾、<UpdateVariable> 外提交一次，不交给 MVU 或额外变量模型。导演会读取并隐藏标签，保存到当前消息和 Coop 档案。',
         '只有本轮当前幕的任务已完整写进正文才回报，每轮最多一幕；waiting_user／waiting_route 不报完成，不代写用户行为。',
         'event.evidence 必须逐字引用本轮角色正文，不能引用用户消息、变量块或本示例。所有事实须已实际发生。',
         'resolution 每轮判断是否已收束：未完成时只写 ready:false，不写 completion；已完成才写 ready:true 和完整 completion，无需额外核对请求。',
+        closureRule,
+        'ready:true 时 completion.scene 必须逐项提供：goalAchieved:true、closed:true、awaitingUser:false、blockingConflicts:[]，以及证明现场已收束的 evidence 原文。任何一项不满足就保持未完成，不用“已下令／准备行动”冒充结果。',
         'completion 写清真实选择、局部结果、人物变化、伏笔和摘要。choiceEvidence 可引用首次或最新真实回应；普通闲聊不覆盖首次选择，关系确认阶级引用路线确认对应的真实回应。',
         '若最新回应明确改变已确认路线，回报 routeConflict:true、userEvidence:最新用户原文、evidence:本轮正文接住该变化的原文，省略 completion，等待面板重新确认。',
         '共享世界事实有实际变化时，sharedFacts 使用 [{entityId:"稳定英文ID",name:"实体名",fact:"新事实",previousFact:"旧事实原文",evidence:"本轮正文原文",knownBy:["user","当前角色ID"]}]；没有用空数组。',
@@ -95,12 +106,13 @@ export function reportContract(profiles,event,snapshot,byExtra=false) {
         traits:p.traits.slice(-4),boundaries:p.boundaries.slice(-3),...(mvu?{mvuKey:snapshot.roles[p.id].mvuKey,unlockAfterArchive:!!p.unlockAfterArchive}:{})}));
     const sample={nonce:snapshot.nonce,...(mvu?{}:{affinity:[{characterId:profiles[0].id,delta:0,reason:'本次互动的影响',
         userEvidence:'本轮用户消息中的准确短句',evidence:'本轮正文中的准确短句'}]})};
+    if(snapshot.sceneCheckRequired) sample.sceneClearance={closed:false,awaitingUser:true,blockingConflicts:['现场未结束的冲突'],evidence:'本轮实际现场原文'};
     if(event) sample.event={eventId:event.id,characterId:event.characterId,eventVersion:event.version,phase:event.phase,
         evidence:'本轮已实际发生的当前幕短句',
         ...(event.phase==='resolution'?{ready:true,completion:{summary:'约100～200字的实际事件摘要',outcome:'实际局部结果',
             outcomeEvidence:'正文准确短句',choice:'用户真实选择',choiceEvidence:'用户实际回应准确短句',
             traits:['新增／深化的习惯'],facts:['本阶公开且实际确认的人物事实'],boundaries:['关系边界变化'],
-            openHooks:['尚未解决的事项'],closedHooks:['本次实际回收的旧伏笔'],sharedFacts:[],conflicts:[]}}:{})};
+            openHooks:['尚未解决的事项'],closedHooks:['本次实际回收的旧伏笔'],sharedFacts:[],conflicts:[],scene:closureSample()}}:{})};
     const patch={op:'add',path:'/故事导演/Coop/回报',value:sample};
     const direct=mvu?profiles.flatMap(p=>{
         const key=snapshot.roles[p.id].mvuKey,path='/故事导演/Coop/角色/'+key.replace(/~/g,'~0').replace(/\//g,'~1');
@@ -123,6 +135,8 @@ export function reportContract(profiles,event,snapshot,byExtra=false) {
         'event 回报仅在当前 phase 的任务完整写进正文后提供；waiting_user／waiting_route 不报完成。每次回复最多完成当前一幕。resolution 尚未收束时的 ready:false 只表示继续演出，不推进事件。',
         'resolution 阶段每轮在同一份回报中判断本阶是否已收束：尚未达到本阶局部目标时写 event.ready:false，不填 completion；已收束时写 ready:true 并填写 completion。完整回报会直接归档，无需额外核对请求。',
         'resolution 的 completion 必须包含实际选择、局部结果、人物变化、未解决与已回收伏笔，以及完整简短摘要。不可只写“任务完成”。',
+        closureRule,
+        'ready:true 还需 completion.scene:{goalAchieved:true,closed:true,awaitingUser:false,blockingConflicts:[],evidence:"本轮正文中证明现场已收束的原文"}。缺少现场收束依据时继续演出，其他角色的升阶事件保持排队。',
         'completion.choiceEvidence 可引用用户首次或最新回应中的真实选择；普通闲聊不覆盖首次选择。角色的 relationshipRank 为路线确认阶级，该阶必须引用路线确认时的回应。rankCount 和 thresholds 已由用户锁定，模型不可更改。',
         '若共享 NPC／信物状态实际变化，可在 completion.sharedFacts 填 [{entityId:"稳定英文ID",name:"实体名",fact:"新事实",previousFact:"已有旧事实原文",evidence:"正文准确短句",knownBy:["user","当前角色ID"]}]；没有变化用空数组。',
         ...(mvu?(event?['只有当前事件的进度和归档仍写到 故事导演.Coop.回报，使用本轮 nonce，不包含 affinity。本轮刚报告 completion 时仍保持锁定，等后续注入确认已归档再解锁。']:[]):[
@@ -136,5 +150,6 @@ export function reportContract(profiles,event,snapshot,byExtra=false) {
         '若最新回应明确改变已确认的关系路线，event 使用 routeConflict:true、userEvidence:最新用户原文、evidence:正文接住该变化的原文，省略 completion。程序退回等待面板确认；普通补充不报冲突。');
     if(byExtra) lines.push('当前采用额外变量模型回填：讲故事的人不写变量命令；负责回填的变量模型按本契约，在它的 <UpdateVariable> 中提交完整报告。');
     else lines.push('当前随 AI 输出：由你写完正文后，在回复末尾现有的 <UpdateVariable> 中提交上述报告。不要只在 Analysis 中说“增加好感”而省略报告。');
+    if(snapshot.sceneCheckRequired) lines.push('本轮只延续现有剧情，不新建他人的 Rank 冲突。前一阶即使已归档，只要现场救援／战斗／对峙仍在进行或关键选择待用户回应，sceneClearance.closed 就为 false。只有当前现场实际结束后，才写 closed:true、awaitingUser:false、blockingConflicts:[]，并引用本轮已收束的原文 evidence；队列随后才可启动下一条。');
     return lines.join('\n');
 }

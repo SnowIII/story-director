@@ -1,5 +1,5 @@
 import {SCHEMA,MODES,clone,fail,hash,object,thresholds,id,initialState,applyAffinity,activateGate,adoptPlan,pauseEvent,resumeEvent,
-    acceptAnswer,chooseRoute,acceptBeat,replanEvent,assertState,activeEvent,rankPolicy} from './model.js';
+    acceptAnswer,chooseRoute,acceptBeat,replanEvent,assertState,activeEvent,unfinishedEvent,rankPolicy} from './model.js';
 import {matchesSourceVersion} from './messages.js';
 export function newDocument(scope) {
     return {schemaVersion:SCHEMA,scope,revision:0,roster:{},journal:[],settings:{autoStart:true,eventRounds:3},updatedAt:null};
@@ -64,10 +64,10 @@ export function applyOperation(state,op,{replay=false}={}) {
             case 'activate':result=activateGate(state,op.characterId,op.id,op.data.thresholds);break;
             case 'plan':
                 if(op.mvuAuthority && op.data.mvuGate) {p.affinity=op.data.mvuAffinity;p.lock=clone(op.data.mvuGate);}
-                result=adoptPlan(state,{...op.data,characterId:op.characterId});break;
-            case 'replan':result=replanEvent(state,{...op.data,characterId:op.characterId});break;
+                result=adoptPlan(state,{...op.data,characterId:op.characterId},{replay});break;
+            case 'replan':result=replanEvent(state,{...op.data,characterId:op.characterId},{replay});break;
             case 'pause':result=pauseEvent(state,op.characterId,op.data.eventId);break;
-            case 'resume':result=resumeEvent(state,op.characterId,op.data.eventId);break;
+            case 'resume':result=resumeEvent(state,op.characterId,op.data.eventId,{replay});break;
             case 'answer':result=acceptAnswer(state,{...op.data,characterId:op.characterId},{replay});break;
             case 'route':result=chooseRoute(state,{...op.data,characterId:op.characterId});break;
             case 'beat':result=acceptBeat(state,{...op.data,characterId:op.characterId},{replay});break;
@@ -129,6 +129,14 @@ export function project(document,sources) {
     }
     const event=activeEvent(state);
     if(event && state.profiles[event.characterId].mode!=='coop') {event.paused=true;state.activeEventId=null;}
+    // Keep old archived history, while only the earliest unfinished Rank may resume.
+    const owner=unfinishedEvent(state);
+    if(owner) for(const profile of Object.values(state.profiles)) for(const pending of Object.values(profile.events)) {
+        if(pending.phase!=='completed' && pending.id!==owner.id) {
+            pending.paused=true;
+            if(state.activeEventId===pending.id) state.activeEventId=null;
+        }
+    }
     state.skipped=skipped;
     assertState(state);
     return state;

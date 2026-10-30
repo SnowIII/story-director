@@ -22,6 +22,7 @@ async function setup(t,{extra=false,save=null,locks=null}={}) {
     t.after(()=>runtime.dispose());
     const configure=(mode='coop',initialAffinity=29)=>runtime.configure({id:'a',name:'画家',description:'有自己的画室',mode,initialAffinity});
     async function reply(body,proposal={}) {
+        if(proposal.event?.completion && !proposal.event.completion.scene) proposal.event.completion.scene=sceneClosed(proposal.event.completion.outcomeEvidence);
         const snapshot=runtime.snapshot;
         const report={nonce:snapshot.nonce,affinity:[],...proposal};
         const variables='<UpdateVariable><JSONPatch>'+JSON.stringify([{op:'add',path:'/故事导演/Coop/回报',value:report}])+'</JSONPatch></UpdateVariable>';
@@ -39,6 +40,7 @@ async function setup(t,{extra=false,save=null,locks=null}={}) {
     const score=delta=>({affinity:[{characterId:'a',delta,reason:'实际支持',userEvidence:'帮你',evidence:'放松'}]});
     return {runtime,host,messages,meta,persisted,configure,send,reply,score,setScope:value=>{scope=value;}};
 }
+const sceneClosed=evidence=>({goalAchieved:true,closed:true,awaitingUser:false,blockingConflicts:[],evidence});
 async function unlockAndStart(h) {
     await h.configure();await h.send('我来帮你。','她放松了。',h.score(1));
     await h.runtime.generate('a');
@@ -234,7 +236,7 @@ test('missing archive report can be recovered from existing resolution without r
         calls++;return JSON.stringify({ready:true,evidence:'核对资料',completion:{
             summary:'她谈清了画册与导师要求之间的困扰，用户愿意共同核对资料。她接受有限帮助，并保留对创作的判断，展览问题留待后续处理。',
             outcome:'核对资料并接受帮助',outcomeEvidence:'接受有限帮助',choice:'愿意核对资料',choiceEvidence:'愿意帮你',
-            traits:['紧张时整理画册'],facts:['她愿意接受有限帮助'],boundaries:[],openHooks:['展览'],closedHooks:[]}});};
+            traits:['紧张时整理画册'],facts:['她愿意接受有限帮助'],boundaries:[],openHooks:['展览'],closedHooks:[],scene:sceneClosed('接受有限帮助')}});};
     const count=h.messages.length;await h.runtime.recoverArchive();
     assert.equal(calls,1);assert.equal(h.messages.length,count);assert.equal(h.runtime.state().profiles.a.rank,1);
 });
@@ -250,7 +252,7 @@ function archiveResult() {
     return {ready:true,evidence:'核对资料',completion:{
         summary:'她谈清画册与导师要求之间的困扰，用户愿意共同核对资料。她接受有限帮助，保留自己的判断，展览问题留待后续处理。',
         outcome:'核对资料并接受帮助',outcomeEvidence:'接受有限帮助',choice:'愿意核对资料',choiceEvidence:'愿意帮你',
-        traits:['接受有限帮助'],facts:[],boundaries:[],openHooks:['展览'],closedHooks:[]}};
+        traits:['接受有限帮助'],facts:[],boundaries:[],openHooks:['展览'],closedHooks:[],scene:sceneClosed('接受有限帮助')}};
 }
 async function archiveSetup(t,{extra=false}={}) {
     const h=await setup(t,{extra});await unlockAndStart(h);await progressToResolution(h);
@@ -457,7 +459,7 @@ test('consecutive resolution inputs retain the first answer in prompts and archi
         return JSON.stringify({ready:true,evidence:'核对资料',completion:{
             summary:'用户愿意共同核对画册资料，随后请她坐下慢慢来。她接受有限帮助，并保留自己的判断，展览问题留待后续处理。',
             outcome:'核对资料并接受帮助',outcomeEvidence:'接受有限帮助',choice:'愿意核对资料',choiceEvidence:'愿意帮你',
-            traits:['接受有限帮助'],facts:[],boundaries:[],openHooks:[],closedHooks:[]}});
+            traits:['接受有限帮助'],facts:[],boundaries:[],openHooks:[],closedHooks:[],scene:sceneClosed('接受有限帮助')}});
     };
     await h.runtime.recoverArchive();
     assert.ok(request[1].content.includes('我愿意帮你核对资料。'));

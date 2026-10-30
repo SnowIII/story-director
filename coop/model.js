@@ -97,6 +97,11 @@ export function activeEvent(state) {
     return null;
 }
 export const historySignature=p=>hash(JSON.stringify(p.history.map(h=>[h.eventId,h.summary,h.summaryVersion])));
+/** A paused Rank still owns the queue until it is actually completed. */
+export function unfinishedEvent(state) {
+    return Object.values(state.profiles).flatMap(p=>Object.values(p.events)).filter(e=>e.phase!=='completed')
+        .sort((a,b)=>(a.createdAt?.index ?? a.progress[0]?.source.index ?? Infinity)-(b.createdAt?.index ?? b.progress[0]?.source.index ?? Infinity))[0] || null;
+}
 export function validatePlan(raw, profile) {
     if (!object(raw)) fail('INVALID_PLAN');
     const plan = {};
@@ -121,15 +126,16 @@ export function validatePlan(raw, profile) {
     }
     return plan;
 }
-export function adoptPlan(state, input) {
+export function adoptPlan(state, input,{replay=false}={}) {
     const p=profileOf(state,input.characterId);
     if (p.mode!=='coop') fail('NOT_MANAGED');
     if (!p.lock || p.lock.id!==input.gateId) fail('INVALID_GATE');
-    if (activeEvent(state)) fail('SCENE_BUSY');
+    const owner=unfinishedEvent(state);
+    if (activeEvent(state) || !replay && owner && owner.characterId!==p.id) fail('SCENE_BUSY','当前 Rank 事件尚未结束，其他角色的事件需要排队');
     const plan=validatePlan(input.plan,p);
     const eventId=id(input.eventId);
     if (own(p.events,eventId)) fail('ALREADY_COMMITTED');
-    if (Object.values(p.events).some(e=>e.gateId===p.lock.id && e.phase!=='completed')) fail('EVENT_EXISTS','该阶已有未完成事件，请继续原事件');
+    if (Object.values(p.events).some(e=>e.phase!=='completed' && (!replay || e.gateId===p.lock.id))) fail('EVENT_EXISTS','该阶已有未完成事件，请继续原事件');
     p.seeds=p.seeds || clone(plan.seeds);
     p.events[eventId]={id:eventId,characterId:p.id,gateId:p.lock.id,targetRank:p.rank+1,plan,
         ...(input.createdAt?{createdAt:clone(input.createdAt)}:{}),
@@ -147,16 +153,18 @@ export function pauseEvent(state,characterId,eventId) {
     const {p,e}=eventOf(state,characterId,eventId); e.paused=true; e.version++; p.revision++;
     if (state.activeEventId===e.id) state.activeEventId=null;
 }
-export function resumeEvent(state,characterId,eventId) {
+export function resumeEvent(state,characterId,eventId,{replay=false}={}) {
     const {p,e}=eventOf(state,characterId,eventId);
     if(p.mode!=='coop') fail('NOT_MANAGED');
     if(e.historySignature!==historySignature(p)) fail('HISTORY_CHANGED','历阶摘要已修正，请先重设尚未演出的部分');
     if(activeEvent(state) && state.activeEventId!==e.id) fail('SCENE_BUSY');
+    if(!replay && unfinishedEvent(state)?.id!==e.id) fail('SCENE_BUSY','请先完成队列中较早的 Rank 事件');
     e.paused=false; e.version++; state.activeEventId=e.id; p.revision++;
 }
-export function replanEvent(state,input) {
+export function replanEvent(state,input,{replay=false}={}) {
     const {p,e}=eventOf(state,input.characterId,input.eventId);
     if(!e.paused || p.mode!=='coop') fail('NOT_PAUSED');
+    if(!replay && unfinishedEvent(state)?.id!==e.id) fail('SCENE_BUSY','请先完成队列中较早的 Rank 事件');
     const plan=validatePlan(input.plan,p);
     if(e.progress.length) for(const key of ['title','scene','conflict','goal','hook','rounds']) plan[key]=e.plan[key];
     if(e.questionSource) for(const key of ['dilemma','question']) plan[key]=e.plan[key];
@@ -204,6 +212,13 @@ export function completeEvent(state,input,{replay=false}={}) {
     if(e.targetRank!==p.rank+1 || e.targetRank>p.rankCount) fail('INVALID_RANK');
     if(e.targetRank===rankPolicy(p).relationshipRank && !e.route) fail('WAITING_ROUTE');
     if(!object(report)) fail('SUMMARY_MISSING');
+    if(input.requireSceneClosure && !replay) {
+        const scene=report.scene;
+        if(!object(scene) || scene.goalAchieved!==true || scene.closed!==true || scene.awaitingUser!==false ||
+            !Array.isArray(scene.blockingConflicts) || scene.blockingConflicts.length || !hasEvidence(s.body,text(scene.evidence))) {
+            fail('NOT_COMPLETE','本阶目标或现场危机尚未收束；继续当前事件，其他 Rank 事件保持排队');
+        }
+    }
     const outcome=text(report.outcome,600), choice=text(report.choice,600);
     const choiceSources=e.targetRank===rankPolicy(p).relationshipRank?[e.routeSource]:[e.initialAnswerSource,e.answerSource];
     if(!outcome || !choice || !replay && (!hasEvidence(s.body,text(report.outcomeEvidence)) ||
@@ -249,9 +264,12 @@ export function assertState(state) {
         for(const e of Object.values(p.events)) {
             integer(e.targetRank,1,policy.rankCount);
             if(!PHASES.includes(e.phase)) fail('INVALID_PHASE');
-            if(e.id===state.activeEventId && !e.paused && e.phase!=='completed') active++;
+            if(!e.paused && e.phase!=='completed') {
+                active++;
+                if(e.id!==state.activeEventId) fail('INVALID_ACTIVE_EVENT');
+            }
         }
     }
-    if(state.activeEventId && active!==1) fail('INVALID_ACTIVE_EVENT');
+    if(state.activeEventId?active!==1:active!==0) fail('INVALID_ACTIVE_EVENT');
     return true;
 }
