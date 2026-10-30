@@ -16,11 +16,16 @@
  * 规则文本在插件自带的世界书「故事导演」里（缺失时自动安装）。
  */
 
+import { createCoopSystem } from './coop/bootstrap.js';
+import { mvuApiFor } from './coop/mvu.js';
+import { designTemplates, preserveDesignTemplates } from './coop/design-worldbook.js';
+import { createMessageRefreshQueue } from './message-render.js';
+import { createUpdateReloader } from './update-reload.js';
 import { extension_settings } from '../../../extensions.js';
 import {
     eventSource, event_types, saveSettingsDebounced, saveSettings,
     setExtensionPrompt, extension_prompt_types, extension_prompt_roles,
-    chat, updateMessageBlock, saveChatDebounced,
+    chat, updateMessageBlock, saveChatDebounced, isGenerating, isChatSaving,
 } from '../../../../script.js';
 import {
     world_names, selected_world_info, world_info, onWorldInfoChange, updateWorldInfoList, loadWorldInfo, saveWorldInfo,
@@ -46,7 +51,7 @@ import {
     chapterFromBlock, threadFromBlock, interludeFromBlock, interludeChapterFromBlock,
     applyNsCommands, extractNsCommands, landingOpsInReply, storyBlockFailure, recognizedFieldNames,
     worldbookDigest, setInterludeWritesAllowed, beatOrderSkipsRead,
-    mergeBeats, remainingBeatBudget, worldbookUpdateDecision,
+    mergeBeats, remainingBeatBudget, worldbookUpdateDecision, setCoopScene,
 } from './model.js';
 
 const ID = 'story-director';
@@ -56,7 +61,8 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.38.8';
+const VERSION = '0.41.1';
+let coop = null;
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
 const SLOT = {
@@ -64,6 +70,7 @@ const SLOT = {
     threads: 'story-director-threads',
     interludes: 'story-director-interludes',
     contract: 'story-director-contract',
+    coop: 'story-director-coop',
 };
 /**
  * 与原版「故事神谕」的**能力探测**结果（只探测它真的提供了什么，不看版本号）。
@@ -251,6 +258,7 @@ const DEFAULT = {
     winY: null,
     bubbleIcon: '',
     bubbleSize: 52,
+    showBubble: true,
 
     /** 自动化总闸。关掉＝只手动生成与采用，插件不自己推进也不自己开新线。 */
     autoDirector: true,
@@ -604,12 +612,15 @@ function settings() {
 
 const save = () => saveSettingsDebounced();
 
-function chatKey() {
+function chatKey({ legacy = false } = {}) {
     try {
         const ctx = window.SillyTavern?.getContext?.();
         if (!ctx) return '';
         const id = (typeof ctx.getCurrentChatId === 'function' && ctx.getCurrentChatId()) || ctx.chatId || '';
-        return `${ctx.groupId || ''}::${id}`;
+        if (!id) return '';
+        const avatar = ctx.characters?.[ctx.characterId ?? ctx.chid]?.avatar;
+        const owner = ctx.groupId || (legacy ? '' : `character:${encodeURIComponent(avatar || (ctx.characterId ?? ctx.chid ?? ''))}`);
+        return `${owner}::${id}`;
     } catch { return ''; }
 }
 
@@ -687,6 +698,13 @@ function ensureChatSlice(s) {
     if (s.chatSliceKey === key) return false;
     if (!isPlainObject(s.chats)) s.chats = {};
     if (s.chatSliceKey) s.chats[s.chatSliceKey] = sliceFromSettings(s);
+    // 旧键没有角色身份：首次打开时迁移并移除旧键，避免另一张同名聊天的卡再次领走它。
+    const legacyKey = chatKey({ legacy: true });
+    if (key !== legacyKey && !isPlainObject(s.chats[key]) && isPlainObject(s.chats[legacyKey])) {
+        s.chats[key] = s.chats[legacyKey];
+        delete s.chats[legacyKey];
+        if (s.chats[key].run?.chatId === legacyKey) s.chats[key].run.chatId = key;
+    }
     if (!isPlainObject(s.chats[key])) {
         s.chats[key] = JSON.parse(JSON.stringify({ run: DEFAULT.run, chapters: {}, story: {} }));
         // ★ 第一次见到这个聊天 → 立刻播下「就位基准」（见 run.armedAt）：
@@ -695,11 +713,8 @@ function ensureChatSlice(s) {
     }
     applySliceToSettings(s, s.chats[key]);
     s.chatSliceKey = key;
-    // 只留最近 24 份，免得设置文件无限膨胀
-    const keys = Object.keys(s.chats);
-    if (keys.length > 24) {
-        for (const old of keys.slice(0, keys.length - 24)) delete s.chats[old];
-    }
+    // 这里保存的是每局唯一的计划，不能按缓存数量淘汰。
+    save();
     return true;
 }
 
@@ -714,11 +729,11 @@ function persistChatSlice() {
 // 阶段三：MVU 数据访问
 
 let mvuApi = null;
-const mvu = () => mvuApi || window.Mvu || null;
+const mvu = () => mvuApiFor() || mvuApi;
 
 /** 优先用酒馆助手提供的 waitGlobalInitialized 等 Mvu 就绪，避免插件加载早于 MVU。 */
 async function resolveMvu() {
-    if (window.Mvu) { mvuApi = window.Mvu; return mvuApi; }
+    if (mvu()) { mvuApi = mvu(); return mvuApi; }
     const helper = window.TavernHelper;
     const wait = helper?.waitGlobalInitialized || helper?._bind?._waitGlobalInitialized;
     if (typeof wait === 'function') {
@@ -791,6 +806,7 @@ async function pruneMvuToTokens() {
     const ns = d.stat_data[NS];
     if (!isPlainObject(ns)) return false;
     const kept = {};
+    if (isPlainObject(ns.Coop)) kept.Coop = ns.Coop;
     for (const path of TOKEN_PUSH) {
         const value = getPath(ns, path);
         if (value !== undefined) setPath(kept, path, value);
@@ -925,6 +941,17 @@ async function pushTokens() {
         setPath(ns, path, isPlainObject(want) || Array.isArray(want) ? JSON.parse(JSON.stringify(want)) : want);
         changed = true;
     }
+    for (const kind of ['支线', '插曲']) {
+        for (const [id, entry] of Object.entries(story[kind] || {})) {
+            if (id.startsWith('$') || !isPlainObject(entry)) continue;
+            for (const key of ['已落', '状态']) {
+                const want = entry[key], path = `${kind}.${id}.${key}`;
+                if (want === undefined || stableJson(getPath(ns, path)) === stableJson(want)) continue;
+                setPath(ns, path, want);
+                changed = true;
+            }
+        }
+    }
     if (!changed) return false;
     return writeMvu(d);
 }
@@ -939,6 +966,7 @@ async function pushTokens() {
 async function writeMvu(d) {
     const api = mvu();
     if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
+    coop?.syncMvu?.updateLive(d);
     let ok = false;
     try {
         await api.replaceMvuData(d, { type: 'message', message_id: 'latest' });
@@ -949,6 +977,7 @@ async function writeMvu(d) {
         if (isPlainObject(whole)) {
             if (!isPlainObject(whole.stat_data)) whole.stat_data = {};
             whole.stat_data[NS] = d.stat_data[NS];
+            coop?.syncMvu?.updateLive(whole);
             await api.replaceMvuData(whole, { type: 'chat' });
             ok = true;
         }
@@ -995,6 +1024,7 @@ function liveThreads(live = null) {
 
 /** 当前是哪种幕：'main' 主线章 / 'interlude' 间章。以 MVU 里的状态为准，run 只是镜像。 */
 function currentMode(live = null) {
+    if (coop?.occupies()) return 'coop';
     return interludeActive(rootOf(live)) ? 'interlude' : 'main';
 }
 
@@ -1049,6 +1079,7 @@ async function patchInterlude(fields, _opts = {}) {
 
 /** 同步「间章时段之外不许写间章变量」这个开关（模型只能在自己那段幕里动它）。 */
 function syncInterludeWrites() {
+    setCoopScene(currentMode() === 'coop');
     setInterludeWritesAllowed(currentMode() === 'interlude');
 }
 
@@ -1444,8 +1475,7 @@ async function rememberChapter(main, { live = null } = {}) {
     });
     if (duplicate) return true;
 
-    let next = 1;
-    while (box[String(next)]) next++;
+    const next = Math.max(0, ...Object.keys(box).map(Number)) + 1;
     box[String(next)] = record;
 
     // 只留最近 8 章
@@ -1633,6 +1663,7 @@ async function installBundledWorldbook({ notify = true, mount = null, ifMissing 
             return 'no-version';
         }
         try {
+            preserveDesignTemplates(data0, await readOurWorldbookEntries());
             await saveWorldInfo(PLUGIN_WORLD, data0, true);
         } catch (error) {
             console.debug('[故事导演] 更新自带世界书失败', error);
@@ -1727,6 +1758,7 @@ function substitute(text) {
  * 支线/插曲按开关与数量注入，位置都在主线之后 —— 冲突时以主线为准。
  */
 function buildInjection(live = null) {
+    if (coop?.occupies()) return '';
     const s = settings();
     const root = rootOf(live);
     const main = mainOf(root);
@@ -1817,6 +1849,7 @@ function landingByExtraModel() {
  * 也就是说契约是唯一能让额外模型知道"这一拍是什么"的通道。没有它，「确认演完了再落拍」无从谈起。
  */
 function currentBeatLine() {
+    if (coop?.occupies()) return '';
     try {
         const root = rootOf();
         if (currentMode() === 'interlude') {
@@ -1838,6 +1871,7 @@ function currentBeatLine() {
 function syncMainInjection() {
     try {
         const s = settings();
+        syncInterludeWrites();
         const text = buildInjection();
         const depth = Math.max(0, Math.round(toNumber(s.injectDepth, 4)));
         // text 为空时 setExtensionPrompt 会写入空串 = 这一轮什么都不注入（ST 不会渲染空块）
@@ -1850,16 +1884,20 @@ function syncMainInjection() {
         // ★ 0.27.11：契约**按幕给示例** —— 间章时段不该再把主线那几条命令摆在模型面前。
         // ★ 0.35.0：把「这一轮那一拍」和「谁来写变量」一起交给契约块 ——
         //   契约是唯一到得了**额外变量模型**的通道（见 landingByExtraModel 的注释）。
-        const contract = s.injectContract
+        const coopContract = coop?.variableContract() || '';
+        const mainContract = s.injectContract
             ? substitute(renderContractSection({
                 banUserAction: settings().banUserAction !== false,
                 mode: currentMode(),
                 beat: currentBeatLine(),
                 landingBy: landingByExtraModel() ? 'extra' : '',
+                hasCoop: !!coopContract,
             }).join('\n'))
             : '';
+        const contract = [mainContract, coopContract].filter(Boolean).join('\n\n');
         setExtensionPrompt(SLOT.contract, contract, extension_prompt_types.IN_CHAT, depth, false, extension_prompt_roles.SYSTEM);
 
+        setExtensionPrompt(SLOT.coop, coop?.injection() || '', extension_prompt_types.IN_CHAT, depth, false, extension_prompt_roles.SYSTEM);
         if (panel && !panel.hidden) renderDiagnostics(text, contract);
     } catch (error) {
         console.debug('[故事导演] 主提示词注入失败', error);
@@ -1912,6 +1950,15 @@ function renderDiagnostics(text = null, contract = null) {
 
 // 阶段七：状态块剥离
 
+// updateMessageBlock only formats HTML. The helper needs MESSAGE_UPDATED to rebuild HTML-code iframes.
+const refreshCleanedMessage = createMessageRefreshQueue({
+    getMessages: () => chat,
+    getScope: chatKey,
+    render: (messageId, message) => updateMessageBlock(messageId, message),
+    notify: (messageId) => eventSource.emit(event_types.MESSAGE_UPDATED || 'message_updated', messageId),
+    onError: (error) => console.debug('[故事导演] 刷新清理后的消息失败', error),
+});
+
 /** 模型有时会把注入的状态块抄进正文：确定性剥离（只动我们自己那个标签）。 */
 function stripStatusEcho(messageId) {
     try {
@@ -1928,7 +1975,7 @@ function stripStatusEcho(messageId) {
         after = after.replace(new RegExp(`<\\/?${STATUS_TAG}>`, 'gi'), '').replace(/\n{3,}/g, '\n\n').trimEnd();
         if (after === before) return false;
         msg.mes = after;
-        try { updateMessageBlock(messageId, msg); } catch { /* 老版本 ST 可能没有这个导出 */ }
+        refreshCleanedMessage(messageId);
         try { saveChatDebounced(); } catch { /* ignore */ }
         console.debug(`[故事导演] 已从第 ${messageId} 楼剥掉被误输出的导演状态块（-${before.length - after.length} 字符）`);
         return true;
@@ -1969,12 +2016,13 @@ function harvestReviewTag(messageId) {
         const selfMatch = before.match(new RegExp(
             `<${SELF_CHECK_TAG}>([\\s\\S]*?)<\\/${SELF_CHECK_TAG}>` + `|<!--\\s*${SELF_CHECK_TAG}\\s*([\\s\\S]*?)-->`, 'i'));
         const selfBlock = selfMatch ? (selfMatch[1] ?? selfMatch[2] ?? '') : '';
-        const thinking = String(selfBlock || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+        const fullThinking = String(selfBlock || '').replace(/\s+/g, ' ').trim();
+        const thinking = fullThinking.slice(0, 300);
         // 结论：自检块里最后那行「③ 结论：…」为准；读不出来再退回旧标签。
         let state = '';
-        if (thinking) {
-            const tail = thinking.match(/结论\s*[:：]([^\n]{0,40})/);
-            const where = tail ? tail[1] : thinking;
+        if (fullThinking) {
+            const tail = [...fullThinking.matchAll(/结论\s*[:：]/g)].at(-1);
+            const where = tail ? fullThinking.slice(tail.index + tail[0].length) : fullThinking;
             state = REVIEW_STATES.find((item) => where.includes(item)) || '';
         }
         const legacyVerdict = (before.match(new RegExp(`<${REVIEW_TAG}>([\\s\\S]*?)<\\/${REVIEW_TAG}>`, 'i')) || [])[1];
@@ -2030,7 +2078,7 @@ function harvestReviewTag(messageId) {
         cleaned = cleaned.replace(/\n{3,}/g, '\n\n').trimEnd();
         if (cleaned !== before) {
             msg.mes = cleaned;
-            try { updateMessageBlock(messageId, msg); } catch { /* 老版本 ST 可能没有这个导出 */ }
+            refreshCleanedMessage(messageId);
             try { saveChatDebounced(); } catch { /* ignore */ }
             console.debug(`[故事导演] 已从第 ${messageId} 楼剥掉审查标签（-${before.length - cleaned.length} 字符）`);
         }
@@ -2202,7 +2250,7 @@ async function collectContextBlocks(task = 'chapter', taskOpts = {}) {
     //     按层发），单一来源，不必靠世界书转发。
     try {
         const ours = await readOurWorldbookEntries();
-        const plot = ours.filter((entry) => !/\[mvu_update\]|\[InitVar\]/i.test(String(entry?.comment ?? entry?.name ?? '')));
+        const plot = ours.filter((entry) => !/\[mvu_update\]|\[InitVar\]|\[coop_(?:design|rank_)/i.test(String(entry?.comment ?? entry?.name ?? '')));
         const digest = worldbookDigest(plot);
         if (digest) blocks.push(`=== 本插件自带世界书「${PLUGIN_WORLD}」里面向剧情的条目 ===\n${capText(digest, 24000)}`);
     } catch (error) {
@@ -2365,7 +2413,7 @@ function completedChapterGoals(root) {
  *   而防重复块里**只有章名标题、没有内容**，模型根本不知道"这套因果已经写过了"。
  *   现在旧章表以「**要避开**的东西」的身份出现在这里。
  */
-function antiRepeatBlock(task = '') {
+function antiRepeatBlock(task = '', { replacingEpic = false } = {}) {
     const s = settings();
     const root = rootOf();
     const history = completedMainTitles(root);
@@ -2374,7 +2422,18 @@ function antiRepeatBlock(task = '') {
     if (history.length) lines.push(`已经走过的章（不要重演，也不要换个说法再来一遍）：${history.join('、')}`);
     if (titles.length) lines.push(`已经用过的标题（新的标题不要与它们重复或近似）：${titles.join('、')}`);
     if (task === 'epic') {
-        const retired = Array.isArray(s.run.retiredEpics) ? s.run.retiredEpics : [];
+        let retired = Array.isArray(s.run.retiredEpics) ? s.run.retiredEpics : [];
+        // 换篇章时临时带上当前章表；生成成功前不把它写进淘汰 / 归档记录。
+        if (replacingEpic) {
+            const outgoing = epicOf(root);
+            const title = String(unwrap(outgoing[EP.title]) ?? '').trim();
+            const chapters = epicChapters(outgoing).slice(0, 24);
+            if (epicStarted(outgoing) && chapters.length) {
+                retired = retired.filter((old) => String(old?.title ?? '') !== title
+                    || JSON.stringify(old?.chapters) !== JSON.stringify(chapters));
+                retired = [...retired, { title, chapters }];
+            }
+        }
         for (const old of retired.slice(-2)) {
             const chapters = Array.isArray(old?.chapters) ? old.chapters : [];
             if (!chapters.length) continue;
@@ -3199,7 +3258,7 @@ async function buildUserPrompt(task, userText = '', taskOpts = {}) {
     // ★ 朱批（用户对上一版的不满）放在用户输入的**最后**：最靠近尾注，模型最容易照它动。
     //   它由弹窗的「对上一版的朱批」那一栏经 taskOpts 传进来（只影响这一次重生成）。
     if (taskOpts.critique) blocks.push(String(taskOpts.critique));
-    const anti = antiRepeatBlock(task);
+    const anti = antiRepeatBlock(task, taskOpts);
     if (anti) blocks.push(anti);
     const tail = {
         chapter: '请按上面的格式输出一个 <StoryChapters> 区块。',
@@ -3349,6 +3408,7 @@ function justAborted(ms = 10000) {
 
 /** 开始一次生成：顺带做看门狗检查（超时就当上一次已经死了）。 */
 function beginGenerate(label = '剧情') {
+    if (coop?.occupies() && !String(label).startsWith('Coop')) return false;
     if (storyGenerating) {
         const hung = storyGeneratingSince && Date.now() - storyGeneratingSince > GENERATE_WATCHDOG;
         if (!hung) return false;
@@ -3367,10 +3427,11 @@ function beginGenerate(label = '剧情') {
     if (genTicker) { clearInterval(genTicker); genTicker = null; }
     genTicker = setInterval(() => { renderBusyBar(); }, 1000);
     renderBusyBar();
-    return true;
+    return genId;
 }
 
-function endGenerate() {
+function endGenerate(ownerToken) {
+    if (ownerToken !== genId) return;
     storyGenerating = false;
     storyGeneratingSince = 0;
     if (genTicker) { clearInterval(genTicker); genTicker = null; }
@@ -3512,11 +3573,14 @@ async function askOracle({ task = 'chapter', userText = '', regenerate = false, 
         if (!quiet) toast('没有可用的模型连接——需要启用「故事神谕」扩展。也可以在主线上直接手写。', 'warning');
         return null;
     }
+    const myId = genId, ctl = genCtl, origin = chatKey();
+    const current = () => !genAborted && !ctl?.signal?.aborted && myId === genId && origin === chatKey();
     const system = ephemeralSystem || (task === 'thread' ? buildThreadSystemPrompt()
         : task === 'side' ? buildInterludeSystemPrompt()
             : task === 'interlude' ? buildInterludeChapterSystemPrompt({ rejected })
                 : buildChapterSystemPrompt({ regenerate, rejected, keep, remaining: Math.max(0, Math.round(toNumber(remaining, 0))) }));
     const user = await buildUserPrompt(task, userText, taskOpts);
+    if (!current()) return ORACLE_CANCELLED;
     lastRequestChars = String(system).length + String(user).length;
     // ⚠ **绝不往神谕窗口里写东西**（这一条是补事故）。
     //   这里以前用 api.appendReply() 把「导演请求全文」和「模型原始回复」追加进神谕的对话里 ——
@@ -3527,8 +3591,6 @@ async function askOracle({ task = 'chapter', userText = '', regenerate = false, 
     //   不发 appendReply 就够了。真要排查，看控制台与面板「诊断」页（生成闸门 / 世界书 / 实际注入的引导全文）。
     if (!quiet) console.debug(`[故事导演] 本次生成（${task}）的提示词与原始回复不写入神谕窗口；需要排查见面板「诊断」页。`);
     // ★ 0.27.6：把中断信号交下去（真掐断请求），并顺手接住流式进度让前端那行会动。
-    const myId = genId;
-    const ctl = genCtl;
     let result;
     try {
         result = await api.run([
@@ -3536,10 +3598,10 @@ async function askOracle({ task = 'chapter', userText = '', regenerate = false, 
             { role: 'user', content: user },
         ], {
             signal: ctl?.signal,
-            onDelta: (full) => { genChars = String(full || '').length; },
+            onDelta: (full) => { if (current()) genChars = String(full || '').length; },
         });
     } catch (error) {
-        if (ctl?.signal?.aborted || genAborted || myId !== genId) {
+        if (!current()) {
             console.info('[故事导演] 这次生成被中断（用户取消），结果不再采用。');
             return ORACLE_CANCELLED;
         }
@@ -3547,7 +3609,7 @@ async function askOracle({ task = 'chapter', userText = '', regenerate = false, 
     }
     // ⚠ 必须同时判 `genAborted`：万一底层**不理会** signal（老版本神谕 / 非 fetch 路径），
     //   迟到的结果照样会 resolve —— 只比 genId 拦不住它（中断并不推进 genId）。
-    if (genAborted || myId !== genId) {
+    if (!current()) {
         console.info('[故事导演] 这次生成的结果已作废（用户中断 / 期间被新的一次生成取代）。');
         return ORACLE_CANCELLED;
     }
@@ -3752,8 +3814,9 @@ async function generateInterludeChapter({ quiet = true, userText = '', force = f
         return false;
     }
     const key = `interlude-chapter:${chatKey()}`;
-    if (!beginGenerate('间章')) return false;
     if (!force && isBackingOff(key)) return false;
+    const generateToken = beginGenerate('间章');
+    if (!generateToken) return false;
     if (quiet) toast('正在请故事神谕设计一段间章…');
     const origin = chatKey();
     try {
@@ -3783,7 +3846,7 @@ async function generateInterludeChapter({ quiet = true, userText = '', force = f
         markFailedFromError(key, error);
         return false;
     } finally {
-        endGenerate();
+        endGenerate(generateToken);
         if (panel && !panel.hidden) render();
     }
 }
@@ -4042,23 +4105,15 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
         return false;
     }
     const key = `epic:${chatKey()}`;
-    if (!beginGenerate(mode === 'audit' ? '篇章检查' : '篇章')) return false;
     if (!force && isBackingOff(key)) return false;
+    const generateToken = beginGenerate(mode === 'audit' ? '篇章检查' : '篇章');
+    if (!generateToken) return false;
     if (quiet) toast(mode === 'establish' ? '正在请故事神谕定下一部篇章（一部完整的大故事）…' : '正在按他实际做的事重新校准篇章…');
     const origin = chatKey();
     // establish = 换新的一部 → 进度归零；evolve = 校准 → 不动进度
     const progress = mode === 'establish' ? 0 : null;
-    // ★ 换新的一部之前，先把**旧的这一部**记进名单：
-    //   ① 它会被当成「要避开的东西」进防重复块（不然新的一部就是它的换皮）；
-    //   ② 同时告诉上下文构造器：**别再拿旧章表当"这一册的章内容"发下去**。
-    //   ⚠ 理由（why）由**实际状态**决定，不看是谁调用的：
-    //     章表写满 = 演义完了 → **归档**；没演完就被换掉 → 只当防重复提醒（几轮后自动清掉）。
-    if (mode === 'establish') {
-        const outgoing = epicOf(rootOf());
-        if (epicStarted(outgoing)) {
-            rememberRetiredEpic(outgoing, { why: epicFinished(outgoing) ? 'finished' : 'replaced' });
-        }
-    }
+    // 先保留旧篇章快照，成功采用新篇章后才淘汰；请求中的防重复由 taskOpts 临时提供。
+    const outgoing = mode === 'establish' ? epicOf(rootOf()) : null;
     try {
         const raw = await askOracle({
             task: 'epic',
@@ -4119,6 +4174,10 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
             console.info(`[故事导演] 篇章检查结果：${changed ? '有调整' : '照旧'}${verdict ? `｜${verdict}` : ''}`);
         }
         await applyEpic(epic, { quiet: false, entry: progress });
+        if (origin && chatKey() !== origin) return false;
+        if (outgoing && epicStarted(outgoing)) {
+            rememberRetiredEpic(outgoing, { why: epicFinished(outgoing) ? 'finished' : 'replaced' });
+        }
         return true;
     } catch (error) {
         console.debug('[故事导演] 生成史诗失败', error);
@@ -4127,7 +4186,7 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
         markFailedFromError(key, error);
         return false;
     } finally {
-        endGenerate();
+        endGenerate(generateToken);
         // pending 由本函数独家负责：无论成功、失败还是中途换了聊天，结束就放开
         clearPending(key);
         if (panel && !panel.hidden) render();
@@ -4155,8 +4214,9 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
         return false;
     }
     const key = `chapter:${chatKey()}:${regenerate ? 're' : 'new'}`;
-    if (!beginGenerate(regenerate ? '重写这一章' : '下一章')) return false;
     if (!force && isBackingOff(key)) return false;
+    const generateToken = beginGenerate(regenerate ? '重写这一章' : '下一章');
+    if (!generateToken) return false;
     const button = panel?.querySelector('.sd-generate-chapter');
     const label = button?.textContent || '';
     if (button && !quiet) { button.disabled = true; button.textContent = '生成中…'; }
@@ -4200,7 +4260,7 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
         markFailedFromError(key, error);
         return false;
     } finally {
-        endGenerate();
+        endGenerate(generateToken);
         if (button && !quiet) { button.disabled = false; button.textContent = label; }
         // 让面板上的「神谕生成中…」及时消失（成功时 applyChapter 已经重画过，这里是失败/静默路径的兜底）
         if (panel && !panel.hidden) render();
@@ -4208,9 +4268,10 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
 }
 
 async function generateThread({ quiet = true, userText = '', force = false, critique = '', replaceId = '' } = {}) {
-    if (!beginGenerate('支线')) return false;
     const key = `thread:${chatKey()}`;
     if (!force && isBackingOff(key)) return false;
+    const generateToken = beginGenerate('支线');
+    if (!generateToken) return false;
     if (quiet) toast('正在请故事神谕设计一条支线…');
     const origin = chatKey();
     try {
@@ -4237,15 +4298,16 @@ async function generateThread({ quiet = true, userText = '', force = false, crit
         markFailedFromError(key, error);
         return false;
     } finally {
-        endGenerate();
+        endGenerate(generateToken);
         if (panel && !panel.hidden) render();
     }
 }
 
 async function generateInterlude({ quiet = true, userText = '', force = false, critique = '', replaceId = '' } = {}) {
-    if (!beginGenerate('插曲')) return false;
     const key = `interlude:${chatKey()}`;
     if (!force && isBackingOff(key)) return false;
+    const generateToken = beginGenerate('插曲');
+    if (!generateToken) return false;
     if (quiet) toast('正在请故事神谕设计一条插曲…');
     const origin = chatKey();
     try {
@@ -4273,7 +4335,7 @@ async function generateInterlude({ quiet = true, userText = '', force = false, c
         markFailedFromError(key, error);
         return false;
     } finally {
-        endGenerate();
+        endGenerate(generateToken);
         if (panel && !panel.hidden) render();
     }
 }
@@ -4546,6 +4608,7 @@ function noteAttempt(ok, error) {
  *   4. 自动续支线 / 插曲：按回复数节奏补充（有并发上限）。
  */
 async function evaluateDirector({ live = null } = {}) {
+    if (coop?.occupies()) { syncMainInjection(); return; }
     if (evaluating) return;
     evaluating = true;
     try {
@@ -4607,7 +4670,7 @@ async function evaluateDirector({ live = null } = {}) {
             // ★ **篇章检查**（0.27.0，用户提的）：旧章刚演完、新章还不该立刻衔接 —— 正好趁间章这几轮，
             //   静默做一次「往后还没写的那几章，在已经发生的这些事之后还成立吗」。
             //   结果只有两种：照旧（不动）或只改没写的章；下一章回到主线时就已经用上新章表了。
-            if (s.autoEpic && s.auditEpic && !epicFinished(epicOf(rootOf(live)))
+            if (s.autoDirector && s.autoEpic && s.auditEpic && !epicFinished(epicOf(rootOf(live)))
                 && epicChapter(epicOf(rootOf(live))) > 0
                 && rt.closedChapter && rt.auditedFor !== rt.closedChapter
                 && !isPending(`epic:${chatKey()}`) && !blockedByCooldown(s, count, rt)
@@ -5061,8 +5124,7 @@ async function rememberInterlude(chapter, { live = null } = {}) {
         && String(unwrap(item[MAIN_TITLE]) ?? '').trim() === title
         && String(unwrap(item[MAIN_ARC]) ?? '').trim() === record[MAIN_ARC]);
     if (duplicate) return true;
-    let next = 1;
-    while (box[String(next)]) next++;
+    const next = Math.max(0, ...Object.keys(box).map(Number)) + 1;
     box[String(next)] = record;
     const keys = Object.keys(box).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
     while (keys.length > 8) delete box[String(keys.shift())];
@@ -5375,7 +5437,7 @@ let panel = null;
 let bubble = null;
 let dragging = false;
 
-const TABS = [['now', '当前'], ['epic', '篇章'], ['main', '主线'], ['side', '支线/插曲'], ['set', '设定'], ['about', '关于']];
+const TABS = [['now', '当前'], ['epic', '篇章'], ['main', '主线'], ['side', '支线/插曲'], ['coop', 'Coop'], ['set', '设定'], ['about', '关于']];
 
 /**
  * 「关于」页：头像 + 作者 + 版本 + 出处。
@@ -5688,11 +5750,6 @@ function renderMainTab() {
         save();
         render();
     });
-    host.querySelector('[name="chapters-per-epic"]')?.addEventListener('change', (event) => {
-        settings().chaptersPerEpic = Math.max(1, Math.min(12, Math.round(toNumber(event.target.value, 4))));
-        save();
-        render();
-    });
 }
 
 function renderSideTab() {
@@ -5865,6 +5922,8 @@ function renderSetTab() {
         </div>
         <div class="sd-card">
             <div class="sd-card-head"><span class="sd-card-title">外观</span></div>
+            <label class="sd-switch"><input name="show-bubble" type="checkbox"> 显示悬浮窗入口</label>
+            <p class="sd-note">关闭后隐藏悬浮球，仍可从扩展菜单中的「故事导演」打开面板。</p>
             <div class="sd-row">
                 <label class="sd-field"><span>悬浮球大小（px）</span><input name="bubble-size" type="number" min="28" max="120" step="1"></label>
                 <label class="sd-field"><span>自定义图标（留空＝自带）</span><input name="bubble-icon" placeholder="https://… 或 icon.svg"></label>
@@ -5885,7 +5944,7 @@ function renderSetTab() {
             else s[key] = node.value;
             save();
             syncMainInjection();
-            if (key === 'bubbleSize' || key === 'bubbleIcon') applyBubbleLook();
+            if (key === 'showBubble' || key === 'bubbleSize' || key === 'bubbleIcon') applyBubbleLook();
         });
     };
     bind('auto-director', 'autoDirector');
@@ -5914,6 +5973,11 @@ function renderSetTab() {
     bind('max-interludes', 'maxInterludes', 'value');
     bind('story-transcript', 'storyTranscript');
     bind('auto-epic', 'autoEpic');
+    host.querySelector('[name="chapters-per-epic"]')?.addEventListener('change', (event) => {
+        s.chaptersPerEpic = Math.max(1, Math.min(12, Math.round(toNumber(event.target.value, 4))));
+        save();
+        render();
+    });
     bind('discarded-epic-rounds', 'discardedEpicKeepRounds', 'value');
     bind('audit-epic', 'auditEpic');
     bind('transcript-limit', 'transcriptLimit', 'value');
@@ -5921,6 +5985,7 @@ function renderSetTab() {
     bind('auto-update-book', 'autoUpdateBook');
     bind('auto-mount-book', 'autoMountBook');
     bind('book-unmount-on-off', 'bookUnmountOnOff');
+    bind('show-bubble', 'showBubble');
     bind('bubble-size', 'bubbleSize', 'value');
     bind('bubble-icon', 'bubbleIcon', 'value');
 
@@ -6208,15 +6273,21 @@ async function finishChapter() {
     const main = mainState();
     const beats = beatsOf(main);
     await patchMain({ [KEY_BEAT]: beats.length + 1, [KEY_CHAPTER_DONE]: true, [KEY_READY]: true });
-    // ⚠ 不要在这里伪造 live：rootOf() 是 getMvuData 的快照，包成 live 会让 rememberChapter 走
-    // 「只原地改、不回写」的快路径，章节史就进不了 MVU（autoChapter 关掉时永远进不了）。
-    await rememberChapter(main);
-    settings().run.closedChapter = `主线:${String(unwrap(main[MAIN_TITLE]) ?? '').trim()}`;
+    const s = settings();
+    const advance = s.autoDirector && s.autoChapter;
+    if (advance) {
+        // 手动收尾立即交给导演，记史与 closedChapter 交给正常收尾流程。
+        s.run.closedChapter = '';
+        s.run.aftermathAt = 0;
+    } else {
+        await rememberChapter(main);
+        s.run.closedChapter = `主线:${String(unwrap(main[MAIN_TITLE]) ?? '').trim()}`;
+    }
     save();
     syncMainInjection();
     render();
-    toast('本章已标记为收尾；自动换章开着的话会请神谕开下一章。', 'success');
-    if (settings().autoDirector && settings().autoChapter) void evaluateDirector();
+    toast(advance ? '本章已标记为收尾，正在交给故事神谕衔接下一幕。' : '本章已收尾并记入章节史；可手动设计下一章。', 'success');
+    if (advance) await evaluateDirector();
 }
 
 /** 只重排剩下的拍（已演过的不动）。 */
@@ -6270,6 +6341,7 @@ async function clearStory() {
  */
 async function forceOpenStory() {
     const s = settings();
+    const origin = chatKey();
     if (typeof oracleApi()?.run !== 'function') {
         toast('读不到「故事神谕」的模型连接 —— 先确认故事神谕已安装并启用。', 'error');
         return;
@@ -6287,7 +6359,10 @@ async function forceOpenStory() {
     const epic = epicOf(rootOf());
     if (s.autoEpic && !epicStarted(epic)) {
         toast('先定篇章…');
-        const ok = await generateEpic({ quiet: false, force: true, mode: 'establish', entry: completedMainTitles(rootOf()).length });
+        const pending = generateEpic({ quiet: false, force: true, mode: 'establish', entry: completedMainTitles(rootOf()).length });
+        const owner = genId;
+        const ok = await pending;
+        if (chatKey() !== origin || genId !== owner || justAborted()) return;
         // ⚠ `justAborted()` 只用来「压掉失败提示 / 不再往下走」，**绝不能当进门闸** ——
         //   用户掐掉之后立刻再点一次「立刻开篇」是完全正常的操作（探针抓到过这个 bug）。
         if (!ok) {
@@ -6296,10 +6371,15 @@ async function forceOpenStory() {
         }
     }
     if (epicStarted(epicOf(rootOf()))) {
+        const owner = genId;
         await patchMain({ [MAIN_CLOSED]: false }, {});
+        if (chatKey() !== origin || genId !== owner) return;
     }
     // ★ 0.27.3：「立刻开篇」是**从第一拍开始**的入口，同样必须整章重来（别继承上一章的拍号）。
-    const opened = await generateChapter({ quiet: false, force: true, restart: true });
+    const pending = generateChapter({ quiet: false, force: true, restart: true });
+    const owner = genId;
+    const opened = await pending;
+    if (chatKey() !== origin || genId !== owner) return;
     if (!opened && justAborted()) return;   // 用户中断：不记失败、不弹错
     noteAttempt(opened, opened ? '' : '见控制台日志');
     if (!opened) toast('开章失败 —— 控制台里有 [故事导演] 的原始回复，发给我看看。', 'error');
@@ -6523,17 +6603,35 @@ async function manualAdvanceInterludeBeat() {
     toast(`间章切到第 ${beat + 1} 个日常画面（共 ${beats.length} 个）。`, 'success');
 }
 
-/** 「现在回主线」：立刻收掉间章（**不必跑完拍**），回主线并开新的一章。 */
+/** 「现在回主线」：立刻收掉间章；自动换章开启时接着请神谕开新章。 */
 async function endInterludeNow() {
     const chapter = interludeChapterOf(rootOf());
     if (!truthy(chapter[IL.active])) { toast('现在不在间章里。', 'info'); return; }
-    await patchInterlude({ [IL.ready]: true });
-    const rt = settings().run;
+    const s = settings();
+    const rt = s.run;
+    const origin = chatKey();
+    const ilKey = `间章:${String(unwrap(chapter[IL.title]) ?? '').trim()}`;
     // 手动按钮不受自动节奏的冷却限制：用户说了算
     rt.lastGenerateAt = 0;
+    rt.aftermathAt = aiMessageCount();
+    rt.beatAt = rt.aftermathAt;
+    await rememberInterlude(chapter);
+    await switchMode('main', { quiet: true });
+    if (!s.autoChapter) {
+        rt.closedChapter = ilKey;
+        save();
+        toast('已回到主线；自动换章已关闭，可手动设计下一章。', 'success');
+        return;
+    }
+    toast('已回到主线，正在请故事神谕接上下一章。', 'info');
+    const opened = await ensureClosingChapter({ interlude: false });
+    if (chatKey() !== origin) return;
+    if (opened) rt.closedChapter = ilKey;
+    else {
+        rt.lastGenerateAt = 0;
+        if (!justAborted()) toast('已回到主线，但新章未生成；可手动设计下一章重试。', 'warning');
+    }
     save();
-    toast('好，回主线 —— 正在请故事神谕接上。', 'success');
-    await evaluateDirector();
 }
 
 /**
@@ -6913,6 +7011,7 @@ async function saveEpicFromForm() {
 function applyBubbleLook(node = bubble) {
     if (!node) return;
     const s = settings();
+    node.hidden = s.showBubble === false;
     const size = Math.max(28, Math.min(120, Math.round(Number(s.bubbleSize) || 52)));
     node.style.setProperty('--sd-bubble-size', `${size}px`);
     const custom = String(s.bubbleIcon || '').trim();
@@ -7051,6 +7150,7 @@ function makePanel() {
             <section class="sd-page sd-epic-tab" data-tab="epic" hidden></section>
             <section class="sd-page sd-main-tab" data-tab="main" hidden></section>
             <section class="sd-page sd-side-tab" data-tab="side" hidden></section>
+            <section class="sd-page sd-coop-tab" data-tab="coop" hidden></section>
             <section class="sd-page sd-set-tab" data-tab="set" hidden></section>
             <section class="sd-page sd-about-tab" data-tab="about" hidden></section>
         </div>`;
@@ -7092,6 +7192,42 @@ function toast(message, type = 'info') {
     console.info(`[故事导演] ${message}`);
 }
 
+/** Coop shares the model connection and task gate, with a separate context and cancellation. */
+async function askCoop(messages, signal) {
+    const owner = beginGenerate('Coop 羁绊事件');
+    if (!owner) throw new Error('故事导演正在生成，请稍后开始 Coop');
+    const cancel = () => { if (owner === genId) abortGenerate(); };
+    signal.addEventListener('abort', cancel, { once: true });
+    try {
+        if (signal.aborted) throw Object.assign(new Error('CANCELLED'), {code:'CANCELLED'});
+        const api = oracleApi();
+        if (typeof api?.run !== 'function') throw new Error('请先启用故事神谕并配置模型连接');
+        const result = await api.run(messages.map(m => ({...m, content: substitute(m.content)})), {
+            signal: genCtl?.signal,
+            onDelta: full => { if (owner === genId) genChars = String(full || '').length; },
+        });
+        if (signal.aborted || owner !== genId || genAborted) throw Object.assign(new Error('CANCELLED'), {code:'CANCELLED'});
+        return result;
+    } finally {
+        signal.removeEventListener('abort', cancel);
+        endGenerate(owner);
+    }
+}
+function coopSceneChanged(occupied) {
+    const s = settings(), count = aiMessageCount(), rt = s.run;
+    if (occupied) {
+        if (!Number.isFinite(rt.coopPausedAt)) rt.coopPausedAt = count;
+    } else if (Number.isFinite(rt.coopPausedAt)) {
+        const delta = Math.max(0, count - rt.coopPausedAt);
+        for (const key of ['beatAt','chapterOpenedAt','threadAt','interludeAt','aftermathAt','lastGenerateAt','armedAt','focusBeatSince','focusInterludeSince']) {
+            if (Number.isFinite(rt[key]) && rt[key] > 0) rt[key] += delta;
+        }
+        rt.lastCount = count;
+        delete rt.coopPausedAt;
+    }
+    save();
+}
+
 // 阶段十六：启动
 
 function init() {
@@ -7099,6 +7235,17 @@ function init() {
     if (!document.body) { window.setTimeout(init, 500); return; }
     makeBubble();
     makePanel();
+    coop = createCoopSystem({
+        uiContainer: panel.querySelector('.sd-coop-tab'),
+        openPanel: () => { settings().tab = 'coop'; save(); open(); },
+        ask: askCoop,
+        designTemplates: async profile => designTemplates(await readOurWorldbookEntries(), profile),
+        mvu,
+        autoAllowed: () => settings().enabled && settings().autoDirector && !storyGenerating,
+        sceneChanged: coopSceneChanged,
+        syncPrompts: () => syncMainInjection(),
+        renderMessage: refreshCleanedMessage,
+    });
     // ★ 0.38.7：魔棒菜单入口。ST 可能在扩展之后才把菜单建好，所以几拍重试（幂等，重复调只有一颗）。
     injectWandEntry();
     window.setTimeout(() => injectWandEntry(), 600);
@@ -7118,6 +7265,7 @@ function init() {
             });
         }
         await ensureNamespace();
+        void coop.syncMvu();
         // ★ 老存档的旧字段名（`史诗.总纲`）改掉 —— 两个存放位置都过一遍（见 0.21.1 的事故说明）。
         void migrateLegacyKeysBothScopes();
         syncMainInjection();
@@ -7142,6 +7290,61 @@ function init() {
     } catch (error) { console.debug('[故事导演] event binding unavailable', error); }
     window.setTimeout(() => { if (!document.getElementById('story-director-bubble')) init(); }, 1500);
 }
+
+/** 宿主 saveChat 会吞掉保存错误；刷新前回读存档核对，避免丢掉尚未落盘的消息和变量。 */
+async function saveChatBeforeReload() {
+    const ctx = window.SillyTavern?.getContext?.();
+    const id = ctx?.getCurrentChatId?.() || ctx?.chatId;
+    if (!id) return;
+    if (typeof ctx.saveChat !== 'function' || typeof ctx.getRequestHeaders !== 'function') throw new Error('无法确认聊天保存');
+    const origin = chatKey();
+    const snapshot = () => stableJson({ metadata: ctx.chatMetadata || {}, messages: ctx.chat || [] });
+    const expected = snapshot();
+    const character = ctx.characters?.[ctx.characterId ?? ctx.chid];
+    const body = ctx.groupId ? { id } : { file_name: id, ch_name: character?.name, avatar_url: character?.avatar };
+    await ctx.saveChat();
+    if (chatKey() !== origin) throw new Error('保存期间切换了聊天，暂不刷新');
+    const response = await fetch(ctx.groupId ? '/api/chats/group/get' : '/api/chats/get', {
+        method: 'POST', headers: ctx.getRequestHeaders(), body: JSON.stringify(body), cache: 'no-store',
+    });
+    if (!response.ok) throw new Error('无法核对聊天存档：HTTP ' + response.status);
+    const saved = await response.json();
+    if (!Array.isArray(saved) || stableJson({ metadata: saved[0]?.chat_metadata || {}, messages: saved.slice(1) }) !== expected
+        || chatKey() !== origin || snapshot() !== expected) throw new Error('聊天尚未完整保存，暂不刷新');
+}
+
+let appReady = false;
+const updateReloader = createUpdateReloader({
+    version: VERSION,
+    storage: (() => { try { return window.sessionStorage; } catch { return null; } })(),
+    readVersion: async () => {
+        const response = await fetch(new URL('./manifest.json', import.meta.url), { cache: 'no-store' });
+        if (!response.ok) throw new Error('读取故事导演版本失败：HTTP ' + response.status);
+        return (await response.json()).version;
+    },
+    isBusy: () => !appReady || isGenerating() || isChatSaving || storyGenerating || !!coop?.job || !!coop?.store.pending ||
+        !!document.querySelector('#send_textarea')?.value || !!document.querySelector('.edit_textarea,.reasoning_edit_textarea') ||
+        !!document.activeElement?.matches('input:not(#send_textarea),textarea:not(#send_textarea),select,[contenteditable="true"]'),
+    flush: async () => {
+        await coop?.store.queue;
+        await coop?.syncMvu();
+        let saved = false;
+        const onSaved = () => { saved = true; };
+        eventSource.on(event_types.SETTINGS_UPDATED, onSaved);
+        try {
+            await saveSettings();
+            if (!saved) throw new Error('设置尚未保存，暂不刷新');
+        } finally { eventSource.removeListener(event_types.SETTINGS_UPDATED, onSaved); }
+        await saveChatBeforeReload();
+    },
+    reload: () => window.location.reload(),
+    notify: () => toast('故事导演已更新，将在生成和保存完成、输入框清空后自动刷新。'),
+    onError: error => console.debug('[故事导演] 自动刷新暂缓，稍后重试', error),
+});
+export function onStoryDirectorUpdate() { updateReloader.request(); }
+eventSource.on(event_types.APP_READY, () => { appReady = true; void updateReloader.check(); });
+window.addEventListener('focus', () => { void updateReloader.check(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) void updateReloader.check(); });
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true });
 else init();

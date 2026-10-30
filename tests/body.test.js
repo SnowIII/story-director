@@ -1,0 +1,148 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {visibleBody,hasEvidence,legacyVisibleBody,fingerprintBody} from '../coop/body.js';
+import {sourceMap,matchesSourceVersion,ensureMessageIds} from '../coop/messages.js';
+import {hash} from '../coop/model.js';
+
+test('variable opener mentions cannot span explicit story boundaries',()=>{
+    const body='说明：末尾使用 <UpdateVariable>。<content>她接受了帮助。</content><UpdateVariable>变量秘密</UpdateVariable>';
+    assert.ok(visibleBody(body).includes('她接受了帮助'));
+    assert.ok(!visibleBody(body).includes('变量秘密'));
+});
+test('literal variable tags inside content remain actual story text',()=>{
+    const body='<content>纸上印着 <UpdateVariable> 标签，她指给你看。</content><UpdateVariable>变量秘密</UpdateVariable>';
+    assert.ok(visibleBody(body).includes('纸上印着 <UpdateVariable> 标签'));
+    assert.ok(!visibleBody(body).includes('变量秘密'));
+});
+test('analysis, real variable blocks and director controls cannot supply evidence',()=>{
+    const body='<build>尚未发生的帮助</build><content>她没有接受。</content><UpdateVariable><Analysis>待核对</Analysis>变量承诺</UpdateVariable><故事导演自检>通过</故事导演自检>';
+    assert.equal(hasEvidence(body,'尚未发生的帮助'),false);
+    assert.equal(hasEvidence(body,'变量承诺'),false);
+    assert.equal(hasEvidence(body,'她没有接受'),true);
+});
+test('quoted content markup in a genuine variable payload cannot become story evidence',()=>{
+    const body='<content>她拒绝了帮助。</content><UpdateVariable><JSONPatch>[{"value":"<content>她接受了帮助。</content>"}]</JSONPatch></UpdateVariable>';
+    assert.equal(hasEvidence(body,'她接受了帮助'),false);
+    assert.ok(hasEvidence(body,'她拒绝了帮助'));
+});
+test('unfinished analysis and variable payloads do not erase a following story',()=>{
+    assert.ok(visibleBody('<build>计划尚未闭合<content>真正的回答</content>').includes('真正的回答'));
+    assert.ok(!visibleBody('真正的回答<UpdateVariable><JSONPatch>未完整的数据').includes('未完整的数据'));
+});
+test('evidence tolerates display whitespace but still requires actual words',()=>{
+    assert.ok(hasEvidence('她\n\n愿意一起核对','她 愿意一起核对'));
+    assert.equal(hasEvidence('她拒绝核对','她愿意核对'),false);
+    assert.equal(hasEvidence('任何正文','<build>不应当作为依据</build>'),false);
+});
+
+test('status-bar placeholders are presentation only and cannot supply narrative evidence',()=>{
+    const body='<content>她接受了帮助。</content>',expected=fingerprintBody(body);
+    for(const marker of ['<StatusPlaceHolderImpl/>','<StatusPlaceHolderImpl />','<StatusPlaceHolderImpl></StatusPlaceHolderImpl>']) {
+        assert.equal(fingerprintBody(body+'\n\n'+marker),expected);
+        assert.equal(hasEvidence(marker,marker),false);
+        assert.equal(visibleBody(body+'\n'+marker),body);
+    }
+});
+
+test('pre-fix v2 references with a status placeholder survive its removal while actual edits stay invalid',()=>{
+    const body='<content>她接受了帮助。</content>\n<StatusPlaceHolderImpl/>';
+    const old='v2:'+hash(fingerprintBody(body,{keepStatusPlaceholders:true})+'|0|false');
+    const message={sd_coop_id:'m',is_user:false,mes:body};
+    assert.ok(matchesSourceVersion(sourceMap([message]).get('m'),old));
+    message.mes=body.replace('\n<StatusPlaceHolderImpl/>','');
+    assert.ok(matchesSourceVersion(sourceMap([message]).get('m'),old));
+    message.mes=message.mes.replace('接受','拒绝');
+    assert.equal(matchesSourceVersion(sourceMap([message]).get('m'),old),false);
+});
+test('format and IGS decoration have stable fingerprints; actual rewrites and swipes do not',()=>{
+    const messages=[{sd_coop_id:'m',mes:'<content>她愿意一起核对。</content>',is_user:false,swipe_id:0}];
+    const original=sourceMap(messages).get('m').version;
+    messages[0].mes='<content>\n[igs-img:3]\n她愿意一起核对。\n[igs-img:4]\n</content>';
+    assert.equal(sourceMap(messages).get('m').version,original);
+    messages[0].swipe_id=1;
+    assert.notEqual(sourceMap(messages).get('m').version,original);
+    messages[0].swipe_id=0;messages[0].mes='<content>她拒绝一起核对。</content>';
+    assert.notEqual(sourceMap(messages).get('m').version,original);
+});
+test('legacy hashes are reconstructed from exact marker removals, never from claimed cache values',()=>{
+    const original='<content>她愿意一起核对。\n这里是下一段。</content>';
+    const oldVersion=hash(legacyVisibleBody(original)+'|0|false');
+    const messages=[{mes:original,is_user:false}];ensureMessageIds(messages);
+    messages[0].mes=original.replace('这里','[igs-img:3]\n这里')+'\n[igs-img:4]';
+    messages[0].extra={sdCoopReports:{version:'invented-old-hash',reports:[]}};
+    let source=sourceMap(messages).get(messages[0].sd_coop_id);
+    assert.ok(matchesSourceVersion(source,oldVersion));
+    assert.equal(matchesSourceVersion(source,'invented-old-hash'),false);
+    messages[0].mes=messages[0].mes.replace('愿意','拒绝');
+    source=sourceMap(messages).get(messages[0].sd_coop_id);
+    assert.equal(matchesSourceVersion(source,oldVersion),false);
+});
+test('legacy gap cleanup can be verified while changed words stay invalid',()=>{
+    const original='序幕\n\n<故事导演自检>通过</故事导演自检>\n\n她愿意一起核对。';
+    const oldVersion=hash(legacyVisibleBody(original)+'|0|false');
+    const messages=[{sd_coop_id:'m',mes:'序幕\n\n她愿意一起核对。',is_user:false}];
+    assert.ok(matchesSourceVersion(sourceMap(messages).get('m'),oldVersion));
+    messages[0].mes='序幕\n\n她拒绝一起核对。';
+    assert.equal(matchesSourceVersion(sourceMap(messages).get('m'),oldVersion),false);
+});
+
+test('numeric IMG placeholders inside dialogue preserve current and verified legacy sources',()=>{
+    const original='<content>\n[igs-char:画家|开心|日常|谢谢你的帮助。]\n</content>\n<StatusPlaceHolderImpl/>';
+    const message={sd_coop_id:'m',is_user:false,mes:original},legacy=hash(legacyVisibleBody(original)+'|0|false');
+    const version=sourceMap([message]).get('m').version;
+    message.mes=original.replace('。]','。\n<IMG>\n4\n</IMG>\n]');
+    let source=sourceMap([message]).get('m');
+    assert.equal(source.version,version);assert.ok(matchesSourceVersion(source,legacy));
+    message.mes=message.mes.replace('4\n</IMG>','5\n</IMG>');
+    assert.equal(sourceMap([message]).get('m').version,version);
+    message.mes=message.mes.replace('谢谢你的帮助','我拒绝你的帮助');
+    source=sourceMap([message]).get('m');
+    assert.notEqual(source.version,version);assert.equal(matchesSourceVersion(source,legacy),false);
+});
+test('pre-fix v2 sources that already contained an IMG placeholder remain verifiable',()=>{
+    const body='<content>她接受帮助。\n<IMG>\n4\n</IMG>\n</content>';
+    const oldVersion='v2:'+hash(fingerprintBody(body,{keepImagePlaceholders:true})+'|0|false');
+    const message={sd_coop_id:'m',is_user:false,mes:body};
+    assert.ok(matchesSourceVersion(sourceMap([message]).get('m'),oldVersion));
+    message.mes=body.replace('接受','拒绝');
+    assert.equal(matchesSourceVersion(sourceMap([message]).get('m'),oldVersion),false);
+    assert.ok(visibleBody('<content><IMG>纸上写着真实线索</IMG></content>').includes('纸上写着真实线索'));
+});
+test('a user changing their selected image still invalidates the old interaction',()=>{
+    const message={sd_coop_id:'user',is_user:true,mes:'我选择这张图：<IMG>4</IMG>'};
+    const source=sourceMap([message]).get('user'),oldLegacy=hash(legacyVisibleBody(message.mes)+'|0|true');
+    message.mes='我选择这张图：<IMG>5</IMG>';
+    const changed=sourceMap([message]).get('user');
+    assert.notEqual(changed.version,source.version);
+    assert.equal(matchesSourceVersion(changed,source.version),false);
+    assert.equal(matchesSourceVersion(changed,oldLegacy),false);
+});
+
+const instructions=[
+    '<!--AIA_VISIBLE_START-->\n> **[System Note]**\n> 对话使用角色标签。\n<!--AIA_VISIBLE_END-->',
+    '<!--[System Note]\n对话使用角色标签。-->',
+];
+for(const note of instructions) test('automatic instruction cleanup preserves user sources and excludes instruction evidence, '+note.slice(0,25),()=>{
+    const body='<本轮用户输入>\n我愿意帮你核对资料。\n\n'+note+'\n</本轮用户输入>\n<recall>旧记忆索引</recall>';
+    const clean=body.replace(note,''),legacy='v2:'+hash(fingerprintBody(body,{keepInstructions:true})+'|0|true');
+    const message={sd_coop_id:'user',is_user:true,mes:body};
+    const version=sourceMap([message]).get('user').version;
+    assert.equal(hasEvidence(body,'对话使用角色标签'),false);
+    message.mes=clean;
+    const messages=[message,{sd_coop_id:'next',is_user:true,mes:'下一轮\n\n'+note}];
+    const source=sourceMap(messages).get('user');
+    assert.equal(source.version,version);
+    assert.ok(matchesSourceVersion(source,legacy),'an observed instruction block reconstructs the exact old hash');
+    message.extra={sdCoopSnapshot:{userVersion:'v2:invented'}};
+    assert.equal(matchesSourceVersion(sourceMap(messages).get('user'),'v2:invented'),false);
+    message.mes=clean.replace('愿意帮你','拒绝帮你');
+    assert.equal(matchesSourceVersion(sourceMap(messages).get('user'),legacy),false);
+});
+test('newly observed instruction blocks invalidate the compatibility cache without trusting missing blocks',()=>{
+    const note=instructions[0],body='我愿意帮你核对资料。',raw=body+'\n\n'+note;
+    const old='v2:'+hash(fingerprintBody(raw,{keepInstructions:true})+'|0|true');
+    const messages=[{sd_coop_id:'user',is_user:true,mes:body}];
+    assert.equal(matchesSourceVersion(sourceMap(messages).get('user'),old),false);
+    messages.push({sd_coop_id:'next',is_user:true,mes:'下一轮\n\n'+note});
+    assert.equal(matchesSourceVersion(sourceMap(messages).get('user'),old),true);
+});
