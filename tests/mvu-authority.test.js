@@ -27,6 +27,7 @@ async function fixture(t,{initial=5,name='画家',authority=true,rankCount=4,ext
     const row=(index=messages.length-1)=>messages[index].variables[0].stat_data.故事导演.Coop.角色[name];
     const write=(value,locked)=>{Object.assign(row(),{好感度:value,好感锁定:locked});runtime.store.reconcile();};
     async function turn({value,locked,user='我愿意帮你核对资料。',body='她放心地交给你资料。',event=null}={}) {
+        if(event?.completion && !event.completion.scene) event.completion.scene={goalAchieved:true,closed:true,awaitingUser:false,blockingConflicts:[],evidence:event.completion.outcomeEvidence};
         const old=clone(messages.findLast(message=>message.variables)?.variables[0]);
         messages.push({is_user:true,mes:user});await runtime.prepare();
         const snapshot=runtime.snapshot;
@@ -75,7 +76,8 @@ async function autoArchiveFixture(t,rankCount=4) {
     const result={ready:true,evidence:'核对资料',completion:{
         summary:'她说明画册和导师要求之间的矛盾，用户愿意共同核对资料。她接受有限帮助，保留自己的判断，展览问题仍待后续处理。',
         outcome:'核对资料并接受帮助',outcomeEvidence:'接受有限帮助',choice:'愿意帮助核对',choiceEvidence:'愿意帮你',
-        traits:['接受有限帮助'],facts:[],boundaries:[],openHooks:['展览'],closedHooks:[]}};
+        traits:['接受有限帮助'],facts:[],boundaries:[],openHooks:['展览'],closedHooks:[],
+        scene:{goalAchieved:true,closed:true,awaitingUser:false,blockingConflicts:[],evidence:'接受有限帮助'}}};
     let calls=0;h.host.autoAllowed=()=>true;h.host.ask=async()=>{calls++;return JSON.stringify(result);};
     return {...h,result,affinity,calls:()=>calls};
 }

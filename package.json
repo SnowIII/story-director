@@ -1,6 +1,6 @@
 {
   "name": "story-director",
-  "version": "0.41.1",
+  "version": "0.41.6",
   "private": true,
   "type": "module",
   "scripts": {
