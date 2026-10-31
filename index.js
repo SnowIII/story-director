@@ -61,7 +61,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.41.5';
+const VERSION = '0.41.6';
 let coop = null;
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
@@ -2251,7 +2251,7 @@ async function collectContextBlocks(task = 'chapter', taskOpts = {}) {
     //     按层发），单一来源，不必靠世界书转发。
     try {
         const ours = await readOurWorldbookEntries();
-        const plot = ours.filter((entry) => !/\[mvu_update\]|\[InitVar\]|\[coop_(?:design|rank_)/i.test(String(entry?.comment ?? entry?.name ?? '')));
+        const plot = ours.filter((entry) => !/\[mvu_update\]|\[InitVar\]|\[coop_(?:design|forms|rank_)/i.test(String(entry?.comment ?? entry?.name ?? '')));
         const digest = worldbookDigest(plot);
         if (digest) blocks.push(`=== 本插件自带世界书「${PLUGIN_WORLD}」里面向剧情的条目 ===\n${capText(digest, 24000)}`);
     } catch (error) {

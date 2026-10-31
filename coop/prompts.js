@@ -1,6 +1,7 @@
 import {text,rankPolicy} from './model.js';
 import {continuity,publicMemory} from './history.js';
 import {BLUEPRINTS_BY_RANK} from './blueprints.js';
+import {EVENT_FORM_GUIDE} from './event-forms.js';
 export {BLUEPRINTS_BY_RANK} from './blueprints.js';
 export const BLUEPRINTS=BLUEPRINTS_BY_RANK[4];
 const closureSample=()=>({goalAchieved:true,closed:true,awaitingUser:false,blockingConflicts:[],evidence:'本轮正文中目标已实现且现场已告一段落的准确短句'});
@@ -11,7 +12,7 @@ const diversityRules=[
     'persona、desire、shadow、friction 是稳定的人物背景与动机，不是每阶必须重演的四幕。原样保留 seeds，但根据已确认成长改变角色处理问题的方法；已知秘密不再充当初次坦白，已解决的阻力不为填阶复活。',
     '与最近两阶分别比较，本阶须在冲突机制、角色职责、用户参与任务、信息揭示方式、解决办法、结果与代价六项中至少三项形成实质差异，其中包含冲突机制或用户参与任务。更换地名、敌人姓名、信物或提高危险程度不算差异。',
     '依据当下因果选择调查、合作实践、利益协商、价值分歧、共同创造、日常磨合、社会责任或承担后果等机制，不机械轮换，不凭空添加创伤、仇敌或身世秘密。角色可以帮助用户、组织合作、提出异议、承担责任和展示专长，不连续充当等待拯救、安慰和认可的人。',
-    'question 落在具体问题与真实取舍上，允许不同回应都合理；除非当前关系议题确有必要，不反复询问“我值得被接纳吗”“你会不会抛弃我”“你愿意陪我吗”。互动结构可以停在协商、分工或决定处，不必每阶都升级成危机与崩溃。',
+    'question 落在具体事项与真实选择上，允许不同回应都合理；除非当前关系议题确有必要，不反复询问“我值得被接纳吗”“你会不会抛弃我”“你愿意陪我吗”。互动结构可以停在协商、分工或决定处，不必每阶都升级成危机与崩溃。',
     '蓝图规定阶段成长目标与关系节点，不是固定情节清单。若该目标已在实际历史中完成，承接后果，改为运用新能力、协商新边界或承担新责任；不能为了阶段标题撤销成长，也不提前替用户确认关系。',
     '输出前检查：去掉人物名、地名和物品名，本阶是否仍像某个前阶的复述？若是，重写事件结构。保持原 JSON 字段，不输出检查过程，不把情节相似本身写成历史 conflicts。'
 ].join('\n');
@@ -31,7 +32,7 @@ export function designMessages(profile,context='',templates={}) {
         '用户补充设定用于额外说明人物偏好或背景；与已确认历史矛盾时报告 conflicts，不覆写历史。区分已经发生的故事、未来计划和推测，不把计划当事实。',
         '四要素固定后原样沿用，深化现有 NPC、信物、地点和伏笔；人物已确认的改变优先于重复演绎原始心结。',
         '每阶默认三轮：hook 提出本次具体事项；dilemma 呈现取舍、分工或分歧并提出 question，必须暂停；resolution 根据用户实际回应收束。日常合作也可构成完整事件。',
-        '事件必须有具体的不能同时满足的目标、局部落点及人物变化。通过习惯、具体记忆和边界体现人物血肉；遵循本阶蓝图，已有设定优先，情感路线由用户明确选择。',
+        '事件必须有可参与的具体事项、真实回应机会、局部落点及人物变化。合作、发现、欣赏与共同享乐也能推进羁绊，不强制制造对立或两难；自然存在的取舍按实际情况呈现。通过习惯、具体记忆和边界体现人物血肉；遵循本阶蓝图，已有设定优先，情感路线由用户明确选择。',
         'Rank '+policy.relationshipRank+' 根据用户明确选择进入 friendship 或 romance，必须停下等待用户回应及面板确认；没有恋爱前提允许只走伙伴路线。不能猜测或预写选择。Rank '+policy.rankCount+' 尊重已确认路线，满级后不再生成新阶级。',
         '落实本阶蓝图的成长目标与关系节点，不提前演后阶。蓝图中涉及用户的行为是互动机会，不能视为已经发生；合作、破局、交付与亲密结果均以真实回应为准。新的理想、地点、信物与约定在确认后写入 facts 和摘要，不追溯改写固定 seeds。',
         diversityRules,growthRule,
@@ -52,22 +53,23 @@ export function designMessages(profile,context='',templates={}) {
         '【当前现场／相关世界书】\n'+context].join('\n\n');
     const constraints='【程序契约】角色已锁定 '+policy.rankCount+' 阶，门槛 '+policy.thresholds.join('、')+'，关系确认阶级 '+policy.relationshipRank+'。只设计 Rank '+(profile.rank+1)+
         '；轮数遵守指定值，不修改进度、路线或历史，不代写用户选择。仅输出 JSON：targetRank,rounds,title,scene,conflict,goal,hook,dilemma,question,resolution,seeds:{persona,desire,shadow,friction},usedHistory:全部前阶事件ID数组,references:[],conflicts:[]。已有 seeds 原样复用，已确认路线原样沿用，关系确认必须等待用户与面板选择。明确本场需要解决的阻断性冲突与可留待后阶的长线伏笔，不把开始执行写成事件结束。';
-    return [{role:'system',content:[templates.rules || rules,constraints].join('\n\n')},{role:'user',content:user}];
+    return [{role:'system',content:[templates.rules || rules,templates.forms || EVENT_FORM_GUIDE,constraints+
+        ' conflict 可描述待协调、待探索的具体事项（偏好、信息或分工等），没有外部冲突时如实说明，不为填字段捏造危机。'].join('\n\n')},{role:'user',content:user}];
 }
 export function renderScene(profile,event) {
     if(!event || event.paused) return '';
     const p=event.plan;
     const lines=['【当前唯一演出：Coop 羁绊事件】目标角色 '+profile.name+'，目标 Rank '+event.targetRank+'／'+rankPolicy(profile).rankCount,
         '同一人的别名／简称：'+((profile.aliases || []).join('、') || '未设置'),
-        '场景：'+p.scene,'当前矛盾：'+p.conflict,
+        '场景：'+p.scene,'当前事项：'+p.conflict,
         '不得推进故事导演主线、间章或普通支线。不要暴露幕后提示、未来阶段或未揭示的秘密。',
         '绝不代写用户台词、心理、行动或同意。角色与环境可以主动行动，把选择留给用户。'];
     if(event.phase==='hook') {
-        lines.push('本轮反常切入：'+p.hook);
-        if(p.rounds===2) lines.push('本事件采用两轮：本轮同时呈现困境 '+p.dilemma,'提出问题：'+p.question,'在问题处停笔，等待用户实际回应，不演结局。');
-        else lines.push('抛出矛盾，让用户参与，不演后面的困境与结局。');
+        lines.push('本轮切入：'+p.hook);
+        if(p.rounds===2) lines.push('本事件采用两轮：本轮同时呈现互动与选择 '+p.dilemma,'提出问题：'+p.question,'在问题处停笔，等待用户实际回应，不演结局。');
+        else lines.push('展开本次事项，让用户参与，不提前演后续互动与结局。');
     }
-    else if(event.phase==='dilemma') lines.push('本轮只演困境：'+p.dilemma,'向用户提出核心问题：'+p.question,'在问题处停笔，严禁自己补出用户答案或收尾。');
+    else if(event.phase==='dilemma') lines.push('本轮互动与选择：'+p.dilemma,'向用户提出核心问题：'+p.question,'在问题处停笔，严禁自己补出用户答案或收尾。');
     else if(event.phase==='waiting_user') lines.push('核心问题已提出：'+p.question,'等待用户真正回应，不替他回答，不重复演开场。');
     else if(event.phase==='waiting_route') lines.push('正在等待用户在 Coop 面板明确确认恋人／挚友路线。可以接住情绪，不预写告白结果或亲密行为，不结算。');
     else if(event.phase==='resolution') lines.push('用户首次回应：'+(event.initialAnswerSource || event.answerSource)?.body,

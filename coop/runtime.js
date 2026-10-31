@@ -217,7 +217,7 @@ export class CoopRuntime {
         try {
             let context=await this.host.contextText(p);
             const rounds=existing?.progress.length?existing.plan.rounds:this.store.document.settings.eventRounds;
-            context+='\n【本事件指定轮数】'+rounds+'；2轮把切入与困境合并，3轮分别演绎。';
+            context+='\n【本事件指定轮数】'+rounds+'；2轮把切入与互动选择合并，3轮分别演绎。';
             context+='\n【共享世界事实；角色只可使用其已知信息】\n'+JSON.stringify(this.state().sharedFacts);
             if(existing) context+='\n【只重设未演部分，不改已发生事实】\n'+JSON.stringify({phase:existing.phase,
                 plan:existing.plan,progress:existing.progress,initialAnswer:existing.initialAnswerSource?.body,
