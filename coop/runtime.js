@@ -187,14 +187,22 @@ export class CoopRuntime {
         this.changed();
     }
     async configureSettings(settings) {
-        return this.store.enqueue(document=>{
+        const scope=this.store.scope,generation=this.store.generation;
+        const result=await this.store.enqueue(document=>{
+            if(settings.autoStart!==undefined) {
+                if(typeof settings.autoStart!=='boolean') fail('INVALID_SETTING','自动触发事件必须选择是或否');
+                document.settings.autoStart=settings.autoStart;
+            }
             if(settings.eventRounds!==undefined) {
                 if(![2,3].includes(settings.eventRounds)) fail('INVALID_NUMBER');
                 document.settings.eventRounds=settings.eventRounds;
             }
         });
+        if(settings.autoStart===false && this.store.scope===scope && this.store.generation===generation && this.job?.scope===scope && this.job.automatic) this.abort();
+        return result;
     }
-    async generate(characterId,{replanEventId=null}={}) {
+    async generate(characterId,{replanEventId=null,automatic=false}={}) {
+        if(automatic && this.store.document?.settings.autoStart===false) fail('AUTO_START_DISABLED','自动触发事件已关闭');
         if(this.job || this.event()) fail('SCENE_BUSY','当前 Rank 事件尚未结束或正在生成，请先继续并完成原事件');
         const owner=unfinishedEvent(this.state());
         if(owner && (owner.id!==replanEventId || owner.characterId!==characterId)) fail('SCENE_BUSY','当前 Rank 事件尚未结束，请继续原事件；其他角色的事件正在排队');
@@ -213,7 +221,7 @@ export class CoopRuntime {
         const anchor=[...this.store.sources().values()].filter(source=>!source.isSystem).at(-1);
         const createdAt=anchor?{id:anchor.id,index:anchor.index}:null;
         const contextKey=JSON.stringify(contextRefs);
-        const job={id:uuid(),characterId,controller,scope,createdAt};this.job=job;this.changed();
+        const job={id:uuid(),characterId,controller,scope,createdAt,automatic};this.job=job;this.changed();
         try {
             let context=await this.host.contextText(p);
             const rounds=existing?.progress.length?existing.plan.rounds:this.store.document.settings.eventRounds;
@@ -238,10 +246,11 @@ export class CoopRuntime {
             const refs=last?references(last):[];
             await this.store.operation(existing?'replan':'plan',characterId,
                 {eventId:existing?.id || 'event-'+uuid(),gateId:gate,plan:parsed,historySignature:historySignature(fresh),
-                    ...(!existing && createdAt?{createdAt}:{})},refs);
+                    ...(!existing && createdAt?{createdAt}:{}),...(automatic?{automatic:true}:{})},refs);
         } catch(error) {
+            if(automatic && controller.signal.aborted) error=Object.assign(new Error('自动设计已取消'),{code:'CANCELLED'});
             if(error instanceof SyntaxError) error=Object.assign(new Error('事件设计返回格式不完整，请重试'),{code:'INVALID_PLAN'});
-            if(!['CANCELLED','STALE_TASK'].includes(error.code)) this.notice(error);throw error;
+            if(!['CANCELLED','STALE_TASK','AUTO_START_DISABLED'].includes(error.code)) this.notice(error);throw error;
         }
         finally {if(this.job===job){this.job=null;this.changed();}}
     }
@@ -365,7 +374,7 @@ export class CoopRuntime {
             rankCount:p.rankCount,thresholds:clone(p.thresholds),...(mvuKeys?{mvuKey:mvuKeys.get(p.id)}:{})};});
         const current=this.event();
         if(current) snapshot.event={id:current.id,characterId:current.characterId,version:current.version,phase:current.phase};
-        snapshot.sceneCheckRequired=!current && !unfinishedEvent(this.state()) && roster.some(p=>p.history.length) && profiles.some(p=>
+        snapshot.sceneCheckRequired=this.store.document.settings.autoStart!==false && !current && !unfinishedEvent(this.state()) && roster.some(p=>p.history.length) && profiles.some(p=>
             p.mode==='coop' && p.lock && p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank] && (!this.usesMvuAffinity || p.mvuReady));
         this.snapshot=snapshot;this.snapshots.set(snapshot.nonce,snapshot);
         while(this.snapshots.size>80) this.snapshots.delete(this.snapshots.keys().next().value);
@@ -539,7 +548,7 @@ export class CoopRuntime {
         void this.maybeAutoArchive();
     }
     async maybeAuto() {
-        if(!this.store.document || this.store.readonly || this.store.pending || this.archiveCheckTask || this.occupies() || unfinishedEvent(this.state()) || !this.host.autoAllowed?.() ||
+        if(!this.store.document || this.store.document.settings.autoStart===false || this.store.readonly || this.store.pending || this.archiveCheckTask || this.occupies() || unfinishedEvent(this.state()) || !this.host.autoAllowed?.() ||
             Date.now()-this.lastAutoFailure<60000) return;
         const latestUser=[...this.store.sources().values()].filter(source=>source.isUser && !source.isSystem).at(-1);
         const closedAt=Math.max(-1,...Object.values(this.state().profiles).flatMap(profile=>profile.history).map(history=>history.source.index));
@@ -554,7 +563,9 @@ export class CoopRuntime {
         const profiles=roster.filter(p=>p.mode==='coop' && p.lock && this.host.available(p,roster) &&
             (!this.usesMvuAffinity || p.mvuReady && p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank]) &&
             !Object.values(p.events).some(e=>e.phase!=='completed')).sort((a,b)=>(a.scoreLog.at(-1)?.source.index ?? 0)-(b.scoreLog.at(-1)?.source.index ?? 0));
-        if(profiles[0]) try {await this.generate(profiles[0].id);} catch {this.lastAutoFailure=Date.now();}
+        if(profiles[0]) try {await this.generate(profiles[0].id,{automatic:true});} catch(error) {
+            if(!['CANCELLED','STALE_TASK','AUTO_START_DISABLED'].includes(error.code)) this.lastAutoFailure=Date.now();
+        }
     }
     async restore(document) {
         if(document?.scope!==this.store.scope) fail('STALE_SCOPE','只允许恢复当前聊天的档案');

@@ -52,6 +52,17 @@ test('the production host selects MVU as the affinity authority',()=>{
     assert.equal(createHost().affinityAuthority,'mvu');
 });
 
+for(const extra of [false,true]) test('manual-only events retain MVU affinity authority and threshold locks, extra='+extra,async t=>{
+    const h=await fixture(t,{initial:29,extra});await h.runtime.configureSettings({autoStart:false});
+    let calls=0;const ask=h.host.ask;h.host.ask=async(...args)=>{calls++;return ask(...args);};h.host.autoAllowed=()=>true;
+    await h.turn({value:30,locked:true});await h.runtime.maybeAuto();
+    assert.equal(h.runtime.state().profiles.a.affinity,30);assert.ok(h.runtime.state().profiles.a.lock);
+    assert.equal(h.runtime.event(),null);assert.equal(calls,0);
+    await h.turn();await h.runtime.maybeAuto();
+    assert.equal(h.row().好感度,30);assert.equal(h.row().好感锁定,true);assert.equal(calls,0);
+    await h.runtime.generate('a');assert.equal(h.runtime.event().characterId,'a');assert.equal(calls,1);
+});
+
 test('editing confirmed Coop dialogue keeps Rank and archive while deleting the floor still rolls back',async t=>{
     const h=await fixture(t,{initial:30});h.write(30,true);await h.runtime.generate('a');
     await h.turn({body:'她拿出旧画册。',event:{evidence:'旧画册'}});
@@ -81,6 +92,14 @@ async function autoArchiveFixture(t,rankCount=4) {
     let calls=0;h.host.autoAllowed=()=>true;h.host.ask=async()=>{calls++;return JSON.stringify(result);};
     return {...h,result,affinity,calls:()=>calls};
 }
+
+test('manual-only start leaves the existing event and automatic archive verification working',async t=>{
+    const h=await autoArchiveFixture(t);const id=h.runtime.event().id;
+    await h.runtime.configureSettings({autoStart:false});assert.equal(h.runtime.event().id,id);
+    await h.turn({body:'她决定核对资料，接受有限帮助。'});await h.runtime.archiveCheckTask;
+    assert.equal(h.calls(),1);assert.equal(h.runtime.state().profiles.a.rank,1);
+    assert.equal(h.runtime.event(),null);assert.equal(h.runtime.state().profiles.a.history.length,1);
+});
 
 for(const rankCount of [4,7,10]) test('automatic MVU archive uses one check and preserves values and rollback, ranks='+rankCount,async t=>{
     const h=await autoArchiveFixture(t,rankCount);

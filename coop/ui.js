@@ -75,7 +75,9 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         if(runtime.job) return '<p>'+esc(runtime.job.label || '正在设计所选角色的当前阶事件')+'……</p><button data-action="abort">中断生成</button>';
         if(!event) {
             const pending=Object.values(state.profiles).filter(p=>p.mode==='coop' && p.lock);
-            return '<p>当前没有正在演出的 Coop 事件。</p><p class="sdc-field-help">Rank 事件依次进行；暂停中的事件仍占队列。前一阶归档后，自动接续还会等待当前现场实际结束。</p>'+pending.map(card).join('');
+            return '<p>当前没有正在演出的 Coop 事件。</p>'+
+                (runtime.store.document.settings.autoStart===false?'<p class="sdc-field-help">自动触发已关闭。达到门槛后，点击角色行的“开始下一阶事件”手动触发。</p>':'')+
+                '<p class="sdc-field-help">Rank 事件依次进行；暂停中的事件仍占队列。前一阶归档后，自动接续还会等待当前现场实际结束。</p>'+pending.map(card).join('');
         }
         const p=state.profiles[event.characterId], plan=event.plan;
         return '<h3>'+esc(p.name)+' · Rank '+event.targetRank+' · '+esc(plan.title)+'</h3>'+
@@ -145,8 +147,10 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
                 invalidated:skipped,notices:runtime.notices},null,2))+'</pre></details></details>';
     }
     function settings() {
-        return '<label>新事件默认轮数<select id="sdc-rounds"><option value="3"'+(runtime.store.document.settings.eventRounds===3?' selected':'')+'>三轮：切入、困境、收束</option><option value="2"'+(runtime.store.document.settings.eventRounds===2?' selected':'')+'>两轮：切入与困境合并</option></select></label>'+
-            '<p>角色可参与、现场已结束且全局允许自动生成时，按队列开始已就绪事件。未完成或暂停中的 Rank 会阻止其他 Rank；归档当轮不立即接续。</p>'+
+        return '<label>是否自动触发事件<select id="sdc-auto-start" aria-describedby="sdc-auto-start-help"><option value="true"'+(runtime.store.document.settings.autoStart!==false?' selected':'')+'>是：自动触发已就绪事件</option><option value="false"'+(runtime.store.document.settings.autoStart===false?' selected':'')+'>否：由我手动触发</option></select></label>'+
+            '<p id="sdc-auto-start-help" class="sdc-field-help">仅对当前聊天生效。选“否”后，好感照常更新，到门槛仍会锁定；请在“管理角色”或“当前事件”中点击“开始下一阶事件”。已开始的事件会继续演出和归档。</p>'+
+            '<label>新事件默认轮数<select id="sdc-rounds"><option value="3"'+(runtime.store.document.settings.eventRounds===3?' selected':'')+'>三轮：切入、困境、收束</option><option value="2"'+(runtime.store.document.settings.eventRounds===2?' selected':'')+'>两轮：切入与困境合并</option></select></label>'+
+            '<p>选“是”且角色可参与、现场已结束、全局允许自动生成时，按队列开始已就绪事件。未完成或暂停中的 Rank 会阻止其他 Rank；归档当轮不立即接续。</p>'+
             '<p>MVU 同步：'+esc(bindingCapability(runtime.host.mvu?.()).reason)+'</p>'+
             '<p>'+esc(runtime.syncMvu.status)+' <button type="button" data-action="sync-mvu">'+(runtime.usesMvuAffinity?'刷新 MVU 状态':'立即同步 MVU')+'</button></p>'+
             (runtime.syncMvu.error?'<p role="status">MVU 同步暂未完成：'+esc(runtime.syncMvu.error.message)+'</p>':'')+
@@ -168,7 +172,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
                 (runtime.store.pending?'<p class="sdc-warning">归档待保存。'+(runtime.store.error?esc(runtime.store.error.message)+' <button data-action="retry">重试保存</button>':'正在等待服务器确认……')+'</p>':'')+
                 (runtime.currentNotice?'<p role="status">'+esc(runtime.currentNotice.message)+' <button data-action="dismiss">关闭提示</button></p>':'')+
                 ({roles:roles,event:eventPage,archive:archive,settings:settings}[tab])(state))+'</div>';
-        if(runtime.store.readonly || runtime.store.pending) panel.querySelectorAll('form button,form input,form textarea,form select,[data-action="start"],[data-action="resume"],[data-action="route"],[data-action="archive"],[data-action="delete"],[data-action="import"],#sdc-import').forEach(node=>{node.disabled=true;});
+        if(runtime.store.readonly || runtime.store.pending) panel.querySelectorAll('form button,form input,form textarea,form select,[data-action="start"],[data-action="resume"],[data-action="route"],[data-action="archive"],[data-action="delete"],[data-action="import"],#sdc-import,#sdc-auto-start,#sdc-rounds').forEach(node=>{node.disabled=true;});
     }
     panel.addEventListener('click',event=> {
         const button=event.target.closest('button');if(!button) return;
@@ -204,6 +208,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
             if(preview) preview.textContent='门槛：'+rankPolicy(Number(node.value)).thresholds.join(' → ');
         }
         if(node.id==='sdc-history-role'){chosen=node.value;render();}
+        if(node.id==='sdc-auto-start') run(()=>runtime.configureSettings({autoStart:node.value==='true'}));
         if(node.id==='sdc-rounds') run(()=>runtime.configureSettings({eventRounds:Number(node.value)}));
         if(node.id==='sdc-import' && node.files?.[0]) run(async()=>{
             const data=safeJson(await node.files[0].text(),8*1024*1024);

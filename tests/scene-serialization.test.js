@@ -99,6 +99,17 @@ test('a legacy early archive cannot start another Rank while its actual scene is
     assert.equal(h.runtime.event()?.characterId,'b');assert.equal(h.calls(),2);
 });
 
+test('manual-only mode does not request queue clearance or automatically continue to another character',async t=>{
+    const h=await fixture(t);await h.start();
+    await h.turn('两人核对完毕，误会澄清，离开画室。',{ready:true,completion:completion()});
+    await h.runtime.configureSettings({autoStart:false});h.auto(true);
+    await h.turn('第二天她们在街上打招呼。',null,'第二天我去看看另一位画家。');
+    assert.equal(h.runtime.snapshot.sceneCheckRequired,false);assert.equal(h.runtime.event(),null);assert.equal(h.calls(),1);
+    await h.runtime.configureSettings({autoStart:true});
+    await h.turn('两人在安全的街边聊起画作。',null,'我继续和她聊天。');
+    assert.equal(h.runtime.snapshot.sceneCheckRequired,true);assert.equal(h.runtime.event()?.characterId,'b');assert.equal(h.calls(),2);
+});
+
 test('a failed archive save keeps the original scene and queue until confirmation',async t=>{
     const h=await fixture(t);await h.start();const persist=h.host.persist;
     h.host.persist=async document=>{if(document.journal.at(-1)?.data?.phase==='resolution') throw new Error('offline');await persist(document);};h.auto(true);

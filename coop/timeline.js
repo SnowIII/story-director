@@ -13,7 +13,7 @@ export function readDocument(raw,scope) {
         thresholds(config.thresholds,rankPolicy(config).rankCount);
     }
     document.scope=scope;
-    document.settings={eventRounds:3,...document.settings,autoStart:true};
+    document.settings={eventRounds:3,...document.settings,autoStart:document.settings?.autoStart!==false};
     return document;
 }
 export function validRefs(refs,sources) {
@@ -144,6 +144,7 @@ export function project(document,sources) {
 export function appendOperation(document,state,op,sources) {
     if(document.journal.some(x=>x.id===op.id)) fail('ALREADY_COMMITTED');
     if(!validRefs(op.refs,sources)) fail('STALE_SOURCE');
+    if(op.kind==='plan' && op.data.automatic && document.settings.autoStart===false) fail('AUTO_START_DISABLED','自动触发事件已关闭');
     const candidate=clone(state);
     applyOperation(candidate,op);assertState(candidate);
     const durable=clone(op);
