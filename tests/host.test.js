@@ -88,10 +88,10 @@ test('MVU wrapped report retains nonce and protected binding stays disabled',()=
 });
 function generationSandbox() {
     const source=fs.readFileSync(new URL('../index.js',import.meta.url),'utf8');
-    const begin=source.slice(source.indexOf('function beginGenerate('),source.indexOf('/**\n * 用户点了「中断」'));
+    const begin=source.slice(source.indexOf('function generationBlockReason('),source.indexOf('/**\n * 用户点了「中断」'));
     const abort=source.slice(source.indexOf('function abortGenerate()'),source.indexOf('/**\n * ★ 0.27.13',source.indexOf('function abortGenerate()')));
     const abortFunction=abort.slice(0,abort.indexOf('\n\n\n/**'));
-    const context=vm.createContext({setInterval:()=>1,clearInterval:()=>{},console,Date,AbortController});
+    const context=vm.createContext({setInterval:()=>1,clearInterval:()=>{},console,Date,AbortController,esc:String});
     vm.runInContext("let coop=null; let storyGenerating=false, storyGeneratingSince=0, genId=0, genAborted=false, genLabel='', genStartedAt=0, genChars=0, genTicker=null, genCtl=null, genAbortedAt=0; const GENERATE_WATCHDOG=240000; function renderBusyBar(){} function toast(){};\n"+begin+'\n'+abortFunction,context);
     return context;
 }
