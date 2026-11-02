@@ -79,7 +79,7 @@ test('automatic upgrades preserve enabled and disabled switches from either worl
 });
 test('Coop design templates stay disabled in ordinary chat and the MVU contract requests no event payload',()=>{
     const entries=Object.values(bundled.entries),templates=entries.filter(entry=>/\[coop_/.test(entry.comment));
-    assert.equal(templates.length,4);assert.ok(templates.every(entry=>entry.disable && !entry.constant));
+    assert.equal(templates.length,5);assert.ok(templates.every(entry=>entry.disable && !entry.constant));
     assert.ok(bundled.entries[0].content.includes('不写入 MVU'));
     assert.ok(!bundled.entries[0].content.includes('阶段进度和归档写入 故事导演.Coop.回报'));
 });

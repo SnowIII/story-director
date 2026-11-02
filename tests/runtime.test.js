@@ -22,6 +22,7 @@ async function setup(t,{extra=false,save=null,locks=null}={}) {
     t.after(()=>runtime.dispose());
     const configure=(mode='coop',initialAffinity=29)=>runtime.configure({id:'a',name:'画家',description:'有自己的画室',mode,initialAffinity});
     async function reply(body,proposal={}) {
+        if(proposal.event?.completion && !proposal.event.completion.scene) proposal.event.completion.scene=sceneClosed(proposal.event.completion.outcomeEvidence);
         const snapshot=runtime.snapshot;
         const report={nonce:snapshot.nonce,affinity:[],...proposal};
         const variables='<UpdateVariable><JSONPatch>'+JSON.stringify([{op:'add',path:'/故事导演/Coop/回报',value:report}])+'</JSONPatch></UpdateVariable>';
@@ -39,6 +40,7 @@ async function setup(t,{extra=false,save=null,locks=null}={}) {
     const score=delta=>({affinity:[{characterId:'a',delta,reason:'实际支持',userEvidence:'帮你',evidence:'放松'}]});
     return {runtime,host,messages,meta,persisted,configure,send,reply,score,setScope:value=>{scope=value;}};
 }
+const sceneClosed=evidence=>({goalAchieved:true,closed:true,awaitingUser:false,blockingConflicts:[],evidence});
 async function unlockAndStart(h) {
     await h.configure();await h.send('我来帮你。','她放松了。',h.score(1));
     await h.runtime.generate('a');
@@ -234,7 +236,7 @@ test('missing archive report can be recovered from existing resolution without r
         calls++;return JSON.stringify({ready:true,evidence:'核对资料',completion:{
             summary:'她谈清了画册与导师要求之间的困扰，用户愿意共同核对资料。她接受有限帮助，并保留对创作的判断，展览问题留待后续处理。',
             outcome:'核对资料并接受帮助',outcomeEvidence:'接受有限帮助',choice:'愿意核对资料',choiceEvidence:'愿意帮你',
-            traits:['紧张时整理画册'],facts:['她愿意接受有限帮助'],boundaries:[],openHooks:['展览'],closedHooks:[]}});};
+            traits:['紧张时整理画册'],facts:['她愿意接受有限帮助'],boundaries:[],openHooks:['展览'],closedHooks:[],scene:sceneClosed('接受有限帮助')}});};
     const count=h.messages.length;await h.runtime.recoverArchive();
     assert.equal(calls,1);assert.equal(h.messages.length,count);assert.equal(h.runtime.state().profiles.a.rank,1);
 });
@@ -250,7 +252,7 @@ function archiveResult() {
     return {ready:true,evidence:'核对资料',completion:{
         summary:'她谈清画册与导师要求之间的困扰，用户愿意共同核对资料。她接受有限帮助，保留自己的判断，展览问题留待后续处理。',
         outcome:'核对资料并接受帮助',outcomeEvidence:'接受有限帮助',choice:'愿意核对资料',choiceEvidence:'愿意帮你',
-        traits:['接受有限帮助'],facts:[],boundaries:[],openHooks:['展览'],closedHooks:[]}};
+        traits:['接受有限帮助'],facts:[],boundaries:[],openHooks:['展览'],closedHooks:[],scene:sceneClosed('接受有限帮助')}};
 }
 async function archiveSetup(t,{extra=false}={}) {
     const h=await setup(t,{extra});await unlockAndStart(h);await progressToResolution(h);
@@ -457,7 +459,7 @@ test('consecutive resolution inputs retain the first answer in prompts and archi
         return JSON.stringify({ready:true,evidence:'核对资料',completion:{
             summary:'用户愿意共同核对画册资料，随后请她坐下慢慢来。她接受有限帮助，并保留自己的判断，展览问题留待后续处理。',
             outcome:'核对资料并接受帮助',outcomeEvidence:'接受有限帮助',choice:'愿意核对资料',choiceEvidence:'愿意帮你',
-            traits:['接受有限帮助'],facts:[],boundaries:[],openHooks:[],closedHooks:[]}});
+            traits:['接受有限帮助'],facts:[],boundaries:[],openHooks:[],closedHooks:[],scene:sceneClosed('接受有限帮助')}});
     };
     await h.runtime.recoverArchive();
     assert.ok(request[1].content.includes('我愿意帮你核对资料。'));
@@ -640,12 +642,12 @@ test('re-enrolling a deleted identity rejects old reports and only accepts new i
     assert.equal(h.runtime.state().profiles.a.affinity,1);
 });
 
-test('automatic events are enabled for new and legacy chats while honoring generation and availability gates',async t=>{
+test('automatic events default on for new and legacy chats while honoring generation and availability gates',async t=>{
     const h=await setup(t);assert.equal(h.runtime.store.document.settings.autoStart,true);
     await h.configure('coop',30);
-    h.meta[STORAGE_KEY].settings.autoStart=false;await h.runtime.load();
+    delete h.meta[STORAGE_KEY].settings.autoStart;await h.runtime.load();
     assert.equal(h.runtime.store.document.settings.autoStart,true);
-    await h.runtime.configureSettings({autoStart:false,eventRounds:2});
+    await h.runtime.configureSettings({eventRounds:2});
     assert.equal(h.runtime.store.document.settings.autoStart,true);assert.equal(h.runtime.store.document.settings.eventRounds,2);
     await h.runtime.maybeAuto();assert.equal(h.runtime.event(),null);
     h.host.autoAllowed=()=>true;h.host.available=()=>false;
@@ -655,4 +657,85 @@ test('automatic events are enabled for new and legacy chats while honoring gener
     h.runtime.store.readonly=false;await h.runtime.maybeAuto();
     assert.ok(h.runtime.event());const eventId=h.runtime.event().id;
     await h.runtime.maybeAuto();assert.equal(h.runtime.event().id,eventId);
+});
+
+for(const extra of [false,true]) test('manual-only events still score, lock, start and resume, extra='+extra,async t=>{
+    const h=await setup(t,{extra});await h.runtime.configureSettings({autoStart:false});await h.configure();
+    let calls=0;h.host.autoAllowed=()=>true;h.host.ask=async()=>{calls++;return JSON.stringify(eventPlan(h.runtime.state().profiles.a));};
+    await h.send('我来帮你。','她放松了。',h.score(1));
+    assert.equal(h.runtime.state().profiles.a.affinity,30);assert.ok(h.runtime.state().profiles.a.lock);
+    await h.send('我继续帮你。','她放松了。',h.score(5));
+    assert.equal(h.runtime.state().profiles.a.affinity,30);assert.equal(h.runtime.event(),null);assert.equal(calls,0);
+    await h.runtime.generate('a');const id=h.runtime.event().id;assert.equal(calls,1);
+    await h.runtime.pause('a',id);await h.runtime.maybeAuto();assert.equal(h.runtime.event(),null);assert.equal(calls,1);
+    await h.runtime.resume('a',id);await h.runtime.configureSettings({autoStart:true});await h.runtime.configureSettings({autoStart:false});
+    assert.equal(h.runtime.event().id,id);assert.ok(h.runtime.state().profiles.a.lock);
+});
+
+test('the automatic event choice survives reload, export/restore and switching chats',async t=>{
+    const h=await setup(t);await h.runtime.configureSettings({autoStart:false,eventRounds:2});
+    const archive=JSON.parse(h.runtime.export());await h.runtime.load();
+    assert.equal(h.runtime.store.document.settings.autoStart,false);
+    await h.runtime.configureSettings({autoStart:true});await h.runtime.restore(archive);
+    assert.equal(h.runtime.store.document.settings.autoStart,false);
+    const chatA=clone(h.meta[STORAGE_KEY]);h.setScope('chat-b');delete h.meta[STORAGE_KEY];await h.runtime.load();
+    assert.equal(h.runtime.store.document.settings.autoStart,true);
+    h.setScope('test-scope');h.meta[STORAGE_KEY]=chatA;await h.runtime.load();
+    assert.equal(h.runtime.store.document.settings.autoStart,false);assert.equal(h.runtime.store.document.settings.eventRounds,2);
+});
+
+test('invalid automatic event settings are rejected without saving other changes',async t=>{
+    const h=await setup(t),before=clone(h.runtime.store.document),writes=h.persisted.length;
+    for(const value of [null,0,'false']) await assert.rejects(h.runtime.configureSettings({autoStart:value,eventRounds:2}),{code:'INVALID_SETTING'});
+    assert.deepEqual(h.runtime.store.document,before);assert.equal(h.persisted.length,writes);
+});
+
+test('a failed automatic event setting save waits for retry and stays manual after reload',async t=>{
+    let offline=false;const h=await setup(t,{save:async()=>{if(offline)throw new Error('offline');}});
+    await h.configure('coop',30);h.host.autoAllowed=()=>true;let calls=0;h.host.ask=async()=>{calls++;};
+    offline=true;await assert.rejects(h.runtime.configureSettings({autoStart:false}),/offline/);
+    assert.equal(h.runtime.store.document.settings.autoStart,true);assert.equal(h.runtime.store.pending.settings.autoStart,false);
+    await h.runtime.maybeAuto();assert.equal(calls,0);
+    offline=false;await h.runtime.store.retrySave();await h.runtime.load();await h.runtime.maybeAuto();
+    assert.equal(h.runtime.store.document.settings.autoStart,false);assert.equal(calls,0);
+});
+
+for(const queued of [false,true]) test('turning automatic events off rejects a late automatic plan without a retry cooldown, queued='+queued,async t=>{
+    let holdSave=false,finishSave;
+    const h=await setup(t,{save:async doc=>{if(holdSave && doc.settings.autoStart===false)await new Promise(resolve=>{finishSave=resolve;});}});
+    await h.configure('coop',30);h.host.autoAllowed=()=>true;
+    let finishPlan;h.host.ask=()=>new Promise(resolve=>{finishPlan=resolve;});
+    const planning=h.runtime.maybeAuto();await new Promise(resolve=>setImmediate(resolve));
+    assert.ok(h.runtime.job);holdSave=queued;
+    const disabling=h.runtime.configureSettings({autoStart:false});await new Promise(resolve=>setImmediate(resolve));
+    if(queued){finishPlan(JSON.stringify(eventPlan(h.runtime.state().profiles.a)));await new Promise(resolve=>setImmediate(resolve));finishSave();}
+    await disabling;
+    if(!queued)finishPlan(JSON.stringify(eventPlan(h.runtime.state().profiles.a)));
+    await planning;assert.equal(h.runtime.event(),null);assert.equal(h.runtime.lastAutoFailure,0);
+    assert.ok(h.runtime.state().profiles.a.lock);assert.equal(h.runtime.currentNotice,null);
+    await h.runtime.configureSettings({autoStart:true});h.host.ask=async()=>JSON.stringify(eventPlan(h.runtime.state().profiles.a));
+    await h.runtime.maybeAuto();assert.ok(h.runtime.event());
+});
+
+test('turning automatic events off preserves an explicitly requested design in progress',async t=>{
+    const h=await setup(t);await h.configure('coop',30);let finish;
+    h.host.ask=()=>new Promise(resolve=>{finish=resolve;});
+    const planning=h.runtime.generate('a');await new Promise(resolve=>setImmediate(resolve));
+    await h.runtime.configureSettings({autoStart:false});assert.ok(h.runtime.job);
+    finish(JSON.stringify(eventPlan(h.runtime.state().profiles.a)));await planning;
+    assert.equal(h.runtime.event().characterId,'a');assert.equal(h.runtime.store.document.settings.autoStart,false);
+});
+
+test('a delayed setting save cannot cancel an automatic design in a different chat',async t=>{
+    let finishSave;const h=await setup(t,{save:async doc=>{
+        if(doc.scope==='test-scope' && doc.settings.autoStart===false)await new Promise(resolve=>{finishSave=resolve;});
+    }});
+    await h.configure('coop',30);const otherChat=clone(h.meta[STORAGE_KEY]);otherChat.scope='chat-b';
+    const disabling=h.runtime.configureSettings({autoStart:false});await new Promise(resolve=>setImmediate(resolve));
+    h.setScope('chat-b');h.meta[STORAGE_KEY]=otherChat;await h.runtime.load();
+    h.host.autoAllowed=()=>true;let finishPlan;h.host.ask=()=>new Promise(resolve=>{finishPlan=resolve;});
+    const planning=h.runtime.maybeAuto();await new Promise(resolve=>setImmediate(resolve));const job=h.runtime.job;
+    finishSave();await disabling;assert.equal(h.runtime.job,job);
+    finishPlan(JSON.stringify(eventPlan(h.runtime.state().profiles.a)));await planning;
+    assert.equal(h.runtime.event().characterId,'a');assert.equal(h.runtime.store.document.settings.autoStart,true);
 });

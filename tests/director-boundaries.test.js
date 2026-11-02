@@ -30,7 +30,8 @@ function fixture() {
         saveSettingsDebounced:noop,saveChatDebounced:noop,updateMessageBlock:noop,
         setExtensionPrompt:noop,extension_prompt_types:{IN_CHAT:1},extension_prompt_roles:{SYSTEM:0},
         event_types:{},eventSource:{on:(name,fn)=>events.set(name,fn),removeListener:name=>events.delete(name)},
-        document:{querySelector:()=>null,getElementById:()=>null},
+        document:{querySelector:()=>null,getElementById:()=>null,createElement:()=>({textContent:'',
+            get innerHTML(){return this.textContent.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');}})},
         setInterval:()=>1,clearInterval:noop,setTimeout:()=>1,clearTimeout:noop,
         window:{SillyTavern:{getContext:()=>host},Mvu:api,
             StoryOracleAPI:{run:async()=>'<StoryChapters>旧结果</StoryChapters>'},
@@ -43,6 +44,75 @@ function fixture() {
         settings().story.间章=emptyInterlude();`);
     return {host,c,run,seed,currentData};
 }
+
+function generationFixture() {
+    const f=fixture(),notices=[];let requests=0;
+    f.c.window.toastr=Object.fromEntries(['info','warning','error','success'].map(type=>[type,message=>notices.push({type,message})]));
+    f.c.window.StoryOracleAPI.run=async()=>{requests++;return '<StoryChapters>旧结果</StoryChapters>';};
+    return {...f,notices,requests:()=>requests};
+}
+
+for(const kind of ['event','coop-job','story-job']) test('force-open explains '+kind+' without recording a failed chapter or resetting progress',async()=>{
+    const f=generationFixture();f.seed();
+    f.run("settings().run.closedChapter='保留收尾状态';settings().run.lastGenerateAt=51;");
+    if(kind==='event') f.run("coop={occupies:()=>true,event:()=>({characterId:'sig',targetRank:2}),state:()=>({profiles:{sig:{name:'希格露恩·血牙'}}})}");
+    if(kind==='coop-job') f.run("coop={occupies:()=>true,event:()=>null,job:{label:'核对事件归档'}}");
+    if(kind==='story-job') f.run("storyGenerating=true;storyGeneratingSince=Date.now();genLabel='篇章检查'");
+    const before=f.run('JSON.stringify({story:settings().story,run:settings().run})');
+    const attempt=f.run('JSON.stringify(lastAttempt)');
+    await f.run('forceOpenStory()');
+    assert.equal(f.requests(),0);assert.equal(f.run('JSON.stringify(lastAttempt)'),attempt);
+    assert.equal(f.run('JSON.stringify({story:settings().story,run:settings().run})'),before);
+    assert.equal(f.notices.length,1);assert.equal(f.notices[0].type,'info');
+    if(kind==='event') {assert.match(f.notices[0].message,/希格露恩·血牙.*Rank 2/);assert.match(f.notices[0].message,/暂停演出/);}
+    if(kind==='coop-job') {assert.match(f.notices[0].message,/核对事件归档/);assert.match(f.notices[0].message,/中断生成/);}
+    if(kind==='story-job') {assert.match(f.notices[0].message,/篇章检查/);assert.match(f.notices[0].message,/等待|中断/);}
+});
+
+for(const action of ['generateChapter','generateEpic','generateThread','generateInterlude','generateInterludeChapter']) test('manual '+action+' explains a Coop block and automatic checks stay quiet',async()=>{
+    const f=generationFixture();f.seed();
+    f.run("coop={occupies:()=>true,event:()=>({characterId:'sig',targetRank:2}),state:()=>({profiles:{sig:{name:'画家'}}})}");
+    await f.run(action+'({quiet:true,force:true})');assert.equal(f.notices.length,0);
+    await f.run(action+'({quiet:false,force:true})');
+    assert.equal(f.requests(),0);assert.equal(f.notices.length,1);assert.equal(f.notices[0].type,'info');
+    assert.match(f.notices[0].message,/画家.*Rank 2/);assert.match(f.notices[0].message,/暂停演出/);
+});
+
+for(const transient of [false,true]) test('a '+(transient?'transient ':'')+'Coop block after the epic request does not become a generic chapter failure',async()=>{
+    const f=generationFixture();
+    f.run(`generateEpic=async()=>{coop={occupies:()=>${transient?'(queueMicrotask(()=>{coop=null}),true)':'true'},event:()=>({characterId:'sig',targetRank:2}),state:()=>({profiles:{sig:{name:'画家'}}})};return true}`);
+    const attempt=f.run('JSON.stringify(lastAttempt)');
+    await f.run('forceOpenStory()');
+    assert.equal(f.requests(),0);assert.equal(f.run('JSON.stringify(lastAttempt)'),attempt);
+    assert.ok(f.notices.some(n=>/画家.*Rank 2/.test(n.message)));
+    assert.ok(f.notices.every(n=>n.type!=='error'));
+});
+
+test('Coop block hints escape character names and keep Coop model calls available',()=>{
+    const f=generationFixture();
+    f.run("coop={occupies:()=>true,event:()=>({characterId:'sig',targetRank:2}),state:()=>({profiles:{sig:{name:'<b>画家</b>'}}})}");
+    assert.equal(f.run("beginGenerate('下一章',{quiet:false})"),false);
+    assert.match(f.notices[0].message,/&lt;b&gt;画家&lt;\/b&gt;/);assert.ok(!f.notices[0].message.includes('<b>'));
+    assert.ok(f.run("beginGenerate('Coop 羁绊事件')")>0);f.run('endGenerate(genId)');
+});
+
+test('the blocked-generation hint preserves watchdog recovery for an expired task',()=>{
+    const f=generationFixture();
+    f.run("storyGenerating=true;storyGeneratingSince=Date.now()-GENERATE_WATCHDOG-1;genLabel='旧任务'");
+    assert.ok(f.run("beginGenerate('下一章',{quiet:false})")>0);
+    assert.equal(f.notices.length,0);f.run('endGenerate(genId)');
+});
+
+for(const kind of ['transport','format']) test('real '+kind+' failure keeps its details without promising a nonexistent response',async()=>{
+    const f=generationFixture();f.seed();
+    f.run(kind==='transport'?"askOracle=async()=>{throw new Error('HTTP 502')}":"askOracle=async()=> '模型这次没有按章节格式输出'");
+    await f.run('forceOpenStory()');
+    assert.equal(f.run('lastAttempt.key'),'fail');
+    assert.ok(f.notices.some(n=>n.type==='error'||n.type==='warning'));
+    assert.ok(f.notices.every(n=>!n.message.includes('控制台里有 [故事导演] 的原始回复')));
+    if(kind==='transport') assert.equal(f.run('settings().run.lastRawReply'),null);
+    else assert.equal(f.run('settings().run.lastRawReply.tag'),'StoryChapters');
+});
 
 test('different character cards with the same chat filename retain separate plans',()=>{
     const f=fixture();f.host.name='same-name';

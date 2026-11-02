@@ -61,7 +61,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.41.3';
+const VERSION = '0.41.9';
 let coop = null;
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
@@ -1663,7 +1663,8 @@ async function installBundledWorldbook({ notify = true, mount = null, ifMissing 
             return 'no-version';
         }
         try {
-            preserveDesignTemplates(data0, await readOurWorldbookEntries());
+            const previous = await loadWorldInfo(PLUGIN_WORLD);
+            preserveDesignTemplates(data0, Object.values(previous?.entries || {}));
             await saveWorldInfo(PLUGIN_WORLD, data0, true);
         } catch (error) {
             console.debug('[故事导演] 更新自带世界书失败', error);
@@ -2250,7 +2251,7 @@ async function collectContextBlocks(task = 'chapter', taskOpts = {}) {
     //     按层发），单一来源，不必靠世界书转发。
     try {
         const ours = await readOurWorldbookEntries();
-        const plot = ours.filter((entry) => !/\[mvu_update\]|\[InitVar\]|\[coop_(?:design|rank_)/i.test(String(entry?.comment ?? entry?.name ?? '')));
+        const plot = ours.filter((entry) => !/\[mvu_update\]|\[InitVar\]|\[coop_(?:design|forms|rank_)/i.test(String(entry?.comment ?? entry?.name ?? '')));
         const digest = worldbookDigest(plot);
         if (digest) blocks.push(`=== 本插件自带世界书「${PLUGIN_WORLD}」里面向剧情的条目 ===\n${capText(digest, 24000)}`);
     } catch (error) {
@@ -3406,9 +3407,29 @@ function justAborted(ms = 10000) {
     return genAborted && genAbortedAt > 0 && Date.now() - genAbortedAt < ms;
 }
 
+/** 正常等待不算生成失败；手动操作需要说明具体占用者，自动检查保持安静。 */
+function generationBlockReason(label = '剧情') {
+    if (coop?.occupies() && !String(label).startsWith('Coop')) {
+        const event = coop.event?.();
+        if (event) {
+            const name = coop.state?.()?.profiles?.[event.characterId]?.name || '当前角色';
+            return `${esc(name)} 的 Rank ${event.targetRank} Coop 事件正在进行。请到“Coop → 当前事件”完成事件，或点击“暂停演出”后再试。`;
+        }
+        return `Coop 正在${esc(coop.job?.label || '设计事件')}。请等待完成，或到“Coop → 当前事件”点击“中断生成”后再试。`;
+    }
+    if (storyGenerating && !(storyGeneratingSince && Date.now() - storyGeneratingSince > GENERATE_WATCHDOG)) {
+        return `故事导演正在生成：${esc(genLabel || '剧情')}。请等待完成，或点击“中断生成”后再试。`;
+    }
+    return '';
+}
+
 /** 开始一次生成：顺带做看门狗检查（超时就当上一次已经死了）。 */
-function beginGenerate(label = '剧情') {
-    if (coop?.occupies() && !String(label).startsWith('Coop')) return false;
+function beginGenerate(label = '剧情', { quiet = true } = {}) {
+    const blocked = generationBlockReason(label);
+    if (blocked) {
+        if (!quiet) toast(blocked, 'info');
+        return false;
+    }
     if (storyGenerating) {
         const hung = storyGeneratingSince && Date.now() - storyGeneratingSince > GENERATE_WATCHDOG;
         if (!hung) return false;
@@ -3815,7 +3836,7 @@ async function generateInterludeChapter({ quiet = true, userText = '', force = f
     }
     const key = `interlude-chapter:${chatKey()}`;
     if (!force && isBackingOff(key)) return false;
-    const generateToken = beginGenerate('间章');
+    const generateToken = beginGenerate('间章', { quiet });
     if (!generateToken) return false;
     if (quiet) toast('正在请故事神谕设计一段间章…');
     const origin = chatKey();
@@ -4106,7 +4127,7 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
     }
     const key = `epic:${chatKey()}`;
     if (!force && isBackingOff(key)) return false;
-    const generateToken = beginGenerate(mode === 'audit' ? '篇章检查' : '篇章');
+    const generateToken = beginGenerate(mode === 'audit' ? '篇章检查' : '篇章', { quiet });
     if (!generateToken) return false;
     if (quiet) toast(mode === 'establish' ? '正在请故事神谕定下一部篇章（一部完整的大故事）…' : '正在按他实际做的事重新校准篇章…');
     const origin = chatKey();
@@ -4196,7 +4217,7 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
 /**
  * 生成新的一章主线（面板按钮 / 自动开章 / 重排剩余拍共用）。keep>0 时保留前 keep 拍不动。
  */
-async function generateChapter({ quiet = true, regenerate = false, rejected = null, userText = '', force = false, keep = undefined, restart = false, critique = '' } = {}) {
+async function generateChapter({ quiet = true, regenerate = false, rejected = null, userText = '', force = false, keep = undefined, restart = false, critique = '', onBlocked = null } = {}) {
     // ★ 先把 keep 归一成**明确的数字**，后面所有判断与落盘都用它。
     //   undefined = 自动：保住这一章已经演过的拍，新拍接在后面（默认行为，防「重生成把进度打回第 1 拍」）；
     //   0 / restart: true = 整章重来；
@@ -4215,8 +4236,8 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
     }
     const key = `chapter:${chatKey()}:${regenerate ? 're' : 'new'}`;
     if (!force && isBackingOff(key)) return false;
-    const generateToken = beginGenerate(regenerate ? '重写这一章' : '下一章');
-    if (!generateToken) return false;
+    const generateToken = beginGenerate(regenerate ? '重写这一章' : '下一章', { quiet });
+    if (!generateToken) { onBlocked?.(); return false; }
     const button = panel?.querySelector('.sd-generate-chapter');
     const label = button?.textContent || '';
     if (button && !quiet) { button.disabled = true; button.textContent = '生成中…'; }
@@ -4270,7 +4291,7 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
 async function generateThread({ quiet = true, userText = '', force = false, critique = '', replaceId = '' } = {}) {
     const key = `thread:${chatKey()}`;
     if (!force && isBackingOff(key)) return false;
-    const generateToken = beginGenerate('支线');
+    const generateToken = beginGenerate('支线', { quiet });
     if (!generateToken) return false;
     if (quiet) toast('正在请故事神谕设计一条支线…');
     const origin = chatKey();
@@ -4306,7 +4327,7 @@ async function generateThread({ quiet = true, userText = '', force = false, crit
 async function generateInterlude({ quiet = true, userText = '', force = false, critique = '', replaceId = '' } = {}) {
     const key = `interlude:${chatKey()}`;
     if (!force && isBackingOff(key)) return false;
-    const generateToken = beginGenerate('插曲');
+    const generateToken = beginGenerate('插曲', { quiet });
     if (!generateToken) return false;
     if (quiet) toast('正在请故事神谕设计一条插曲…');
     const origin = chatKey();
@@ -6355,6 +6376,8 @@ async function forceOpenStory() {
         return;
     }
     if (!mvu()?.getMvuData) { toast('MVU 没加载。', 'error'); return; }
+    const blocked = generationBlockReason('下一章');
+    if (blocked) { toast(blocked, 'info'); return; }
     const rt = s.run;
     rt.epicTries = 0;
     rt.lastGenerateAt = 0;
@@ -6384,13 +6407,15 @@ async function forceOpenStory() {
         if (chatKey() !== origin || genId !== owner) return;
     }
     // ★ 0.27.3：「立刻开篇」是**从第一拍开始**的入口，同样必须整章重来（别继承上一章的拍号）。
-    const pending = generateChapter({ quiet: false, force: true, restart: true });
+    let chapterBlocked = false;
+    const pending = generateChapter({ quiet: false, force: true, restart: true, onBlocked: () => { chapterBlocked = true; } });
     const owner = genId;
     const opened = await pending;
     if (chatKey() !== origin || genId !== owner) return;
     if (!opened && justAborted()) return;   // 用户中断：不记失败、不弹错
-    noteAttempt(opened, opened ? '' : '见控制台日志');
-    if (!opened) toast('开章失败 —— 控制台里有 [故事导演] 的原始回复，发给我看看。', 'error');
+    if (!opened && chapterBlocked) return;  // 等待其他任务：已显示占用原因，不记成开章失败
+    noteAttempt(opened, opened ? '' : '请查看前一条具体提示或控制台日志');
+    if (!opened) toast('开篇未完成，请查看前一条具体提示。详细原因可在控制台筛选 [故事导演] 查看。', 'error');
     syncMainInjection();
     if (!panel?.hidden) render();
 }

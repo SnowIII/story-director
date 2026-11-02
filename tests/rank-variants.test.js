@@ -86,19 +86,19 @@ for(const count of RANK_COUNTS) for(const route of ['friendship','romance']) for
     });
 }
 
-test('seven and ten rank blueprints retain the distinct story stages and required artifacts',()=>{
+test('seven and ten rank blueprints distinguish growth tasks and retain relationship checkpoints',()=>{
     assert.equal(BLUEPRINTS_BY_RANK[7].length,7);assert.equal(BLUEPRINTS_BY_RANK[10].length,10);
-    assert.ok(BLUEPRINTS_BY_RANK[7][0].includes('专属秘密据点或初始约定'));
-    assert.ok(BLUEPRINTS_BY_RANK[7][2].includes('旧物／伤痕细节'));
-    assert.ok(BLUEPRINTS_BY_RANK[7][4].includes('全新人生理想'));
+    assert.ok(BLUEPRINTS_BY_RANK[7][0].includes('合作基础'));
+    assert.ok(BLUEPRINTS_BY_RANK[7][2].includes('价值边界'));
+    assert.ok(BLUEPRINTS_BY_RANK[7][4].includes('不可替代的作用'));
     assert.ok(BLUEPRINTS_BY_RANK[7][5].includes('强制路线抉择断点'));
-    assert.ok(BLUEPRINTS_BY_RANK[7][6].includes('满级专属信物'));
+    assert.ok(BLUEPRINTS_BY_RANK[7][6].includes('具体未来约定'));
     assert.ok(BLUEPRINTS_BY_RANK[10][1].includes('反差日常'));
-    assert.ok(BLUEPRINTS_BY_RANK[10][2].includes('麻烦浮现'));
-    assert.ok(BLUEPRINTS_BY_RANK[10][5].includes('暴风雨前夕'));
+    assert.ok(BLUEPRINTS_BY_RANK[10][2].includes('分工与协作'));
+    assert.ok(BLUEPRINTS_BY_RANK[10][5].includes('责任筹划'));
     assert.ok(BLUEPRINTS_BY_RANK[10][6].includes('重头戏'));
     assert.ok(BLUEPRINTS_BY_RANK[10][8].includes('强制互动断点'));
-    assert.ok(BLUEPRINTS_BY_RANK[10][9].includes('终极信物'));
+    assert.ok(BLUEPRINTS_BY_RANK[10][9].includes('共同未来'));
     for(const count of RANK_COUNTS) for(let rank=0;rank<count;rank++) {
         const p=initialState({a:config('a',count)}).profiles.a;p.rank=rank;
         p.history=Array.from({length:rank},(_,i)=>({rank:i+1,eventId:'e'+i,summary:'实际经历'+i,

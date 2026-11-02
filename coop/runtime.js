@@ -1,13 +1,14 @@
-import {clone,fail,text,hash,activeEvent,profileOf,historySignature,rankPolicy,RANK_COUNTS} from './model.js';
+import {clone,fail,text,hash,activeEvent,unfinishedEvent,profileOf,historySignature,rankPolicy,RANK_COUNTS,eventGate} from './model.js';
 import {CoopStore} from './store.js';
 import {configureRoster,removeRoster,candidates} from './roster.js';
 import {appendOperation,project,readDocument} from './timeline.js';
 import {validateAffinityProposal} from './affinity.js';
 import {continuity,publicMemory} from './history.js';
 import {ensureMessageIds,sourceMap,sourceForId,ref,references,parseReports,stripReport,uuid,modelJson,matchesSourceVersion,matchesUserVersion} from './messages.js';
-import {designMessages,renderScene,reportContract,affinityContract,directorReportContract} from './prompts.js';
+import {designMessages,renderScene,reportContract,affinityContract,directorReportContract,sceneQueueContract,growthRule} from './prompts.js';
 import {extraModel,readMvuReport,createMvuSync,readMvuAffinity,mvuCharacterKeys} from './mvu.js';
 import {affinityActivity} from './activity.js';
+import {hasEvidence} from './body.js';
 
 export class CoopRuntime {
     constructor(host) {
@@ -186,35 +187,44 @@ export class CoopRuntime {
         this.changed();
     }
     async configureSettings(settings) {
-        return this.store.enqueue(document=>{
+        const scope=this.store.scope,generation=this.store.generation;
+        const result=await this.store.enqueue(document=>{
+            if(settings.autoStart!==undefined) {
+                if(typeof settings.autoStart!=='boolean') fail('INVALID_SETTING','自动触发事件必须选择是或否');
+                document.settings.autoStart=settings.autoStart;
+            }
             if(settings.eventRounds!==undefined) {
                 if(![2,3].includes(settings.eventRounds)) fail('INVALID_NUMBER');
                 document.settings.eventRounds=settings.eventRounds;
             }
         });
+        if(settings.autoStart===false && this.store.scope===scope && this.store.generation===generation && this.job?.scope===scope && this.job.automatic) this.abort();
+        return result;
     }
-    async generate(characterId,{replanEventId=null}={}) {
-        if(this.job || this.event()) fail('SCENE_BUSY','请先暂停当前事件或等待生成完成');
+    async generate(characterId,{replanEventId=null,automatic=false}={}) {
+        if(automatic && this.store.document?.settings.autoStart===false) fail('AUTO_START_DISABLED','自动触发事件已关闭');
+        if(this.job || this.event()) fail('SCENE_BUSY','当前 Rank 事件尚未结束或正在生成，请先继续并完成原事件');
+        const owner=unfinishedEvent(this.state());
+        if(owner && (owner.id!==replanEventId || owner.characterId!==characterId)) fail('SCENE_BUSY','当前 Rank 事件尚未结束，请继续原事件；其他角色的事件正在排队');
         if(this.store.pending) fail('SAVE_PENDING','请先完成尚未确认的保存');
         const p=profileOf(this.state(),characterId);
-        if(p.mode!=='coop' || !p.lock) fail('NOT_READY','该角色尚未解锁下一阶事件');
-        if(this.usesMvuAffinity && (!p.mvuReady || p.rank>=p.rankCount || p.affinity<p.thresholds[p.rank])) fail('NOT_READY','等待 MVU 好感达到下一阶门槛并锁定');
+        if(!eventGate(p,this.usesMvuAffinity)) fail('NOT_READY','等待好感达到下一阶门槛');
         if(this.store.readonly) fail('READ_ONLY');
         continuity(p);
         const existing=replanEventId?p.events[replanEventId]:null;
         if(replanEventId && (!existing || !existing.paused)) fail('NOT_PAUSED');
-        const scope=this.store.scope, policy=p.policyRevision, gate=p.lock.id;
+        const scope=this.store.scope, policy=p.policyRevision, gate=eventGate(p,this.usesMvuAffinity).id;
         const history=hash(continuity(p)), controller=new AbortController();
         ensureMessageIds(this.host.messages());
         const contextRefs=[...this.store.sources().values()].slice(-24).map(ref);
         const anchor=[...this.store.sources().values()].filter(source=>!source.isSystem).at(-1);
         const createdAt=anchor?{id:anchor.id,index:anchor.index}:null;
         const contextKey=JSON.stringify(contextRefs);
-        const job={id:uuid(),characterId,controller,scope,createdAt};this.job=job;this.changed();
+        const job={id:uuid(),characterId,controller,scope,createdAt,automatic};this.job=job;this.changed();
         try {
             let context=await this.host.contextText(p);
             const rounds=existing?.progress.length?existing.plan.rounds:this.store.document.settings.eventRounds;
-            context+='\n【本事件指定轮数】'+rounds+'；2轮把切入与困境合并，3轮分别演绎。';
+            context+='\n【本事件指定轮数】'+rounds+'；2轮把切入与互动选择合并，3轮分别演绎。';
             context+='\n【共享世界事实；角色只可使用其已知信息】\n'+JSON.stringify(this.state().sharedFacts);
             if(existing) context+='\n【只重设未演部分，不改已发生事实】\n'+JSON.stringify({phase:existing.phase,
                 plan:existing.plan,progress:existing.progress,initialAnswer:existing.initialAnswerSource?.body,
@@ -227,7 +237,7 @@ export class CoopRuntime {
             if(controller.signal.aborted || this.job!==job || this.store.scope!==scope) fail('STALE_TASK');
             ensureMessageIds(this.host.messages());
             const fresh=profileOf(this.state(),characterId);
-            if(fresh.mode!=='coop' || fresh.policyRevision!==policy || fresh.lock?.id!==gate || hash(continuity(fresh))!==history ||
+            if(fresh.mode!=='coop' || fresh.policyRevision!==policy || eventGate(fresh,this.usesMvuAffinity)?.id!==gate || hash(continuity(fresh))!==history ||
                 existing && fresh.events[existing.id]?.version!==existing.version) fail('STALE_TASK');
             if(JSON.stringify([...this.store.sources().values()].slice(-24).map(ref))!==contextKey) fail('STALE_TASK','生成期间场景发生变化，请重试设计');
             const parsed=modelJson(raw);
@@ -235,10 +245,11 @@ export class CoopRuntime {
             const refs=last?references(last):[];
             await this.store.operation(existing?'replan':'plan',characterId,
                 {eventId:existing?.id || 'event-'+uuid(),gateId:gate,plan:parsed,historySignature:historySignature(fresh),
-                    ...(!existing && createdAt?{createdAt}:{})},refs);
+                    ...(!existing && createdAt?{createdAt}:{}),...(automatic?{automatic:true}:{})},refs);
         } catch(error) {
+            if(automatic && controller.signal.aborted) error=Object.assign(new Error('自动设计已取消'),{code:'CANCELLED'});
             if(error instanceof SyntaxError) error=Object.assign(new Error('事件设计返回格式不完整，请重试'),{code:'INVALID_PLAN'});
-            if(!['CANCELLED','STALE_TASK'].includes(error.code)) this.notice(error);throw error;
+            if(!['CANCELLED','STALE_TASK','AUTO_START_DISABLED'].includes(error.code)) this.notice(error);throw error;
         }
         finally {if(this.job===job){this.job=null;this.changed();}}
     }
@@ -286,11 +297,12 @@ export class CoopRuntime {
         try {
             const messages=[{role:'system',content:[
                 '仅为已经发生的 Coop 事件核对并补齐归档，不继续创作剧情，不代写用户行动。',
-                '若现有正文未实际达到本阶局部目标，输出 {"ready":false,"reason":"缺什么"}。',
+                '逐项核对本阶目标、收束条件以及现场仍在进行的危机。仅制定方案、开始行动、调动援军、表明决心，都不能代替实际收束。若仍有当前救援／战斗／对峙，或关键决定仍等用户回应，输出 {"ready":false,"reason":"缺什么"}。长线伏笔可保留，当前阻断性冲突必须先结束。',
                 '若最新回应明确改变已确认的关系路线，输出 {"ready":false,"routeConflict":true,"userEvidence":"最新用户原文","evidence":"正文承接该变化的原文"}，等待面板重新确认。',
-                '若已完成，输出 {"ready":true,"evidence":"收束正文准确短句","completion":{summary,outcome,outcomeEvidence,choice,choiceEvidence,traits:[],facts:[],boundaries:[],openHooks:[],closedHooks:[],conflicts:[]}}。',
-                '所有依据必须逐字引用提供的原文。摘要约100～200字，区分事实、猜测和未解决事项。只输出JSON。'
+                '若已完成，输出 {"ready":true,"evidence":"收束正文准确短句","completion":{summary,outcome,outcomeEvidence,choice,choiceEvidence,traits:[],facts:[],boundaries:[],openHooks:[],closedHooks:[],conflicts:[],scene:{goalAchieved:true,closed:true,awaitingUser:false,blockingConflicts:[],evidence:"本轮正文中现场已告一段落的准确短句"}}}。',
+                growthRule,'所有依据必须逐字引用提供的原文。摘要约100～200字，区分事实、猜测和未解决事项。只输出JSON。'
             ].join('\n')},{role:'user',content:JSON.stringify({targetRank:event.targetRank,goal:event.plan.goal,
+                resolutionCondition:event.plan.resolution,currentConflict:event.plan.conflict,
                 route:event.route,question:event.plan.question,initialUserResponse:event.initialAnswerSource?.body,userResponse:event.answerSource.body,
                 routeResponse:event.routeSource?.body,currentReply:source.body,
                 earlierActs:event.progress.map(v=>({phase:v.phase,evidence:v.evidence})),history:continuity(p)})}];
@@ -303,7 +315,7 @@ export class CoopRuntime {
             const result=modelJson(raw);
             if(automatic && result.ready===false && result.routeConflict!==true) return false;
             if(result.ready!==true && result.routeConflict!==true) fail('NOT_COMPLETE',text(result.reason,400) || '当前正文尚未达到收束条件');
-            await this.store.operation('beat',p.id,{eventId:event.id,characterId:p.id,eventVersion:version,
+            await this.store.operation('beat',p.id,{eventId:event.id,characterId:p.id,eventVersion:version,requireSceneClosure:true,
                 phase:'resolution',source,evidence:result.evidence,completion:result.completion,
                 routeConflict:result.routeConflict,userEvidence:result.userEvidence},references(source),
                 'archive:'+event.id+':'+source.id+':'+source.version);
@@ -354,13 +366,15 @@ export class CoopRuntime {
         const profiles=roster.filter(p=>p.mode!=='off' && (this.host.available(p,roster) || p.id===this.event()?.characterId));
         const byExtra=extraModel(this.host.context());
         const snapshot={nonce:'turn-'+uuid(),scope:this.store.scope,userId:user.id,userVersion:user.version,
-            byExtra,reportProducer:byExtra?'external':'inline',reportChannel:'mvu',roles:{},event:null};
+            byExtra,reportProducer:byExtra?'external':'inline',reportChannel:'mvu',completionPolicy:'scene-closed-v1',roles:{},event:null};
         if(this.usesMvuAffinity) Object.assign(snapshot,{affinityAuthority:'mvu',reportProducer:'director',reportChannel:'director'});
         const mvuKeys=this.usesMvuAffinity?mvuCharacterKeys(this.state()):null;
         profiles.forEach(p=>{snapshot.roles[p.id]={policyRevision:p.policyRevision,locked:!!p.lock,
             rankCount:p.rankCount,thresholds:clone(p.thresholds),...(mvuKeys?{mvuKey:mvuKeys.get(p.id)}:{})};});
         const current=this.event();
         if(current) snapshot.event={id:current.id,characterId:current.characterId,version:current.version,phase:current.phase};
+        snapshot.sceneCheckRequired=this.store.document.settings.autoStart!==false && !current && !unfinishedEvent(this.state()) && roster.some(p=>p.history.length) && profiles.some(p=>
+            eventGate(p,this.usesMvuAffinity));
         this.snapshot=snapshot;this.snapshots.set(snapshot.nonce,snapshot);
         while(this.snapshots.size>80) this.snapshots.delete(this.snapshots.keys().next().value);
         this.changed();
@@ -374,6 +388,7 @@ export class CoopRuntime {
             renderScene(this.state().profiles[event.characterId],event));
         const turn=this.turnContext();
         if(turn?.event) parts.push(directorReportContract(turn.event,this.snapshot));
+        else if(turn && this.snapshot.sceneCheckRequired && this.snapshot.reportChannel==='director') parts.push(sceneQueueContract(this.snapshot));
         const roster=Object.values(this.state().profiles);
         const profiles=roster.filter(p=>p.mode!=='off' && (this.host.available(p,roster) || p.id===event?.characterId));
         const memories=profiles.map(publicMemory).filter(Boolean);
@@ -423,6 +438,12 @@ export class CoopRuntime {
             if(!snapshot.reportProducer && snapshot.reportChannel!=='mvu' && viaExternal!==!!snapshot.byExtra) continue;
             snapshot.messageId=source.id;snapshot.messageVersion=source.version;
             message.extra=message.extra || {};message.extra.sdCoopSnapshot=clone(snapshot);
+            if(snapshot.sceneCheckRequired && !snapshot.event && report.sceneClearance) {
+                const scene=report.sceneClearance;
+                message.extra.sdCoopSceneClearance={version:source.version,userVersion:source.userVersion,scope:this.store.scope,
+                    clear:scene.closed===true && scene.awaitingUser===false && Array.isArray(scene.blockingConflicts) &&
+                        !scene.blockingConflicts.length && hasEvidence(source.body,text(scene.evidence))};
+            }
             if(reports.length) {
                 accepted.push(report);
                 message.extra.sdCoopReports={version:source.version,reports:[...accepted],byExtra:viaExternal,reportProducer:producer};
@@ -451,7 +472,7 @@ export class CoopRuntime {
                     if(!p || p.mode!=='coop' || snapshot.roles[p.id]?.policyRevision!==p.policyRevision) fail('NOT_MANAGED');
                     if(r.eventId!==expected.id || r.characterId!==expected.characterId || r.eventVersion!==expected.version || r.phase!==expected.phase) fail('STALE_EVENT');
                     if(r.phase==='resolution' && r.ready===false && r.routeConflict!==true) continue;
-                    await this.store.operation('beat',p.id,{...r,source},references(source),
+                    await this.store.operation('beat',p.id,{...r,source,requireSceneClosure:r.phase==='resolution' && r.routeConflict!==true},references(source),
                         'beat:'+r.eventId+':'+r.phase+':'+source.id+':'+source.version);
                 } catch(error) {
                     // 已拒绝的旧回报不会因 MVU 保留该变量而反复重放；修正报告或正文后仍可重试。
@@ -526,13 +547,23 @@ export class CoopRuntime {
         void this.maybeAutoArchive();
     }
     async maybeAuto() {
-        if(!this.store.document || this.store.readonly || this.occupies() || !this.host.autoAllowed?.() ||
+        if(!this.store.document || this.store.document.settings.autoStart===false || this.store.readonly || this.store.pending || this.archiveCheckTask || this.occupies() || unfinishedEvent(this.state()) || !this.host.autoAllowed?.() ||
             Date.now()-this.lastAutoFailure<60000) return;
+        const latestUser=[...this.store.sources().values()].filter(source=>source.isUser && !source.isSystem).at(-1);
+        const closedAt=Math.max(-1,...Object.values(this.state().profiles).flatMap(profile=>profile.history).map(history=>history.source.index));
+        if(closedAt>=0 && (!latestUser || latestUser.index<=closedAt)) return;
+        if(closedAt>=0) {
+            const latest=this.host.messages().at(-1),source=sourceForId(this.host.messages(),this.host.messages().length-1);
+            const clearance=latest?.extra?.sdCoopSceneClearance;
+            if(!source || source.isUser || source.isSystem || clearance?.scope!==this.store.scope || clearance.clear!==true ||
+                !matchesSourceVersion(source,clearance.version) || !matchesUserVersion(source,clearance.userVersion)) return;
+        }
         const roster=Object.values(this.state().profiles);
-        const profiles=roster.filter(p=>p.mode==='coop' && p.lock && this.host.available(p,roster) &&
-            (!this.usesMvuAffinity || p.mvuReady && p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank]) &&
+        const profiles=roster.filter(p=>eventGate(p,this.usesMvuAffinity) && this.host.available(p,roster) &&
             !Object.values(p.events).some(e=>e.phase!=='completed')).sort((a,b)=>(a.scoreLog.at(-1)?.source.index ?? 0)-(b.scoreLog.at(-1)?.source.index ?? 0));
-        if(profiles[0]) try {await this.generate(profiles[0].id);} catch {this.lastAutoFailure=Date.now();}
+        if(profiles[0]) try {await this.generate(profiles[0].id,{automatic:true});} catch(error) {
+            if(!['CANCELLED','STALE_TASK','AUTO_START_DISABLED'].includes(error.code)) this.lastAutoFailure=Date.now();
+        }
     }
     async restore(document) {
         if(document?.scope!==this.store.scope) fail('STALE_SCOPE','只允许恢复当前聊天的档案');
