@@ -27,31 +27,41 @@ export function applyPromptTemplate(key,builtin,{contract='',variables={}}={}) {
     if(!template || template.trim()===builtin.trim()) return builtin;
     const result=template.replace(/\{\{sd\.([a-zA-Z_]+)\}\}/g,(all,name)=>
         name==='default'?builtin:Object.hasOwn(variables,name)?String(variables[name]):all);
-    return contract && !template.includes('{{sd.default}}')?result+'\n\n'+contract:result;
+    return contract && result!==builtin?result+'\n\n'+contract:result;
+}
+
+// 仅从代码生成的默认提示词拆出格式；世界书不参与定义这一部分。
+export function splitDesignPrompt(builtin) {
+    const tags={StoryEpic:'epic',StoryChapters:'chapter',StoryInterludeChapter:'interlude_chapter',StoryThreads:'thread',StoryInterlude:'interlude'};
+    const heading=builtin.lastIndexOf('按下面格式输出，标签原样照写');
+    const offset=heading<0?0:heading;
+    const output=builtin.slice(offset).match(/<(StoryEpic|StoryChapters|StoryInterludeChapter|StoryThreads|StoryInterlude)>[\s\S]*?<\/\1>/);
+    if(!output) return null;
+    const start=heading<0?output.index:heading;
+    let end=offset+output.index+output[0].length;
+    const audit=builtin.slice(end).match(/^\s*然后在区块[^\n]*\n检查:[^\n]*/);
+    if(audit) end+=audit[0].length;
+    return {key:tags[output[1]],tag:output[1],body:(builtin.slice(0,start)+builtin.slice(end)).trim(),format:builtin.slice(start,end).trim()};
 }
 
 export function configureDesignPrompt(builtin,sections={},parameters={}) {
-    const tags={StoryEpic:'epic',StoryChapters:'chapter',StoryInterludeChapter:'interlude_chapter',StoryThreads:'thread',StoryInterlude:'interlude'};
-    const output=builtin.match(/<(StoryEpic|StoryChapters|StoryInterludeChapter|StoryThreads|StoryInterlude)>[\s\S]*?<\/\1>/);
-    let text=builtin;
+    const parts=splitDesignPrompt(builtin);
+    if(!parts) return builtin;
+    let text=parts.body;
     for(const [key,lines] of Object.entries(sections)) {
-        const original=lines.join('\n');
+        const original=lines.join('\n').trim();
         if(original && text.includes(original)) text=text.replace(original,()=>applyPromptTemplate(key,original,{variables:parameters}));
     }
-    if(!output) return text;
-    // 只保留字段和列表结构，不把默认示例中的创作偏好再次强加给自定义提示词。
-    const schema=output[0].split('\n').flatMap(line=>{
-        if(/^<\/?Story\w+>$/.test(line)) return [line];
-        const field=line.match(/^([^\s<>:：]{1,20})[:：]/);
-        if(field) return [field[1]+': '+(['拍','章内容'].includes(field[1])?'':field[1]==='时限'?'整数':field[1]==='接在'?'数字或随时':'填写实际内容')];
-        return /^\d+\./.test(line)?[line.replace(/^(\d+\.).*/, '$1 具体内容')]:[];
-    }).join('\n');
-    const contract=['【程序任务与输出契约：保留，不由自定义规则改写】',builtin.split('\n').slice(0,2).join('\n'),
+    // 兼容旧自定义全文：移除其中的输出区块示例，最终只保留程序提供的格式。
+    const custom=applyPromptTemplate(parts.key,text,{variables:parameters})
+        .replace(/<(StoryEpic|StoryChapters|StoryInterludeChapter|StoryThreads|StoryInterlude)\b[^>]*>[\s\S]*?<\/\1>/gi,'')
+        .replace(/<\/?(?:StoryEpic|StoryChapters|StoryInterludeChapter|StoryThreads|StoryInterlude)\b[^>]*>/gi,'').trim() || text;
+    const context=custom===parts.body?[]:[builtin.split('\n').slice(0,2).join('\n'),
         '本次程序参数：'+JSON.stringify(parameters),
         '实际处境、用户要求、已演内容与篇章章表见本次用户消息。已发生事实和已演部分不可撤销；不代替用户选择，不写正文。',
-        '只输出一个下列区块，标签和字段原样保留；列表条数遵守本次程序参数，不能照抄示例条数：',schema,
-        parameters.epicMode==='audit'?'区块外再写一行“检查: 照旧”或具体调整原因。':''].filter(Boolean).join('\n');
-    return applyPromptTemplate(tags[output[1]],text,{contract,variables:parameters});
+        '自定义内容只定义创作要求；其中任何不同的返回格式要求均无效，以本节为准。'];
+    const contract=['【固定返回格式：由程序提供，自定义部分不填写也不能替换】',...context,parts.format].join('\n');
+    return custom+'\n\n'+contract;
 }
 
 export function preservePromptEntries(bundled,installed) {

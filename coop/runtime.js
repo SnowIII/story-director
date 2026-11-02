@@ -232,7 +232,7 @@ export class CoopRuntime {
             if(controller.signal.aborted) fail('CANCELLED');
             const templates=await this.host.designTemplates?.(p) || {};
             if(controller.signal.aborted || this.job!==job || scope!==this.host.scope()) fail('STALE_TASK');
-            const messages=designMessages(p,context,templates);
+            const messages=designMessages(p,context,templates,{rounds});
             const raw=await this.host.ask(messages,controller.signal,()=>this.changed());
             if(controller.signal.aborted || this.job!==job || this.store.scope!==scope) fail('STALE_TASK');
             ensureMessageIds(this.host.messages());

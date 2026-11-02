@@ -1462,7 +1462,7 @@ export function chapterFromBlock(raw, opts = {}) {
   const attrs = parseAttributes(raw);
   return normalizeChapter({
     title: attrOf(attrs, '章标题', '标题', 'title') || '未命名的一章',
-    arc: attrOf(attrs, '篇章', '弧线', 'arc', 'story'),
+    arc: attrOf(attrs, '篇章', '分卷', '弧线', 'arc', 'story'),
     scope: attrOf(attrs, '范围', '边界', 'scope'),
     goal: attrOf(attrs, '章目标', '目标', 'goal'),
     beats: attrOf(attrs, '拍', 'beats', 'beats:'),

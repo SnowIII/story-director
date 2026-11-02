@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import {PROMPT_SLOTS,setPromptEntries,applyPromptTemplate,configureDesignPrompt} from '../prompt-worldbook.js';
+import {PROMPT_SLOTS,setPromptEntries,applyPromptTemplate,configureDesignPrompt,splitDesignPrompt} from '../prompt-worldbook.js';
 import {preserveDesignTemplates,designTemplates} from '../coop/design-worldbook.js';
 import {initialState,clone,hash} from '../coop/model.js';
 import {designMessages,affinityContract,directorReportContract,archiveSystemPrompt,growthRule} from '../coop/prompts.js';
@@ -39,7 +39,7 @@ test('plugin macros expand as plain text and preserve Tavern macros, contracts a
     reset(t);setPromptEntries([entry('chapter','{{user}} / {{sd.remaining}} / $& / {{sd.unknown}}')]);
     assert.equal(applyPromptTemplate('chapter','原文',{contract:'固定格式',variables:{remaining:2}}),'{{user}} / 2 / $& / {{sd.unknown}}\n\n固定格式');
     setPromptEntries([entry('chapter','{{sd.default}}\n附加偏好')]);
-    assert.equal(applyPromptTemplate('chapter','原文',{contract:'原文已有的格式'}),'原文\n附加偏好');
+    assert.equal(applyPromptTemplate('chapter','原文',{contract:'原文已有的格式'}),'原文\n附加偏好\n\n原文已有的格式');
 });
 
 test('literal replacement symbols survive shared-section and Coop growth composition',t=>{
@@ -56,20 +56,21 @@ for(const [key,fn] of Object.entries(tasks))test('custom '+key+' replaces design
     setPromptEntries([entry(key,'以轻松的人物合作为主，数量 {{sd.beatTarget}}。')]);
     const result=configureDesignPrompt(builtin,fixture.sections,{beatTarget:5});
     assert.ok(result.startsWith('以轻松的人物合作为主，数量 5。'));
-    assert.ok(result.includes('【程序任务与输出契约'));
+    assert.ok(result.includes('【固定返回格式'));
     assert.ok(!result.includes('===== 设计通则 ====='));
     const tag=builtin.match(/<(Story\w+)>/)[1];
     assert.equal(result.split('<'+tag+'>').length-1,1);assert.ok(result.includes('</'+tag+'>'));
     const block=builtin.match(/<Story\w+>[\s\S]*?<\/Story\w+>/)[0];
     for(const field of block.matchAll(/^([^\s<>:：]{1,20})[:：]/gm))assert.ok(result.includes(field[1]+':'));
-    assert.ok(!result.includes('〔另一个舞台〕'));
+    assert.ok(result.endsWith(splitDesignPrompt(builtin).format));
 });
 
-test('shared sections only change prompts using that layer and default templates reproduce original prompts exactly',t=>{
+test('shared sections only change prompts using that layer and unchanged templates preserve the fixed protocol',t=>{
     reset(t);const fixture=directorFixture();
+    const expected=Object.fromEntries(Object.values(tasks).map(fn=>[fn,configureDesignPrompt(fixture.build(fn),fixture.sections)]));
     for(const allOn of [false,true]){
         setPromptEntries(entries().map(e=>({...e,enabled:allOn,disable:!allOn})));
-        for(const fn of Object.values(tasks)){const raw=fixture.build(fn);assert.equal(configureDesignPrompt(raw,fixture.sections),raw);}
+        for(const fn of Object.values(tasks)){const raw=fixture.build(fn);assert.equal(configureDesignPrompt(raw,fixture.sections),expected[fn]);}
     }
     setPromptEntries([entry('design_arc','自定义篇章编排'),entry('design_beats','自定义拍设计')]);
     const epic=configureDesignPrompt(fixture.build(tasks.epic),fixture.sections),chapter=configureDesignPrompt(fixture.build(tasks.chapter),fixture.sections);
@@ -80,7 +81,7 @@ test('shared sections only change prompts using that layer and default templates
 test('audit and partial replan keep runtime task, counts and preservation requirements when replacing the system prompt',t=>{
     reset(t);const fixture=directorFixture();setPromptEntries([entry('epic','检查用户选择带来的后果'),entry('chapter','只改变未演部分')]);
     const audit=configureDesignPrompt(fixture.build(tasks.epic,{mode:'audit'}),fixture.sections,{epicMode:'audit',chaptersPerEpic:6});
-    assert.ok(audit.includes('检查这一部篇章还成不成立'));assert.ok(audit.includes('区块外再写一行'));assert.ok(audit.includes('"chaptersPerEpic":6'));
+    assert.ok(audit.includes('检查这一部篇章还成不成立'));assert.ok(audit.includes('单独写一行结论'));assert.ok(audit.includes('"chaptersPerEpic":6'));
     const partial=configureDesignPrompt(fixture.build(tasks.chapter,{remaining:2,keep:3}),fixture.sections,{remaining:2,keep:3});
     assert.ok(partial.includes('已经演过的部分不许动'));assert.ok(partial.includes('"keep":3'));assert.ok(partial.includes('"remaining":2'));
 });
@@ -105,8 +106,8 @@ test('Coop policy edits reach numeric, design, report and archive prompts withou
     }
     const report=directorReportContract({id:'e',characterId:'a',phase:'resolution'},snapshot);
     assert.ok(report.includes('只记实际验证的习惯变化'));assert.ok(report.includes('<CoopReport>'));
-    const archive=archiveSystemPrompt();assert.ok(archive.startsWith('摘要优先概括行动与结果'));assert.ok(archive.includes('【归档程序契约】'));
-    assert.ok(archive.includes('blockingConflicts:[]'));assert.ok(archive.includes('不能代替眼前危机'));
+    const archive=archiveSystemPrompt();assert.ok(archive.startsWith('摘要优先概括行动与结果'));assert.ok(archive.includes('【固定返回格式：Coop 归档'));
+    assert.ok(archive.includes('"blockingConflicts":[]'));assert.ok(archive.includes('不能代替眼前危机'));
 });
 
 test('upgrades preserve edited text and both API switch formats, upgrade default text, and leave old Coop templates intact',()=>{
