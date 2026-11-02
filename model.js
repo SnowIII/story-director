@@ -1,3 +1,5 @@
+import {applyPromptTemplate} from './prompt-worldbook.js';
+export {configureDesignPrompt} from './prompt-worldbook.js';
 let coopScene = false;
 export function setCoopScene(value) { coopScene = !!value; }
 let coopMvuAuthority = false;
@@ -938,7 +940,10 @@ export function renderInjectionHeader({ banUserAction = true, mode = 'main' } = 
       '【落地方式】剧情由**世界里发生了什么 + 别人的行动 + 埋下的伏笔**推动：你要写的是「谁做了什么、于是局面变成什么样」。',
     );
   }
-  return lines;
+  const key=mode==='interlude'?'narration_interlude':'narration_main';
+  const contract='【程序演出约束】当前幕为'+(mode==='interlude'?'间章':'主线')+'，只按下面本轮计划演出，不自行改进度或复述幕后提示。'+
+    (banUserAction?'用户的言行、心理和选择由用户自己决定。':'');
+  return [lines[0],...applyPromptTemplate(key,lines.slice(1).join('\n'),{contract}).split('\n')];
 }
 
 /**
@@ -1316,11 +1321,13 @@ export function renderContractSection({ banUserAction = true, mode = 'main', bea
     //   但因此把这一拍带歪时**必须报档**，不许「通过 + 算落拍」。
     '　· ★ **{{user}} 的言行优先**：他要是把场面带到别处，就照 ③ 报 —— **不许**「结论写通过、再把这一拍算成落拍」。',
     '　· ★ **结论决定这一轮怎么写**（这就是「先交自检」的意思）：',
+    ...applyPromptTemplate('main_review',[
     `　　\`${REVIEW_PASS}\` → 照这一拍演；\`${REVIEW_ADJUST}\` → 按你自己调整后的执行方式演（**要的结果不变**）；`,
     `　　\`${REVIEW_SETUP}\` → **只演到缺的那一步之前**：缺来由就先把来由补出来，`
       + '该等 {{user}} 就只把条件 / 问题 / 局面递到他面前 —— **别替他做、别把这一拍演完**（这一轮也不报落拍）；',
     `　　\`${REVIEW_REJECT}\` → **这一拍先不要演**：把场面落在它之前的处境上，让别的部分自然往前走`
       + `（要成立就得硬加设定、或者它已经不可能了，就报这一档 —— 插件会请神谕重排剩下的拍）。`,
+    ].join('\n')).split('\n'),
     '　· **报档很便宜**（`调整` / `缺铺垫` 不重排、不花一次神谕调用）—— 别为了省事硬演，也别先写完再补一句结论。',
     `　· 结论写在自检块**最后一行**（以 \`结论：\` 开头）；用 \`<${SELF_CHECK_TAG}>\`，`
       + '**不要**写成 `<!-- -->` 注释（插件读不到，而且读者会看到）。',

@@ -1,4 +1,5 @@
 import {rankPolicy,hash} from './model.js';
+import {preservePromptEntries} from '../prompt-worldbook.js';
 
 const marker=entry=>String(entry?.comment ?? entry?.name ?? '').match(/\[coop_(design|forms|rank_(?:4|7|10))\]/i)?.[1].toLowerCase();
 const enabled=entry=>typeof entry?.disable==='boolean'?!entry.disable:entry?.enabled===true;
@@ -26,5 +27,5 @@ export function preserveDesignTemplates(bundled,installed) {
             entry.enabled=enabled(previous);entry.disable=!entry.enabled;
         }
     }
-    return bundled;
+    return preservePromptEntries(bundled,installed);
 }

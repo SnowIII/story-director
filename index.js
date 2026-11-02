@@ -19,6 +19,7 @@
 import { createCoopSystem } from './coop/bootstrap.js';
 import { mvuApiFor } from './coop/mvu.js';
 import { designTemplates, preserveDesignTemplates } from './coop/design-worldbook.js';
+import { setPromptEntries } from './prompt-worldbook.js';
 import { createMessageRefreshQueue } from './message-render.js';
 import { createUpdateReloader } from './update-reload.js';
 import { extension_settings } from '../../../extensions.js';
@@ -51,7 +52,7 @@ import {
     chapterFromBlock, threadFromBlock, interludeFromBlock, interludeChapterFromBlock,
     applyNsCommands, extractNsCommands, landingOpsInReply, storyBlockFailure, recognizedFieldNames,
     worldbookDigest, setInterludeWritesAllowed, beatOrderSkipsRead,
-    mergeBeats, remainingBeatBudget, worldbookUpdateDecision, setCoopScene,
+    mergeBeats, remainingBeatBudget, worldbookUpdateDecision, setCoopScene, configureDesignPrompt,
 } from './model.js';
 
 const ID = 'story-director';
@@ -61,7 +62,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.41.9';
+const VERSION = '0.42.0';
 let coop = null;
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
@@ -1719,7 +1720,9 @@ async function readOurWorldbookEntries() {
     const name = PLUGIN_WORLD;
     const normalize = (raw) => {
         const list = Array.isArray(raw) ? raw : Object.values(raw ?? {});
-        return list.filter((entry) => entry && typeof entry.content === 'string');
+        const entries = list.filter((entry) => entry && typeof entry.content === 'string');
+        setPromptEntries(entries);
+        return entries;
     };
     try {
         const helperGet = window.TavernHelper?.getWorldbook;
@@ -2251,7 +2254,7 @@ async function collectContextBlocks(task = 'chapter', taskOpts = {}) {
     //     按层发），单一来源，不必靠世界书转发。
     try {
         const ours = await readOurWorldbookEntries();
-        const plot = ours.filter((entry) => !/\[mvu_update\]|\[InitVar\]|\[coop_(?:design|forms|rank_)/i.test(String(entry?.comment ?? entry?.name ?? '')));
+        const plot = ours.filter((entry) => !/\[mvu_update\]|\[InitVar\]|\[coop_(?:design|forms|rank_)|\[sd_prompt_/i.test(String(entry?.comment ?? entry?.name ?? '')));
         const digest = worldbookDigest(plot);
         if (digest) blocks.push(`=== 本插件自带世界书「${PLUGIN_WORLD}」里面向剧情的条目 ===\n${capText(digest, 24000)}`);
     } catch (error) {
@@ -3587,6 +3590,17 @@ function modeSystemPrompt(userText) {
     return buildChapterSystemPrompt();
 }
 
+function configuredSystemPrompt(builtin, options = {}) {
+    const s = settings();
+    const target = Math.max(BEAT_MIN, Math.min(BEAT_MAX, Math.round(toNumber(s.beatTarget, 4))));
+    return configureDesignPrompt(builtin, {
+        common: COMMON_RULES, tone_guard: TONE_GUARD, beat_format: BEAT_FORMAT_RULES,
+        design_both: DESIGN_BOTH, design_arc: DESIGN_ARC, design_beats: DESIGN_BEATS, design_side: DESIGN_SIDE,
+    }, { beatTarget: target, beatBudget: options.remaining > 0 ? Math.max(1, Math.min(target, Math.round(options.remaining))) : target,
+        interludeBeats: Math.max(1, Math.min(BEAT_MAX, Math.round(toNumber(s.interludeBeats, 3)))), chaptersPerEpic: chaptersPerEpic(),
+        intensity: (INTENSITIES[s.intensity] || INTENSITIES.normal).label, tone: toneDirective(s.tone), ...options });
+}
+
 /** 借神谕的模型连接裸调用一次（不带任何上下文 → 我们自己把上下文拼进去）。 */
 async function askOracle({ task = 'chapter', userText = '', regenerate = false, rejected = null, keep = 0, remaining = 0, quiet = true, ephemeralSystem = '', taskOpts = {} } = {}) {
     const api = oracleApi();
@@ -3596,11 +3610,12 @@ async function askOracle({ task = 'chapter', userText = '', regenerate = false, 
     }
     const myId = genId, ctl = genCtl, origin = chatKey();
     const current = () => !genAborted && !ctl?.signal?.aborted && myId === genId && origin === chatKey();
-    const system = ephemeralSystem || (task === 'thread' ? buildThreadSystemPrompt()
+    const user = await buildUserPrompt(task, userText, taskOpts);
+    const builtin = ephemeralSystem || (task === 'thread' ? buildThreadSystemPrompt()
         : task === 'side' ? buildInterludeSystemPrompt()
             : task === 'interlude' ? buildInterludeChapterSystemPrompt({ rejected })
                 : buildChapterSystemPrompt({ regenerate, rejected, keep, remaining: Math.max(0, Math.round(toNumber(remaining, 0))) }));
-    const user = await buildUserPrompt(task, userText, taskOpts);
+    const system = configuredSystemPrompt(builtin, { task, regenerate, rejected, keep, remaining, epicMode: taskOpts.epicMode });
     if (!current()) return ORACLE_CANCELLED;
     lastRequestChars = String(system).length + String(user).length;
     // ⚠ **绝不往神谕窗口里写东西**（这一条是补事故）。
@@ -4138,7 +4153,7 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
     try {
         const raw = await askOracle({
             task: 'epic',
-            taskOpts: { replacingEpic: mode === 'establish', critique },
+            taskOpts: { replacingEpic: mode === 'establish', critique, epicMode: mode },
             ephemeralSystem: buildEpicSystemPrompt({
                 mode,
                 diverged,
@@ -5347,10 +5362,10 @@ function registerOracleMode(api) {
         order: 'first',
         accent: '#6a8fc9',
         placeholder: '想给下一章什么方向？（例如「让她先发现自己被跟踪」）',
-        onSend: async (userText) => ({
-            system: modeSystemPrompt(userText),
-            messages: [{ role: 'user', content: await buildUserPrompt(taskFromText(userText), userText) }],
-        }),
+        onSend: async (userText) => {
+            const messages = [{ role: 'user', content: await buildUserPrompt(taskFromText(userText), userText) }];
+            return { system: configuredSystemPrompt(modeSystemPrompt(userText), { task: taskFromText(userText) }), messages };
+        },
         buildBar: (host) => {
             host.textContent = '';
             const now = document.createElement('div');
@@ -7333,12 +7348,14 @@ function init() {
         openPanel: () => { settings().tab = 'coop'; save(); open(); },
         ask: askCoop,
         designTemplates: async profile => designTemplates(await readOurWorldbookEntries(), profile),
+        refreshPrompts: () => readOurWorldbookEntries(),
         mvu,
         autoAllowed: () => settings().enabled && settings().autoDirector && !storyGenerating,
         sceneChanged: coopSceneChanged,
         syncPrompts: () => syncMainInjection(),
         renderMessage: refreshCleanedMessage,
     });
+    void readOurWorldbookEntries().then(() => syncMainInjection());
     // ★ 0.38.7：魔棒菜单入口。ST 可能在扩展之后才把菜单建好，所以几拍重试（幂等，重复调只有一颗）。
     injectWandEntry();
     window.setTimeout(() => injectWandEntry(), 600);
@@ -7379,7 +7396,10 @@ function init() {
             window.setTimeout(() => cleanupStatusEchoInChat({ notify: true }), 2500);
             if (!panel.hidden) render();
         });
-        eventSource?.on?.(event_types.WORLDINFO_SETTINGS_UPDATED, () => { if (!panel.hidden) renderDiagnostics(); });
+        eventSource?.on?.(event_types.WORLDINFO_SETTINGS_UPDATED, async () => {
+            await readOurWorldbookEntries(); syncMainInjection();
+            if (!panel.hidden) renderDiagnostics();
+        });
     } catch (error) { console.debug('[故事导演] event binding unavailable', error); }
     window.setTimeout(() => { if (!document.getElementById('story-director-bubble')) init(); }, 1500);
 }

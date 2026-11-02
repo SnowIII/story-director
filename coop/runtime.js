@@ -5,7 +5,7 @@ import {appendOperation,project,readDocument} from './timeline.js';
 import {validateAffinityProposal} from './affinity.js';
 import {continuity,publicMemory} from './history.js';
 import {ensureMessageIds,sourceMap,sourceForId,ref,references,parseReports,stripReport,uuid,modelJson,matchesSourceVersion,matchesUserVersion} from './messages.js';
-import {designMessages,renderScene,reportContract,affinityContract,directorReportContract,sceneQueueContract,growthRule} from './prompts.js';
+import {designMessages,renderScene,reportContract,affinityContract,directorReportContract,sceneQueueContract,archiveSystemPrompt} from './prompts.js';
 import {extraModel,readMvuReport,createMvuSync,readMvuAffinity,mvuCharacterKeys} from './mvu.js';
 import {affinityActivity} from './activity.js';
 import {hasEvidence} from './body.js';
@@ -285,6 +285,7 @@ export class CoopRuntime {
             this.host.messages()[s.index]?.extra?.sdCoopSnapshot?.event?.version===event.version).at(-1);
     }
     async recoverArchive({automatic=false}={}) {
+        await this.host.refreshPrompts?.();
         const event=this.event();
         if(this.store.pending) fail('SAVE_PENDING','请先完成尚未确认的保存');
         if(this.store.readonly) fail('READ_ONLY','当前窗口只读，不能补齐归档');
@@ -295,13 +296,7 @@ export class CoopRuntime {
         const version=event.version,scope=this.store.scope,generation=this.store.generation,controller=new AbortController();
         const job={id:uuid(),characterId:p.id,controller,scope,label:automatic?'自动核对事件收束与归档':'补齐事件归档',createdAt:event.createdAt,sourceId:source.id};this.job=job;this.changed();
         try {
-            const messages=[{role:'system',content:[
-                '仅为已经发生的 Coop 事件核对并补齐归档，不继续创作剧情，不代写用户行动。',
-                '逐项核对本阶目标、收束条件以及现场仍在进行的危机。仅制定方案、开始行动、调动援军、表明决心，都不能代替实际收束。若仍有当前救援／战斗／对峙，或关键决定仍等用户回应，输出 {"ready":false,"reason":"缺什么"}。长线伏笔可保留，当前阻断性冲突必须先结束。',
-                '若最新回应明确改变已确认的关系路线，输出 {"ready":false,"routeConflict":true,"userEvidence":"最新用户原文","evidence":"正文承接该变化的原文"}，等待面板重新确认。',
-                '若已完成，输出 {"ready":true,"evidence":"收束正文准确短句","completion":{summary,outcome,outcomeEvidence,choice,choiceEvidence,traits:[],facts:[],boundaries:[],openHooks:[],closedHooks:[],conflicts:[],scene:{goalAchieved:true,closed:true,awaitingUser:false,blockingConflicts:[],evidence:"本轮正文中现场已告一段落的准确短句"}}}。',
-                growthRule,'所有依据必须逐字引用提供的原文。摘要约100～200字，区分事实、猜测和未解决事项。只输出JSON。'
-            ].join('\n')},{role:'user',content:JSON.stringify({targetRank:event.targetRank,goal:event.plan.goal,
+            const messages=[{role:'system',content:archiveSystemPrompt()},{role:'user',content:JSON.stringify({targetRank:event.targetRank,goal:event.plan.goal,
                 resolutionCondition:event.plan.resolution,currentConflict:event.plan.conflict,
                 route:event.route,question:event.plan.question,initialUserResponse:event.initialAnswerSource?.body,userResponse:event.answerSource.body,
                 routeResponse:event.routeSource?.body,currentReply:source.body,
@@ -350,7 +345,7 @@ export class CoopRuntime {
         if(!this.store.document || this.store.scope!==this.host.scope() || this.store.readonly) return;
         const generation=this.store.generation,scope=this.store.scope;
         const sameChat=()=>generation===this.store.generation && scope===this.store.scope && scope===this.host.scope() && !this.store.readonly && !this.disposed;
-        try {await this.ensureCurrentCharacters();} catch(error) {this.notice(error);}
+        try {await this.host.refreshPrompts?.();await this.ensureCurrentCharacters();} catch(error) {this.notice(error);}
         if(!sameChat()) return;
         ensureMessageIds(this.host.messages());
         this.store.reconcile();
