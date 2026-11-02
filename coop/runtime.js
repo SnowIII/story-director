@@ -1,4 +1,4 @@
-import {clone,fail,text,hash,activeEvent,unfinishedEvent,profileOf,historySignature,rankPolicy,RANK_COUNTS} from './model.js';
+import {clone,fail,text,hash,activeEvent,unfinishedEvent,profileOf,historySignature,rankPolicy,RANK_COUNTS,eventGate} from './model.js';
 import {CoopStore} from './store.js';
 import {configureRoster,removeRoster,candidates} from './roster.js';
 import {appendOperation,project,readDocument} from './timeline.js';
@@ -208,13 +208,12 @@ export class CoopRuntime {
         if(owner && (owner.id!==replanEventId || owner.characterId!==characterId)) fail('SCENE_BUSY','当前 Rank 事件尚未结束，请继续原事件；其他角色的事件正在排队');
         if(this.store.pending) fail('SAVE_PENDING','请先完成尚未确认的保存');
         const p=profileOf(this.state(),characterId);
-        if(p.mode!=='coop' || !p.lock) fail('NOT_READY','该角色尚未解锁下一阶事件');
-        if(this.usesMvuAffinity && (!p.mvuReady || p.rank>=p.rankCount || p.affinity<p.thresholds[p.rank])) fail('NOT_READY','等待 MVU 好感达到下一阶门槛并锁定');
+        if(!eventGate(p,this.usesMvuAffinity)) fail('NOT_READY','等待好感达到下一阶门槛');
         if(this.store.readonly) fail('READ_ONLY');
         continuity(p);
         const existing=replanEventId?p.events[replanEventId]:null;
         if(replanEventId && (!existing || !existing.paused)) fail('NOT_PAUSED');
-        const scope=this.store.scope, policy=p.policyRevision, gate=p.lock.id;
+        const scope=this.store.scope, policy=p.policyRevision, gate=eventGate(p,this.usesMvuAffinity).id;
         const history=hash(continuity(p)), controller=new AbortController();
         ensureMessageIds(this.host.messages());
         const contextRefs=[...this.store.sources().values()].slice(-24).map(ref);
@@ -238,7 +237,7 @@ export class CoopRuntime {
             if(controller.signal.aborted || this.job!==job || this.store.scope!==scope) fail('STALE_TASK');
             ensureMessageIds(this.host.messages());
             const fresh=profileOf(this.state(),characterId);
-            if(fresh.mode!=='coop' || fresh.policyRevision!==policy || fresh.lock?.id!==gate || hash(continuity(fresh))!==history ||
+            if(fresh.mode!=='coop' || fresh.policyRevision!==policy || eventGate(fresh,this.usesMvuAffinity)?.id!==gate || hash(continuity(fresh))!==history ||
                 existing && fresh.events[existing.id]?.version!==existing.version) fail('STALE_TASK');
             if(JSON.stringify([...this.store.sources().values()].slice(-24).map(ref))!==contextKey) fail('STALE_TASK','生成期间场景发生变化，请重试设计');
             const parsed=modelJson(raw);
@@ -375,7 +374,7 @@ export class CoopRuntime {
         const current=this.event();
         if(current) snapshot.event={id:current.id,characterId:current.characterId,version:current.version,phase:current.phase};
         snapshot.sceneCheckRequired=this.store.document.settings.autoStart!==false && !current && !unfinishedEvent(this.state()) && roster.some(p=>p.history.length) && profiles.some(p=>
-            p.mode==='coop' && p.lock && p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank] && (!this.usesMvuAffinity || p.mvuReady));
+            eventGate(p,this.usesMvuAffinity));
         this.snapshot=snapshot;this.snapshots.set(snapshot.nonce,snapshot);
         while(this.snapshots.size>80) this.snapshots.delete(this.snapshots.keys().next().value);
         this.changed();
@@ -560,8 +559,7 @@ export class CoopRuntime {
                 !matchesSourceVersion(source,clearance.version) || !matchesUserVersion(source,clearance.userVersion)) return;
         }
         const roster=Object.values(this.state().profiles);
-        const profiles=roster.filter(p=>p.mode==='coop' && p.lock && this.host.available(p,roster) &&
-            (!this.usesMvuAffinity || p.mvuReady && p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank]) &&
+        const profiles=roster.filter(p=>eventGate(p,this.usesMvuAffinity) && this.host.available(p,roster) &&
             !Object.values(p.events).some(e=>e.phase!=='completed')).sort((a,b)=>(a.scoreLog.at(-1)?.source.index ?? 0)-(b.scoreLog.at(-1)?.source.index ?? 0));
         if(profiles[0]) try {await this.generate(profiles[0].id,{automatic:true});} catch(error) {
             if(!['CANCELLED','STALE_TASK','AUTO_START_DISABLED'].includes(error.code)) this.lastAutoFailure=Date.now();

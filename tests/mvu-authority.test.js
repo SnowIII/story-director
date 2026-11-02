@@ -1,10 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
 import {CoopRuntime} from '../coop/runtime.js';
-import {clone,initialState} from '../coop/model.js';
+import * as rules from '../coop/model.js';
+import {clone,initialState,rankPolicy} from '../coop/model.js';
 import {deletedEventIds,pruneDeletedEvents} from '../coop/timeline.js';
 import {createHost} from '../coop/host.js';
-import {mergeCoopMvu,mvuApiFor} from '../coop/mvu.js';
+import {mergeCoopMvu,mvuApiFor,mvuCharacterKeys,bindingCapability} from '../coop/mvu.js';
 import {applyNsCommands,setCoopScene,setCoopMvuAuthority} from '../model.js';
 
 async function fixture(t,{initial=5,name='画家',authority=true,rankCount=4,extra=false,legacy=false}={}) {
@@ -47,6 +50,56 @@ async function fixture(t,{initial=5,name='画家',authority=true,rankCount=4,ext
     }
     return {runtime,host,metadata,messages,api,row,write,turn,saveFailure:value=>{failSave=value;}};
 }
+
+function roleCard(runtime,p) {
+    const source=fs.readFileSync(new URL('../coop/ui.js',import.meta.url),'utf8');
+    const card=source.slice(source.indexOf('    function card(p)'),source.indexOf('    function rankOptions()'));
+    return vm.runInNewContext(card+'\ncard(p)',{...rules,runtime,p,esc:String,mvuCharacterKeys,bindingCapability});
+}
+
+for(const rankCount of [4,7,10])for(const extra of [false,true]) test('a missing MVU lock does not hide or block manual threshold events, ranks='+rankCount+', extra='+extra,async t=>{
+    const threshold=rankPolicy(rankCount).thresholds[0],h=await fixture(t,{initial:threshold,rankCount,extra});
+    await h.runtime.configureSettings({autoStart:false});h.write(threshold,false);
+    let calls=0;const ask=h.host.ask;h.host.ask=async(...args)=>{calls++;return ask(...args);};h.host.autoAllowed=()=>true;
+    await h.runtime.maybeAuto();assert.equal(calls,0);
+    assert.ok(roleCard(h.runtime,h.runtime.state().profiles.a).includes('data-action="start"'));
+    await h.runtime.generate('a');assert.equal(calls,1);assert.equal(h.runtime.event().targetRank,1);
+    assert.equal(h.row().好感度,threshold);assert.equal(h.row().好感锁定,false);assert.equal(h.runtime.state().profiles.a.lock,null);
+    const eventId=h.runtime.event().id;await h.runtime.load();assert.equal(h.runtime.event().id,eventId);
+    assert.ok(!roleCard(h.runtime,h.runtime.state().profiles.a).includes('data-action="start"'));
+    h.messages.push({is_user:true,mes:'我来参与。'});await h.runtime.prepare();
+    assert.ok(h.runtime.variableContract().includes('"lockRequired":true'));
+    assert.ok(h.runtime.variableContract().includes('本轮先补写好感锁定=true'));
+});
+
+test('a missing MVU lock still requires the threshold and a free Rank queue',async t=>{
+    const h=await fixture(t,{initial:29});h.write(29,false);
+    assert.ok(!roleCard(h.runtime,h.runtime.state().profiles.a).includes('data-action="start"'));
+    await assert.rejects(h.runtime.generate('a'),{code:'NOT_READY'});
+    h.write(30,false);await h.runtime.generate('a');
+    await h.runtime.configure({id:'b',name:'医生',mode:'coop',initialAffinity:30});await h.runtime.syncMvu();
+    const card=roleCard(h.runtime,h.runtime.state().profiles.b);
+    assert.match(card,/data-action="start"[^>]*disabled/);assert.ok(card.includes('事件排队中'));
+    await assert.rejects(h.runtime.generate('b'),{code:'SCENE_BUSY'});
+});
+
+test('an automatic threshold event starts once when MVU omitted its lock',async t=>{
+    const h=await fixture(t,{initial:29});let calls=0;const ask=h.host.ask;
+    h.host.ask=async(...args)=>{calls++;return ask(...args);};h.host.autoAllowed=()=>true;
+    await h.turn({value:30,locked:false});await h.runtime.maybeAuto();
+    assert.equal(calls,1);assert.equal(h.runtime.event().targetRank,1);
+    assert.equal(h.row().好感锁定,false);assert.equal(h.row().好感度,30);
+});
+
+test('an unlocked threshold falling during design invalidates its late result',async t=>{
+    const h=await fixture(t,{initial:30});h.write(30,false);const raw=await h.host.ask();
+    let release,entered;const started=new Promise(resolve=>{entered=resolve;});
+    h.host.ask=async()=>{entered();return new Promise(resolve=>{release=resolve;});};
+    const task=h.runtime.generate('a');await started;h.write(29,false);release(raw);
+    await assert.rejects(task,{code:'STALE_TASK'});assert.equal(h.runtime.event(),null);
+    assert.ok(!h.runtime.store.document.journal.some(op=>op.kind==='plan'));
+    assert.equal(h.row().好感度,29);assert.equal(h.row().好感锁定,false);
+});
 
 test('the production host selects MVU as the affinity authority',()=>{
     assert.equal(createHost().affinityAuthority,'mvu');
@@ -354,12 +407,32 @@ async function completeCurrent(h) {
     const rank=h.runtime.event().targetRank;
     await h.turn({body:'她拿出旧画册。',event:{evidence:'旧画册'}});
     await h.turn({body:'她提出疑问，等待用户回应。',event:{evidence:'提出疑问'}});
+    if(rank===rankPolicy(h.runtime.state().profiles.a).relationshipRank) {
+        await h.turn();await h.runtime.route('romance');
+    }
     await h.turn({body:'她接受有限帮助，决定先核对资料。',event:{evidence:'接受有限帮助',completion:{
         summary:'用户愿意一起核对资料，她接受有限的实际帮助并保留自己的判断，展览的问题留待后续处理。',
         outcome:'核对资料',outcomeEvidence:'核对资料',choice:'愿意帮忙',choiceEvidence:'愿意帮你',
         traits:['第'+rank+'阶成长'],facts:['第'+rank+'阶事实'],boundaries:[],openHooks:[],closedHooks:[],
         sharedFacts:[{entityId:'fact-'+rank,fact:'第'+rank+'阶事实',evidence:'核对资料',knownBy:['a']}]}}});
 }
+
+test('Rank 6 of 7 with affinity 100 and an omitted MVU lock can start and archive Rank 7',async t=>{
+    const h=await fixture(t,{rankCount:7});await h.runtime.configureSettings({autoStart:false});
+    for(const threshold of rankPolicy(7).thresholds.slice(0,6)) {h.write(threshold,true);await completeCurrent(h);}
+    assert.equal(h.runtime.state().profiles.a.rank,6);h.write(100,false);
+    const history=clone(h.runtime.state().profiles.a.history);
+    assert.equal(h.runtime.state().profiles.a.route,'romance');
+    assert.ok(roleCard(h.runtime,h.runtime.state().profiles.a).includes('data-action="start"'));
+    await h.runtime.generate('a');assert.equal(h.runtime.event().targetRank,7);
+    assert.equal(h.row().好感度,100);assert.equal(h.row().好感锁定,false);
+    await h.runtime.load();assert.equal(h.runtime.event().targetRank,7);
+    assert.deepEqual(h.runtime.state().profiles.a.history,history);
+    await completeCurrent(h);assert.equal(h.runtime.state().profiles.a.rank,7);
+    assert.equal(h.runtime.state().profiles.a.history.length,7);assert.equal(h.runtime.state().profiles.a.route,'romance');
+    assert.ok(!roleCard(h.runtime,h.runtime.state().profiles.a).includes('data-action="start"'));
+    await assert.rejects(h.runtime.generate('a'),{code:'NOT_READY'});
+});
 
 test('existing legacy rank archives remain valid when switching to MVU ownership',async t=>{
     const h=await fixture(t,{initial:30,authority:false});await completeCurrent(h);

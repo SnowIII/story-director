@@ -1,4 +1,4 @@
-import {clone,fail} from './model.js';
+import {clone,fail,eventGate} from './model.js';
 import {newDocument,readDocument,project,appendOperation,deletedEventIds,pruneDeletedEvents} from './timeline.js';
 import {sourceMap,uuid,matchesSourceVersion} from './messages.js';
 export const STORAGE_KEY='storyDirectorCoop';
@@ -74,7 +74,11 @@ export class CoopStore {
                 mode:state.profiles[characterId]?.mode || 'coop',at:Date.now()};
             if(this.host.affinityAuthority==='mvu') {
                 op.mvuAuthority=true;
-                if(kind==='plan') {op.data.mvuGate=clone(state.profiles[characterId].lock);op.data.mvuAffinity=state.profiles[characterId].affinity;}
+                if(kind==='plan') {
+                    const gate=eventGate(state.profiles[characterId],true);
+                    if(!gate) fail('NOT_READY','等待 MVU 好感达到下一阶门槛');
+                    op.data.mvuGate=clone(gate);op.data.mvuAffinity=state.profiles[characterId].affinity;
+                }
             }
             return appendOperation(document,state,op,this.sources());
         });

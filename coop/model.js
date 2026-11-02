@@ -62,6 +62,13 @@ export function gateFor(profile, sourceKey) {
     return { id:'gate-' + hash(profile.id + ':' + (profile.rank+1) + ':' + sourceKey),
         targetRank:profile.rank+1, lockedValue:profile.affinity };
 }
+// 事件准入依据 MVU 当前数值；漏写锁定不能隐藏入口，也不改写 MVU 锁定本身。
+export function eventGate(profile,mvuAuthority=false) {
+    if(profile.mode!=='coop') return null;
+    if(!mvuAuthority) return profile.lock;
+    if(!profile.mvuReady || profile.rank>=profile.rankCount || profile.affinity<profile.thresholds[profile.rank]) return null;
+    return profile.lock || gateFor(profile,'mvu');
+}
 export function applyAffinity(state, input) {
     const p = profileOf(state,input.characterId);
     if (p.mode === 'off') fail('NOT_MANAGED');

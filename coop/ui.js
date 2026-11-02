@@ -1,4 +1,4 @@
-import {text,hash,activeEvent,unfinishedEvent,rankPolicy,RANK_COUNTS} from './model.js';
+import {text,hash,activeEvent,unfinishedEvent,rankPolicy,RANK_COUNTS,eventGate} from './model.js';
 import {safeJson,uuid} from './messages.js';
 import {bindingCapability,mvuCharacterKeys} from './mvu.js';
 const esc=value=>String(value ?? '').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
@@ -25,6 +25,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         const owner=unfinishedEvent(runtime.state()),queued=!!owner && owner.characterId!==p.id;
         const queueAttributes=queued?' disabled title="等待当前 Rank 事件完成"':'';
         const next=p.rank<p.rankCount?p.thresholds[p.rank]:'—';
+        const ready=!!eventGate(p,runtime.usesMvuAffinity);
         return '<article class="sdc-card"><div class="sdc-row"><strong>'+esc(p.name)+'</strong></div>'+
             ((p.aliases || []).length?'<p class="sdc-field-help">别名／简称：'+esc(p.aliases.join('、'))+'</p>':'')+
             '<p>'+ (p.lock?'🔒 ':'')+'好感 '+p.affinity+'／100 · Rank '+p.rank+'／'+p.rankCount+' · 下一阶门槛 '+next+'</p>'+
@@ -32,9 +33,9 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
             (bindingCapability(runtime.host.mvu?.()).available?'<p class="sdc-field-help">MVU 好感度路径：<code>'+esc(mvuPath)+'</code></p>':'')+
             (p.lock?'<p class="sdc-lock">'+(p.unlockAfterArchive?'本阶已归档，下一轮 MVU 更新将解除好感锁定。':
                 '完成 Rank '+p.lock.targetRank+' 羁绊事件后解锁；增减均暂停，不补发积分。')+'</p>':'')+
-            (queued && p.lock?'<p class="sdc-field-help">事件排队中，等待 '+esc(runtime.state().profiles[owner.characterId].name)+' 的 Rank '+owner.targetRank+' 事件结束。</p>':'')+
+            (queued && ready?'<p class="sdc-field-help">事件排队中，等待 '+esc(runtime.state().profiles[owner.characterId].name)+' 的 Rank '+owner.targetRank+' 事件结束。</p>':'')+
             '<div class="sdc-actions">'+
-            (p.mode==='coop' && p.lock && !unfinished && (!runtime.usesMvuAffinity || p.mvuReady && p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank])?'<button data-action="start" data-id="'+esc(p.id)+'"'+queueAttributes+'>开始下一阶事件</button>':'')+
+            (ready && !unfinished?'<button data-action="start" data-id="'+esc(p.id)+'"'+queueAttributes+'>开始下一阶事件</button>':'')+
             (p.mode==='coop' && unfinished?'<button data-action="'+(unfinished.paused?'resume':'pause')+'" data-id="'+esc(p.id)+'" data-event="'+esc(unfinished.id)+'"'+(unfinished.paused?queueAttributes:'')+'>'+(unfinished.paused?'继续事件':'暂停事件')+'</button>':'')+
             (p.mode==='coop' && unfinished?.paused?'<button data-action="replan" data-id="'+esc(p.id)+'" data-event="'+esc(unfinished.id)+'"'+queueAttributes+'>重设未演部分</button>':'')+
             '<button data-action="history" data-id="'+esc(p.id)+'">历阶摘要／档案</button>'+
@@ -119,8 +120,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         const state=runtime.state(),store=runtime.store,profiles=Object.values(state.profiles);
         const event=activeEvent(state),locked=profiles.filter(p=>p.lock);
         const paused=profiles.flatMap(p=>Object.values(p.events)).filter(e=>e.paused && e.phase!=='completed');
-        const ready=profiles.filter(p=>p.mode==='coop' && p.lock && !Object.values(p.events).some(e=>e.phase!=='completed') &&
-            (!runtime.usesMvuAffinity || p.mvuReady && p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank]));
+        const ready=profiles.filter(p=>eventGate(p,runtime.usesMvuAffinity) && !Object.values(p.events).some(e=>e.phase!=='completed'));
         const skipped=(state.skipped || []).filter(item=>!runtime.usesMvuAffinity || store.document.journal.find(op=>op.id===item.id)?.kind!=='affinity');
         const stale=skipped.filter(item=>['STALE_SOURCE','STALE_DEPENDENCY'].includes(item.code)).length;
         const invalid=skipped.length-stale;

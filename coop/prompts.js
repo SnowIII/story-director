@@ -86,11 +86,13 @@ export function affinityContract(profiles,snapshot,byExtra=false) {
     if(!profiles.length) return '';
     const actors=profiles.map(p=>({name:p.name,aliases:p.aliases || [],mvuKey:snapshot.roles[p.id].mvuKey,
         affinity:p.affinity,locked:!!p.lock,mode:p.mode,nextThreshold:p.rank<p.rankCount?p.thresholds[p.rank]:null,
+        lockRequired:p.mode==='coop' && (Object.values(p.events).some(e=>e.phase!=='completed') || p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank]),
         unlockAfterArchive:!!p.unlockAfterArchive}));
     const first=actors[0],path='/故事导演/Coop/角色/'+first.mvuKey.replace(/~/g,'~0').replace(/\//g,'~1');
     return ['【Coop 角色数值更新】好感度与好感锁定以 MVU 为唯一来源，只更新下列 mvuKey 对应的两个字段：',JSON.stringify(actors),
         '同一人的主名与别名只处理一次；不新建人物。指代不明时保持原值，不凭代词或共用姓氏猜测。只有本轮真实行动才产生变化：闲聊0，体贴+1，理解／实际帮助+2，重要支持+3～5，冒犯−1～−3，严重背叛−5～−10。重复夸奖或旧行动不重复计分。',
         '未锁定时计算 0～100 的整数最终值；coop 模式达到 nextThreshold 就封顶到该门槛并锁定，满阶不再新增门槛锁。超过100强制按100处理。',
+        'lockRequired=true 但 locked=false 表示门槛或未完成事件的锁定漏写；本轮先补写好感锁定=true，不因本轮互动增减好感，超过下一阶门槛时只封顶，不补分。',
         'locked=true 时好感保持不变，正负变化都不累积、不补发。只有 unlockAfterArchive=true 才解除锁定，解锁当轮好感保持原值，下轮再增减。',
         '只更新角色好感度与好感锁定，不修改 Rank、路线、阶级方案或档案。事件进度与摘要由故事导演直接接收，变量模型不生成事件回报。',
         '与其他变量共用一个变量块和 JSONPatch 数组；不变字段可省略。下例数值须替换为本轮最终值，其他角色同理：',
