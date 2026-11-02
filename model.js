@@ -756,9 +756,18 @@ export function beatsOf(target) {
   return splitBeats(beats);
 }
 
+/** 前置补充内容不参与剧情解析；未闭合时也不把其中的示例当作真实结果。 */
+export function stripPreThink(text) {
+  return String(text ?? '').replace(/<preThink\b[^>]*>[\s\S]*?(?:<\/preThink\s*>|$)/gi, '');
+}
+
+export function storyAuditVerdict(text) {
+  return String((stripPreThink(text).match(/检查[:：]\s*([^\n]+)/) || [])[1] ?? '').trim();
+}
+
 /** 解析模型的 <StoryChapters> / <StoryThreads> / <StoryInterlude> 区块。 */
 export function parseBlocks(text, tag) {
-  const source = String(text ?? '');
+  const source = stripPreThink(text);
   const pattern = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'gi');
   const out = [];
   for (const match of source.matchAll(pattern)) out.push(match[1]);
@@ -1948,11 +1957,15 @@ export function landingOpsInReply(text) {
  * @returns {{kind:'ok'|'truncated'|'wrong-tag'|'no-block'|'no-fields', hint:string, saw:string}}
  */
 export function storyBlockFailure(text, tag) {
-  const s = String(text ?? '');
+  const raw = String(text ?? '');
+  const s = stripPreThink(raw);
   const name = String(tag ?? '');
   if (parseBlocks(s, name).length) return { kind: 'ok', hint: '', saw: name };
   if (new RegExp(`<${name}[^>]*>`, 'i').test(s)) {
     return { kind: 'truncated', hint: `<${name}> 开了头却没有闭合 —— 这次回复**被截断了**（长度上限不够，或上游掐断）`, saw: name };
+  }
+  if (/<preThink\b[^>]*>(?:(?!<\/preThink\s*>)[\s\S])*$/i.test(raw)) {
+    return { kind: 'truncated', hint: '<preThink> 未闭合，尚未收到可用的剧情结果区块（可能输出被截断）', saw: 'preThink' };
   }
   const other = s.match(/<Story([A-Za-z]+)[\s>]/);
   if (other) {

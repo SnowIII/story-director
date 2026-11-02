@@ -39,4 +39,5 @@ export const FIELD_PROMPTS={
     interlude_after:field('interlude','接在','插曲 · 接在','填写「第 N 拍之后」或「随时」，N 是当前主线中真实存在的拍号。结合现场选择合适的接入点，不改变当前拍号。')
 };
 
+export const FIELD_PROMPT_DEFAULT_NOTE='（关闭使用默认设置）';
 export const fieldPromptName=key=>'字段写法 · '+FIELD_PROMPTS[key].label;

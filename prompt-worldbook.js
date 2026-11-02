@@ -1,8 +1,9 @@
 import {hash} from './coop/model.js';
-import {FIELD_PROMPTS,fieldPromptName} from './prompt-fields.js';
-export {FIELD_PROMPTS,fieldPromptName} from './prompt-fields.js';
+import {FIELD_PROMPTS,fieldPromptName,FIELD_PROMPT_DEFAULT_NOTE} from './prompt-fields.js';
+export {FIELD_PROMPTS,fieldPromptName,FIELD_PROMPT_DEFAULT_NOTE} from './prompt-fields.js';
 
 export const PROMPT_SLOTS=Object.fromEntries(Object.keys(FIELD_PROMPTS).map(key=>[key,fieldPromptName(key)]));
+export const PRETHINK_PROMPT={key:'return_prethink',marker:'[sd_return_prethink]',name:'返回前置内容 · preThink（默认不输出）'};
 // 字段名与兼容别名属于传输协议，字段内部的叙事小标题不是新属性。
 export const DESIGN_FIELDS={
     epic:['标题','title','篇章','总纲','纲','line','章内容','章节表','章','chapters','走向','movements','大高潮','高潮','climax','伏笔','hooks','既成事实','事实','ledger'],
@@ -11,7 +12,12 @@ export const DESIGN_FIELDS={
     thread:['标题','title','目标','goal','切入','起始迹象','entry','落点','收束','land','时限','due'],
     interlude:['标题','title','内容','一拍','beat','接在','after']
 };
-const marker=entry=>String(entry?.comment ?? entry?.name ?? '').match(/\[sd_field_([a-z_]+)\]/i)?.[1].toLowerCase();
+const marker=entry=>{
+    const name=String(entry?.comment ?? entry?.name ?? '');
+    return name.toLowerCase().includes(PRETHINK_PROMPT.marker) ? PRETHINK_PROMPT.key
+        : name.match(/\[sd_field_([a-z_]+)\]/i)?.[1].toLowerCase();
+};
+const knownKey=key=>Object.hasOwn(PROMPT_SLOTS,key) || key===PRETHINK_PROMPT.key;
 const enabled=entry=>typeof entry?.disable==='boolean'?!entry.disable:entry?.enabled===true;
 let selected=new Map();
 
@@ -19,7 +25,7 @@ export function setPromptEntries(entries) {
     const next=new Map();
     for(const entry of entries || []) {
         const key=marker(entry),content=typeof entry?.content==='string'?entry.content.trim():'';
-        if(Object.hasOwn(PROMPT_SLOTS,key) && enabled(entry) && content && !next.has(key))
+        if(knownKey(key) && enabled(entry) && content && !next.has(key))
             next.set(key,content);
     }
     selected=next;
@@ -54,6 +60,7 @@ export function configureDesignPrompt(builtin,_sections={},parameters={}) {
     const fields=Object.entries(FIELD_PROMPTS).filter(([,field])=>field.task===parts.key).map(([key,field])=>
         '【'+field.label+'；返回字段「'+field.field+'」】\n'+applyPromptTemplate(key,field.content,{variables:parameters})
             .replace(/<\/?(?:StoryEpic|StoryChapters|StoryInterludeChapter|StoryThreads|StoryInterlude)\b[^>]*>/gi,''));
+    const preThink=applyPromptTemplate(PRETHINK_PROMPT.key,'',{variables:parameters}).trim();
     const runtime=Object.fromEntries(Object.entries(parameters).filter(([key])=>
         ['task','beatTarget','beatBudget','interludeBeats','chaptersPerEpic','keep','remaining','regenerate','rejected','epicMode'].includes(key)));
     const task=parts.key==='epic' ? parameters.epicMode==='audit' ? '检查这一部篇章还成不成立，保留已演章节'
@@ -64,20 +71,27 @@ export function configureDesignPrompt(builtin,_sections={},parameters={}) {
         '本次程序参数：'+JSON.stringify(runtime),
         '实际处境、用户要求、已演内容与篇章章表见本次用户消息。已发生事实和已演部分不可撤销。',
         '仅字段内部的写法按对应字段条目执行，不把一项字段要求套到其他字段。任务、真实设定和已演进度仍以程序与上下文为准。'];
+    const format=preThink ? parts.format.replace('且**只输出一个区块**','先输出 <preThink>〔按返回前置内容配置填写〕</preThink>，再输出一个剧情结果区块') : parts.format;
     const contract=['【固定返回格式：仅约束标签、顶层字段与数据结构】',...context,
         '字段值的具体写法遵循上面的对应字段规则；标签、顶层字段、编号、数量和运行边界以本节为准。',
-        '下列括号内文字是内容占位，不要照抄。字段名原样保留，字段值按创作规则填写；编号条目可包含分号和自定义小标题。',parts.format].join('\n');
-    return parts.body+'\n\n【各字段的生成写法】\n只在对应字段采用以下规则。内置任务说明不额外规定字段小标题与内部组织。\n\n'+fields.join('\n\n')+'\n\n'+contract;
+        ...(preThink ? ['返回前置内容是面向用户的补充说明，先放在一个闭合的 <preThink> 区块内，再输出下列剧情结果。两种区块不得嵌套；检查结论仍写在结果区块之后，不放入 preThink。'] : []),
+        '下列括号内文字是内容占位，不要照抄。字段名原样保留，字段值按创作规则填写；编号条目可包含分号和自定义小标题。',format].join('\n');
+    const preamble=preThink ? '\n\n【返回前置内容】\n'+preThink : '';
+    return parts.body+'\n\n【各字段的生成写法】\n只在对应字段采用以下规则。内置任务说明不额外规定字段小标题与内部组织。\n\n'+fields.join('\n\n')+preamble+'\n\n'+contract;
 }
 
 export function preservePromptEntries(bundled,installed) {
     for(const entry of Object.values(bundled.entries || {})) {
         const key=marker(entry);
-        if(!Object.hasOwn(PROMPT_SLOTS,key)) continue;
+        if(!knownKey(key)) continue;
         const previous=installed.find(item=>marker(item)===key);
         if(typeof previous?.content!=='string') continue;
-        if(hash(previous.content.trim())!==previous.sdPromptDefaultHash) entry.content=previous.content;
-        entry.enabled=enabled(previous);entry.disable=!entry.enabled;
+        const edited=hash(previous.content.trim())!==previous.sdPromptDefaultHash;
+        if(edited) entry.content=previous.content;
+        // 0.43.0 的未改默认条目随新默认关闭；已定制或使用本版名称的开关照旧保留。
+        const disabledDefault=previous.sdPromptDefaultDisabled===true || String(previous.comment ?? previous.name ?? '').includes(FIELD_PROMPT_DEFAULT_NOTE);
+        const oldDefault=Object.hasOwn(PROMPT_SLOTS,key) && !edited && !disabledDefault;
+        entry.enabled=oldDefault ? false : enabled(previous);entry.disable=!entry.enabled;
     }
     return bundled;
 }

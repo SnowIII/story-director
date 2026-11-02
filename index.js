@@ -19,7 +19,7 @@
 import { createCoopSystem } from './coop/bootstrap.js';
 import { mvuApiFor } from './coop/mvu.js';
 import { designTemplates, preserveDesignTemplates } from './coop/design-worldbook.js';
-import { setPromptEntries, FIELD_PROMPTS, fieldPromptName } from './prompt-worldbook.js';
+import { setPromptEntries, FIELD_PROMPTS, fieldPromptName, FIELD_PROMPT_DEFAULT_NOTE } from './prompt-worldbook.js';
 import { createMessageRefreshQueue } from './message-render.js';
 import { createUpdateReloader } from './update-reload.js';
 import { extension_settings } from '../../../extensions.js';
@@ -43,7 +43,7 @@ import {
     STATUS_PENDING, STATUS_ACTIVE, STATUS_DONE, STATUS_SKIPPED, STATUS_STALLED,
     isPlainObject, unwrap, unwrapDeep, display, toNumber, truthy,
     reviewLadder, STRIKES_BEFORE_EPIC, nsHasState, beatRollbackTarget, reviewAction, REVIEW_SETUP,
-    capText, splitBeats, beatsOf, parseBlocks,
+    capText, splitBeats, beatsOf, parseBlocks, storyAuditVerdict,
     emptyMain, mainOf, listOf, currentBeat, reviewStateOf, reviewNoteOf,
     isLiveThread, threadLanded, interludePending, interludeAfter,
     nextId, takenTitles, completedMainTitles,
@@ -62,7 +62,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.43.0';
+const VERSION = '0.44.0';
 let coop = null;
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
@@ -2253,7 +2253,7 @@ async function collectContextBlocks(task = 'chapter', taskOpts = {}) {
     //     固定通则和按任务选取的字段写法由系统提示词提供，不在用户上下文中重复发送。
     try {
         const ours = await readOurWorldbookEntries();
-        const plot = ours.filter((entry) => !/\[mvu_update\]|\[InitVar\]|\[coop_(?:design|forms|rank_)|\[sd_(?:prompt_|field_)/i.test(String(entry?.comment ?? entry?.name ?? '')));
+        const plot = ours.filter((entry) => !/\[mvu_update\]|\[InitVar\]|\[coop_(?:design|forms|rank_)|\[sd_(?:prompt_|field_|return_)/i.test(String(entry?.comment ?? entry?.name ?? '')));
         const digest = worldbookDigest(plot);
         if (digest) blocks.push(`=== 本插件自带世界书「${PLUGIN_WORLD}」里面向剧情的条目 ===\n${capText(digest, 24000)}`);
     } catch (error) {
@@ -4033,7 +4033,7 @@ async function generateEpic({ quiet = true, userText = '', force = false, mode =
             const before = epicChapters(epicOf(rootOf()));
             const after = epicChapters(epic);
             const changed = stableJson(before) !== stableJson(after);
-            const verdict = String((raw.match(/检查[:：]\s*([^\n]+)/) || [])[1] ?? '').trim();
+            const verdict = storyAuditVerdict(raw);
             const run = settings().run;
             run.lastAudit = {
                 at: aiMessageCount(),
@@ -5579,12 +5579,12 @@ function renderNowTab() {
 }
 
 function fieldPromptHint(key) {
-    return `<small class="sd-field-prompt">生成写法：世界书「故事导演」→「${esc(fieldPromptName(key))}」</small>`;
+    return `<small class="sd-field-prompt">生成写法：世界书「故事导演」→「${esc(fieldPromptName(key))}」${FIELD_PROMPT_DEFAULT_NOTE}</small>`;
 }
 
 function fieldPromptDirectory(task) {
     const fields=Object.entries(FIELD_PROMPTS).filter(([,field])=>field.task===task);
-    return `<details class="sd-fold sd-field-directory"><summary>修改这些字段的生成写法</summary><p class="sd-note">编辑世界书「故事导演」中的对应条目，下一次生成生效。当前框内保存的是剧情结果。</p>${fields.map(([key])=>fieldPromptHint(key)).join('')}</details>`;
+    return `<details class="sd-fold sd-field-directory"><summary>修改这些字段的生成写法</summary><p class="sd-note">条目默认关闭，使用内置写法。编辑并开启对应条目后，下一次生成采用自定义写法。当前框内保存的是剧情结果。</p>${fields.map(([key])=>fieldPromptHint(key)).join('')}</details>`;
 }
 
 function renderMainTab() {

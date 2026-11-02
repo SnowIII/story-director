@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import * as model from '../model.js';
-import {FIELD_PROMPTS,fieldPromptName,setPromptEntries,configureDesignPrompt,splitDesignPrompt,preservePromptEntries} from '../prompt-worldbook.js';
+import {FIELD_PROMPTS,fieldPromptName,FIELD_PROMPT_DEFAULT_NOTE,setPromptEntries,configureDesignPrompt,splitDesignPrompt,preservePromptEntries} from '../prompt-worldbook.js';
 import {hash} from '../coop/model.js';
 import {directorFixture} from './prompt-fixture.js';
 
@@ -17,13 +17,14 @@ test('the worldbook contains one readable entry per output field and no old prom
     const list=entries(),fields=list.filter(e=>/\[sd_field_/.test(e.comment));
     assert.equal(Object.keys(FIELD_PROMPTS).length,22);assert.equal(fields.length,22);
     assert.ok(!list.some(e=>/\[(?:sd_prompt_|coop_|sd_legacy_)/.test(e.comment)));
-    assert.equal(list.length,25);
+    assert.equal(list.length,26);
     for(const [key,field] of Object.entries(FIELD_PROMPTS)){
         const found=fields.find(e=>e.comment.includes('[sd_field_'+key+']'));
         assert.ok(found.comment.includes(fieldPromptName(key)));
+        assert.ok(found.comment.endsWith(FIELD_PROMPT_DEFAULT_NOTE));
         assert.equal(found.content,field.content);assert.ok(!found.content.includes('{{sd.default}}'));
         assert.equal(found.sdPromptDefaultHash,hash(found.content.trim()));
-        assert.equal(found.enabled,true);assert.equal(found.disable,false);assert.equal(found.constant,false);assert.deepEqual(found.key,[]);
+        assert.equal(found.enabled,false);assert.equal(found.disable,true);assert.equal(found.constant,false);assert.deepEqual(found.key,[]);
     }
 });
 
@@ -80,7 +81,7 @@ test('the real page renderers show matching worldbook entry names beside fields 
     const f=directorFixture(),host={innerHTML:'',querySelector:()=>null,querySelectorAll:()=>[]};
     Object.assign(f.context,{panel:{querySelector:()=>host},mainState:()=>model.mainOf(f.root),currentMode:()=> 'main',
         esc:value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;'),
-        FIELD_PROMPTS,fieldPromptName,threadsState:()=>[],interludesState:()=>[],archivedEpicSection:()=>''});
+        FIELD_PROMPTS,fieldPromptName,FIELD_PROMPT_DEFAULT_NOTE,threadsState:()=>[],interludesState:()=>[],archivedEpicSection:()=>''});
     vm.runInContext(['fieldPromptHint','fieldPromptDirectory','renderMainTab','renderEpicTab','renderInterludeTab','renderSideTab'].map(name=>functionSource(f.source,name)).join('\n'),f.context);
     f.context.renderMainTab();
     for(const [key,field] of Object.entries(FIELD_PROMPTS).filter(([,field])=>field.task==='chapter'))assert.ok(host.innerHTML.includes(fieldPromptName(key)));
