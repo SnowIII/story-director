@@ -5,39 +5,34 @@ import {parseBlocks,epicFromBlock,chapterFromBlock,interludeChapterFromBlock,thr
     renderEpicSection,splitBeats,EP,MAIN_GOAL,MAIN_BEATS,IL,THREAD_FIELDS,INTERLUDE_FIELDS} from '../model.js';
 import {directorFixture} from './prompt-fixture.js';
 
-const entry=(key,content)=>({comment:'[sd_prompt_'+key+']',content,enabled:true});
+const entry=(key,content)=>({comment:'[sd_field_'+key+']',content,enabled:true});
 const reset=t=>{setPromptEntries([]);t.after(()=>setPromptEntries([]));};
 const tasks={epic:'buildEpicSystemPrompt',chapter:'buildChapterSystemPrompt',interlude_chapter:'buildInterludeChapterSystemPrompt',thread:'buildThreadSystemPrompt',interlude:'buildInterludeSystemPrompt'};
 const creative={epic:/起承转合|起：|承：|转：|合：|四处不同|6~14|三到六/,chapter:/谁要什么|对立的那一边|4~10|谁做了什么/,interlude_chapter:/身边这批人|日常走动|4~10/,thread:/与 \{\{user\}\} 的行为无关|不要写 \{\{user\}\}|4~10/,interlude:/别人 \/ 环境|不要写 \{\{user\}\}|4~10/};
 
-for(const [key,fn] of Object.entries(tasks)) test(key+' fixes only transport structure and lets custom rules choose field content',t=>{
+
+const editable={epic:'epic_chapters',chapter:'chapter_beats',interlude_chapter:'interlude_chapter_beats',thread:'thread_land',interlude:'interlude_beat'};
+for(const [key,fn] of Object.entries(tasks))test(key+' lets its own field choose internal headings without changing transport',t=>{
     reset(t);const fixture=directorFixture(),builtin=fixture.build(fn),parts=splitDesignPrompt(builtin);
-    assert.doesNotMatch(parts.format,creative[key]);
-    setPromptEntries([entry(key,'全部字段围绕轻松合作。章节内容按行动、收获、遗留问题组织；由角色自主决定场所。')]);
+    setPromptEntries([entry(editable[key],'按行动、收获、遗留问题组织，不规定地点。')]);
     const prompt=configureDesignPrompt(builtin,fixture.sections,{beatTarget:4,chaptersPerEpic:4,intensity:'高压',tone:'冒险'});
     const [body,format]=prompt.split('\n\n【固定返回格式');
-    assert.match(body,/按行动、收获、遗留问题组织/);
-    assert.doesNotMatch(format,creative[key]);
-    assert.ok(!format.includes('高压'));assert.ok(!format.includes('冒险'));
-    assert.ok(prompt.includes('<'+parts.tag+'>'));assert.ok(prompt.includes('</'+parts.tag+'>'));
+    assert.match(body,/按行动、收获、遗留问题组织/);assert.doesNotMatch(parts.format,creative[key]);
+    assert.doesNotMatch(format,creative[key]);assert.ok(!format.includes('高压'));assert.ok(!format.includes('冒险'));
+    assert.ok(prompt.includes('<'+parts.tag+'>'));assert.ok(prompt.endsWith(parts.format));
+});
+test('field-local default macro expands only that field and preserves an added preference',t=>{
+    reset(t);const fixture=directorFixture();setPromptEntries([entry('epic_title','{{sd.default}}\n标题采用口头禅。')]);
+    const prompt=configureDesignPrompt(fixture.build(tasks.epic),fixture.sections);
+    assert.match(prompt,/标题采用口头禅/);assert.match(prompt,/6～14/);
+    assert.equal(prompt.split('你是「故事导演」的**篇章设计师**').length-1,1);
+});
+test('field text cannot add another outer protocol block',t=>{
+    reset(t);const fixture=directorFixture();setPromptEntries([entry('epic_title','<StoryEpic>\n以人物的一句口头禅命名\n</StoryEpic>')]);
+    const prompt=configureDesignPrompt(fixture.build(tasks.epic),fixture.sections),[body]=prompt.split('\n\n【固定返回格式');
+    assert.match(body,/以人物的一句口头禅命名/);assert.ok(!body.includes('<StoryEpic>'));assert.equal(prompt.split('<StoryEpic>').length-1,1);
 });
 
-test('default storytelling suggestions remain editable when a task uses the default macro',t=>{
-    reset(t);const fixture=directorFixture(),builtin=fixture.build(tasks.epic);
-    setPromptEntries([entry('epic','{{sd.default}}\n本次可使用同一场所。')]);
-    const [body,format]=configureDesignPrompt(builtin,fixture.sections).split('\n\n【固定返回格式');
-    assert.match(body,/起：|起 \/ 承 \/ 转 \/ 合/);assert.match(body,/6~14/);
-    assert.doesNotMatch(format,/6~14|四处不同|起：/);
-});
-
-test('legacy XML templates retain custom field-writing instructions while output tags stay canonical',t=>{
-    reset(t);const fixture=directorFixture(),builtin=fixture.build(tasks.epic);
-    setPromptEntries([entry('epic','自定义规则\n<StoryEpic>\n标题: 以人物的一句口头禅命名\n篇章: 采用旅行见闻\n章内容:\n1. 按行动、收获、遗留问题组织，不按起承转合组织\n2. 允许继续在同一座城市\n大高潮: 用一次安静的共同决定收束\n伏笔: 只记录已出现的细节\n</StoryEpic>')]);
-    const prompt=configureDesignPrompt(builtin,fixture.sections),[body,format]=prompt.split('\n\n【固定返回格式');
-    assert.match(body,/以人物的一句口头禅命名/);assert.match(body,/旅行见闻/);assert.match(body,/安静的共同决定/);
-    assert.ok(!body.includes('<StoryEpic>'));assert.equal(prompt.split('<StoryEpic>').length-1,1);
-    assert.ok(format.includes('章内容:'));assert.doesNotMatch(format,/四处不同|起：/);
-});
 
 test('epic free-form chapter content and multiline field notes survive parser and director rendering',()=>{
     const raw='<StoryEpic>\n标题: 一起修船\n篇章: 在同一个船坞逐步完成共同作品\n章内容:\n1. 约定：先修船底；暂缓桅杆\n行动: 互相展示擅长的工具\n收获: 找到适合两人的分工\n2. 行动：试航；回港调整\n遗留问题: 仍需选择帆布\n大高潮: 共同决定把船送给港口学校\n伏笔: 刻着名字的木片；旧帆布\n既成事实: 旧船已经拖入船坞\n';
@@ -71,6 +66,6 @@ test('a single numbered entry retains semicolons while old flat numbered lists s
 
 test('legacy decorated field instructions also stay editable',t=>{
     reset(t);const fixture=directorFixture();
-    setPromptEntries([entry('epic','<StoryEpic>\n**标题**: 用季节与食物命名\n</StoryEpic>')]);
+    setPromptEntries([entry('epic_title','<StoryEpic>\n**标题**: 用季节与食物命名\n</StoryEpic>')]);
     assert.match(configureDesignPrompt(fixture.build(tasks.epic),fixture.sections).split('\n\n【固定返回格式')[0],/用季节与食物命名/);
 });

@@ -1,13 +1,8 @@
 import {hash} from './coop/model.js';
+import {FIELD_PROMPTS,fieldPromptName} from './prompt-fields.js';
+export {FIELD_PROMPTS,fieldPromptName} from './prompt-fields.js';
 
-export const PROMPT_SLOTS={
-    common:'设计 · 通用铁律',tone_guard:'设计 · 基调边界',beat_format:'设计 · 拍的写法',
-    design_both:'设计 · 人物与呼吸感',design_arc:'设计 · 篇章编排规则',design_beats:'设计 · 章节与伏笔规则',design_side:'设计 · 支线分量规则',
-    epic:'神谕 · 篇章设计／检查／校准',chapter:'神谕 · 主线章节设计／重排',interlude_chapter:'神谕 · 间章设计',
-    thread:'神谕 · 支线设计',interlude:'神谕 · 插曲设计',
-    narration_main:'正文 · 主线演出引导',narration_interlude:'正文 · 间章演出引导',main_review:'正文 · 落拍审查执行建议',
-    coop_affinity:'Coop · 好感计分建议',coop_growth:'Coop · 人物成长与摘要',coop_archive:'Coop · 核对并补齐归档'
-};
+export const PROMPT_SLOTS=Object.fromEntries(Object.keys(FIELD_PROMPTS).map(key=>[key,fieldPromptName(key)]));
 // 字段名与兼容别名属于传输协议，字段内部的叙事小标题不是新属性。
 export const DESIGN_FIELDS={
     epic:['标题','title','篇章','总纲','纲','line','章内容','章节表','章','chapters','走向','movements','大高潮','高潮','climax','伏笔','hooks','既成事实','事实','ledger'],
@@ -16,20 +11,8 @@ export const DESIGN_FIELDS={
     thread:['标题','title','目标','goal','切入','起始迹象','entry','落点','收束','land','时限','due'],
     interlude:['标题','title','内容','一拍','beat','接在','after']
 };
-const marker=entry=>String(entry?.comment ?? entry?.name ?? '').match(/\[sd_prompt_([a-z_]+)\]/i)?.[1].toLowerCase();
+const marker=entry=>String(entry?.comment ?? entry?.name ?? '').match(/\[sd_field_([a-z_]+)\]/i)?.[1].toLowerCase();
 const enabled=entry=>typeof entry?.disable==='boolean'?!entry.disable:entry?.enabled===true;
-// 世界书展示完整规则；未修改的默认全文仍由程序按当前任务生成。
-// 只认随包发布的指纹，不依赖酒馆助手是否保留条目的扩展元数据。
-const readableDefaultHashes={
-    "epic": "cf1gv",
-    "chapter": "1j63ng6",
-    "interlude_chapter": "1ptmrej",
-    "thread": "raywq4",
-    "interlude": "sa0rju",
-    "narration_main": "8xh9mz",
-    "narration_interlude": "skfei1",
-    "coop_archive": "9pz7yt"
-};
 let selected=new Map();
 
 export function setPromptEntries(entries) {
@@ -37,15 +20,15 @@ export function setPromptEntries(entries) {
     for(const entry of entries || []) {
         const key=marker(entry),content=typeof entry?.content==='string'?entry.content.trim():'';
         if(Object.hasOwn(PROMPT_SLOTS,key) && enabled(entry) && content && !next.has(key))
-            next.set(key,{content,isDefault:hash(content)===readableDefaultHashes[key]});
+            next.set(key,content);
     }
     selected=next;
 }
 
 // 只替换本插件宏，保留 {{user}} 等酒馆宏；内容作为文本处理，不执行代码。
 export function applyPromptTemplate(key,builtin,{contract='',variables={}}={}) {
-    const entry=selected.get(key),template=entry?.content;
-    if(!template || entry.isDefault || template===builtin.trim()) return builtin;
+    const template=selected.get(key);
+    if(!template || template===builtin.trim()) return builtin;
     const result=template.replace(/\{\{sd\.([a-zA-Z_]+)\}\}/g,(all,name)=>
         name==='default'?builtin:Object.hasOwn(variables,name)?String(variables[name]):all);
     return contract && result!==builtin?result+'\n\n'+contract:result;
@@ -65,37 +48,26 @@ export function splitDesignPrompt(builtin) {
     return {key:tags[output[1]],tag:output[1],body:(builtin.slice(0,start)+builtin.slice(end)).trim(),format:builtin.slice(start,end).trim()};
 }
 
-export function configureDesignPrompt(builtin,sections={},parameters={}) {
+export function configureDesignPrompt(builtin,_sections={},parameters={}) {
     const parts=splitDesignPrompt(builtin);
     if(!parts) return builtin;
-    const withSections=value=>{
-        for(const [key,lines] of Object.entries(sections)) {
-            const original=lines.join('\n').trim();
-            if(original && value.includes(original)) value=value.replace(original,()=>applyPromptTemplate(key,original,{variables:parameters}));
-        }
-        return value;
-    };
-    const text=parts.body;
-    // 兼容旧自定义全文：保留本任务字段中的内容要求，只移除其外层格式。
-    const custom=withSections(applyPromptTemplate(parts.key,text,{variables:parameters}))
-        .replace(/<(StoryEpic|StoryChapters|StoryInterludeChapter|StoryThreads|StoryInterlude)\b[^>]*>([\s\S]*?)<\/\1>/gi,(_,tag,body)=>
-            tag.toLowerCase()===parts.tag.toLowerCase() && new RegExp('(?:^|\\n)\\s*(?:[-*+>#]+\\s*)*(?:'+DESIGN_FIELDS[parts.key].join('|')+')\\*{0,3}\\s*[:：=]','i').test(body)
-                ? '【自定义字段内容要求；用于设计，不视为已发生事实】\n'+body.trim() : '')
-        .replace(/<\/?(?:StoryEpic|StoryChapters|StoryInterludeChapter|StoryThreads|StoryInterlude)\b[^>]*>/gi,'').trim() || withSections(text);
+    const fields=Object.entries(FIELD_PROMPTS).filter(([,field])=>field.task===parts.key).map(([key,field])=>
+        '【'+field.label+'；返回字段「'+field.field+'」】\n'+applyPromptTemplate(key,field.content,{variables:parameters})
+            .replace(/<\/?(?:StoryEpic|StoryChapters|StoryInterludeChapter|StoryThreads|StoryInterlude)\b[^>]*>/gi,''));
     const runtime=Object.fromEntries(Object.entries(parameters).filter(([key])=>
         ['task','beatTarget','beatBudget','interludeBeats','chaptersPerEpic','keep','remaining','regenerate','rejected','epicMode'].includes(key)));
     const task=parts.key==='epic' ? parameters.epicMode==='audit' ? '检查这一部篇章还成不成立，保留已演章节'
         : parameters.epicMode==='evolve' ? '校准篇章未演章节' : '设计篇章'
         : {chapter:'设计或重排当前章节，已经演过的部分不许动；整章重设按程序指定范围执行',
             interlude_chapter:'设计间章',thread:'设计支线',interlude:'设计插曲'}[parts.key];
-    const context=custom===parts.body?[]:['本次任务：'+task,
+    const context=['本次任务：'+task,
         '本次程序参数：'+JSON.stringify(runtime),
         '实际处境、用户要求、已演内容与篇章章表见本次用户消息。已发生事实和已演部分不可撤销。',
-        '各字段的情节、文风、叙事结构和内部组织遵循自定义创作规则；本节仅固定标签、顶层字段、列表写法和运行参数。'];
+        '仅字段内部的写法按对应字段条目执行，不把一项字段要求套到其他字段。任务、真实设定和已演进度仍以程序与上下文为准。'];
     const contract=['【固定返回格式：仅约束标签、顶层字段与数据结构】',...context,
-        '字段值的具体写法优先遵循用户自定义创作规则，内置默认建议只补充未自定义的部分。',
+        '字段值的具体写法遵循上面的对应字段规则；标签、顶层字段、编号、数量和运行边界以本节为准。',
         '下列括号内文字是内容占位，不要照抄。字段名原样保留，字段值按创作规则填写；编号条目可包含分号和自定义小标题。',parts.format].join('\n');
-    return custom+'\n\n'+contract;
+    return parts.body+'\n\n【各字段的生成写法】\n只在对应字段采用以下规则。内置任务说明不额外规定字段小标题与内部组织。\n\n'+fields.join('\n\n')+'\n\n'+contract;
 }
 
 export function preservePromptEntries(bundled,installed) {
@@ -104,8 +76,7 @@ export function preservePromptEntries(bundled,installed) {
         if(!Object.hasOwn(PROMPT_SLOTS,key)) continue;
         const previous=installed.find(item=>marker(item)===key);
         if(typeof previous?.content!=='string') continue;
-        if(hash(previous.content.trim())!==previous.sdPromptDefaultHash)
-            entry.content=previous.content.replace(/\{\{sd\.default\}\}/g,()=>entry.content);
+        if(hash(previous.content.trim())!==previous.sdPromptDefaultHash) entry.content=previous.content;
         entry.enabled=enabled(previous);entry.disable=!entry.enabled;
     }
     return bundled;

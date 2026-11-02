@@ -1,13 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import {initialState,clone,hash} from '../coop/model.js';
+import {initialState,clone} from '../coop/model.js';
 import {designMessages,BLUEPRINTS_BY_RANK,growthRule,renderScene,directorReportContract,reportContract} from '../coop/prompts.js';
 import {designTemplates,preserveDesignTemplates} from '../coop/design-worldbook.js';
 import {CoopRuntime} from '../coop/runtime.js';
 
 const bundled=JSON.parse(fs.readFileSync(new URL('../worldbook/story-director.json',import.meta.url),'utf8'));
-const marker=entry=>entry.comment.match(/\[coop_([^\]]+)\]/)?.[1];
 const profile=()=>initialState({a:{id:'a',name:'画家',mode:'coop',rankCount:7}}).profiles.a;
 const history=(rank)=>({rank,eventId:'event-'+rank,summary:'第'+rank+'阶实际完成的经历',choice:'实际选择'+rank,
     outcome:'实际结果'+rank,facts:[],openHooks:[],closedHooks:[]});
@@ -36,22 +35,14 @@ test('legacy archives without original event plans remain usable with built-in a
     }
 });
 
-test('worldbook defaults upgrade while edited templates and both switch states are preserved',()=>{
+test('worldbook upgrades remove old custom Coop templates regardless of their switch state',()=>{
     for(const on of [true,false]){
-        const incoming=clone(bundled),installed=Object.values(clone(bundled).entries);
-        for(const entry of installed.filter(marker)){
-            entry.content='上一版默认流程 '+marker(entry);entry.sdCoopDefaultHash=hash(entry.content);
-            entry.disable=!on;entry.enabled=on;
-        }
-        const edited=installed.find(entry=>marker(entry)==='rank_7');edited.content='保留我的自定义七阶流程';
-        const merged=preserveDesignTemplates(incoming,installed);
-        for(const entry of Object.values(merged.entries).filter(marker)){
-            assert.equal(entry.enabled,on);assert.equal(entry.disable,!on);
-            if(marker(entry)==='rank_7')assert.equal(entry.content,edited.content);
-            else assert.equal(entry.content,Object.values(bundled.entries).find(e=>marker(e)===marker(entry)).content);
-        }
+        const installed=['design','forms','rank_4','rank_7','rank_10'].map(key=>({comment:'[coop_'+key+']',content:'旧自定义 '+key,disable:!on,enabled:on}));
+        const merged=preserveDesignTemplates(clone(bundled),installed);
+        assert.ok(!JSON.stringify(merged).includes('旧自定义'));
+        assert.ok(!Object.values(merged.entries).some(e=>/\[coop_/.test(e.comment)));
         const next=preserveDesignTemplates(clone(bundled),Object.values(merged.entries));
-        assert.equal(Object.values(next.entries).find(entry=>marker(entry)==='rank_7').content,edited.content);
+        assert.deepEqual(next,merged);
     }
 });
 

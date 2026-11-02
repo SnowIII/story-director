@@ -13,13 +13,13 @@
  *             接在某一拍之后才出现，演完即走。
  *
  * 全部状态写在 `stat_data.故事导演` 命名空间下，不碰角色卡自己的变量；
- * 规则文本在插件自带的世界书「故事导演」里（缺失时自动安装）。
+ * 字段写法在插件自带的世界书「故事导演」里（缺失时自动安装）；其他任务与进度规则由代码提供。
  */
 
 import { createCoopSystem } from './coop/bootstrap.js';
 import { mvuApiFor } from './coop/mvu.js';
 import { designTemplates, preserveDesignTemplates } from './coop/design-worldbook.js';
-import { setPromptEntries } from './prompt-worldbook.js';
+import { setPromptEntries, FIELD_PROMPTS, fieldPromptName } from './prompt-worldbook.js';
 import { createMessageRefreshQueue } from './message-render.js';
 import { createUpdateReloader } from './update-reload.js';
 import { extension_settings } from '../../../extensions.js';
@@ -62,7 +62,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.42.3';
+const VERSION = '0.43.0';
 let coop = null;
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
@@ -303,7 +303,7 @@ const DEFAULT = {
      * ★ 0.27.12：**回到 1** —— 用户报的「第一拍一回合演完了，还要硬等三回合才跳拍」。
      *
      *   复盘：那个刹车是在治**症状**。真正的病根是**拍太大** —— 神谕被要求把拍写成
-     *   「一件能被叙述完的结果」（见 BEAT_FORMAT_RULES），于是一拍一条回复就能落地；
+     *   「一件能被叙述完的结果」（见主线 · 拍的字段写法），于是一拍一条回复就能落地；
      *   插件只好用「硬等 N 轮」压速度，而那几轮是**纯空转**：拍已经演完了，
      *   注入却还把它当「当前拍」催模型推进（甚至挂一句「你还没回报落地」的假提示）。
      *
@@ -2184,7 +2184,7 @@ function focusedStateBlock(task, { replacingEpic = false } = {}) {
         if (climax) lines.push(`大高潮：${climax}`);
         if (chapters.length) {
             // 写章节时**必须标明「这一章」**：神谕要细化的就是 ▶ 那一条，别去写别的章
-            lines.push(`章内容（一条一行：每条 起 / 承 / 转 / 合。${isChapter ? '**你要细化的只有 ▶ 那一条**' : '整册的样子'}）：`);
+            lines.push(`章内容（一条一章；内部写法沿用对应字段规则。${isChapter ? '**你要细化的只有 ▶ 那一条**' : '整册的样子'}）：`);
             for (let i = 0; i < chapters.length; i++) {
                 const mark = i + 1 <= written ? '✔' : (i + 1 === written + 1 ? '▶' : '·');
                 lines.push(`　${mark} 第 ${i + 1} 章：${chapters[i]}`);
@@ -2250,11 +2250,10 @@ async function collectContextBlocks(task = 'chapter', taskOpts = {}) {
     //     `[InitVar]` 初始化）。它们全是**写给叙事者的**（「你不需要自己设计剧情走向，照计划演就行」），
     //     把它当「设计规则来源」喂给篇章设计师，等于一边说「你是设计师」一边说「你不用设计」。
     //     所以这里按标签过滤掉它们：今天过滤完是空的 → 整块不发；以后真加了剧情条目也照样能收到。
-    //     设计规则本来就在设计提示词里（`DESIGN_BOTH` / `DESIGN_ARC` / `DESIGN_BEATS` / `DESIGN_SIDE`，
-    //     按层发），单一来源，不必靠世界书转发。
+    //     固定通则和按任务选取的字段写法由系统提示词提供，不在用户上下文中重复发送。
     try {
         const ours = await readOurWorldbookEntries();
-        const plot = ours.filter((entry) => !/\[mvu_update\]|\[InitVar\]|\[coop_(?:design|forms|rank_)|\[sd_prompt_/i.test(String(entry?.comment ?? entry?.name ?? '')));
+        const plot = ours.filter((entry) => !/\[mvu_update\]|\[InitVar\]|\[coop_(?:design|forms|rank_)|\[sd_(?:prompt_|field_)/i.test(String(entry?.comment ?? entry?.name ?? '')));
         const digest = worldbookDigest(plot);
         if (digest) blocks.push(`=== 本插件自带世界书「${PLUGIN_WORLD}」里面向剧情的条目 ===\n${capText(digest, 24000)}`);
     } catch (error) {
@@ -2600,61 +2599,7 @@ const TONE_GUARD = [
     '',
 ];
 
-/** 拍 / 支线 / 插曲统一的「怎么写」要求（各生成提示词里复用）。 */
-const BEAT_FORMAT_RULES = [
-    '每一拍按这个格式写：**谁做了什么 → 于是局面变成什么样**。',
-    '   · 主语必须是 NPC、第三方或环境，**不能是 {{user}}**（藏进前提也算：「得到他的承诺后…」）；',
-    // ★ 0.27.12（用户报的「一拍一回合就演完了，还要硬等」）：
-    //   以前这里写的是「写结果，不要写即将发生」+「不要以 {{user}} 的回应为前置条件」——
-    //   那两条合起来就把一拍定义成「一件**能被叙述完**的事」，于是它当然一条回复就落地。
-    //   现在改成「一拍 = 一个来回」，并要求**收在把局面递给他**（但不要求他回应才成立）。
-    '   · ★ **一拍只写一个来回**：别人的动作 + 它当场造成的局面变化。不要把两三个来回并成一拍；',
-    '   · ★ 收在**把局面递到 {{user}} 面前**（一个提问、一个条件、一件要他处置的事）——',
-    '     但**不要求他回应才成立**：他要是不接，世界照样往前走（下一拍就是别人接着动）。',
-    '好例子：「一名陌生的客商住进了后巷的客栈，第二天清早她的贴身侍女与他搭了两句话」',
-    '坏例子：「她鼓起勇气向他搭话，他答应了」（安排了 {{user}}）',
-    '　　「他若同意，她便说出实情」（把这一拍挂在他的选择上，它就不成立了）',
-    '　　「得到他的承诺后，她便倒戈」（前提是他的动作，一样算安排了他）',
-];
-
-/**
- * ★ 设计规则 —— **只发给故事神谕**，不进正文；而且**按层拆开**，各层只拿自己那一段。
- *
- * 这些内容原来挂在世界书的 `[mvu_plot]` 常驻条目里，于是**每轮都注入正文模型**（6,279 字/轮）。
- * 但它们本质是「**怎么设计**」的知识：三条线的编排、拍的落法、伏笔的埋法……
- * 正文模型不需要这些 —— 它只需要「这一章演什么」（那由插件自己的注入块给出）。
- * 原条目全文留档在 `model/design-rules.md`。
- *
- * ⚠ **为什么是四块而不是一块**（这一条是补返工）：
- *   一开始图省事，把整块挂到全部 5 个设计提示词上。但「篇章设计师」与「章节设计师」
- *   是**两次独立调用、两份不同提示词**，它们的知识层不一样 ——
- *   篇章排的是「这一部由几章组成、每一章是什么」，**根本不排拍**；
- *   给它读「一拍是一个场景内的一个转折」就是层级串味，还会把它拉进细节里。
- *
- *   所以按层切：
- *     · `DESIGN_BOTH`  —— 两层都成立（呼吸感、人物优先、与其它模块的关系）
- *     · `DESIGN_ARC`   —— **只发篇章**：三条线各自的分工、伏笔在大故事里的接续作用
- *       （0.22.0 起篇章要排章表，所以这里的措辞也改成「一章要能独立成立」而不是「不许写成章纲」）
- *     · `DESIGN_BEATS` —— **发章与支线**：一拍怎么落、伏笔具体怎么埋
- *     · `DESIGN_SIDE`  —— **只发支线**：支线服务主线的四种用法与份量纪律
- */
-
-/**
- * ★ **写提示词的纪律**（0.22.3 补，别再犯）：
- *
- * 用户的评价是「不要一直做加法，宁庸勿滥」。这个文件里的提示词一度被我一版一版地堆到
- * DESIGN_ARC 59 行 / 2251 字、篇章与章各一次调用 8800+ 字 —— 而**堆料会让模型更不听话**，
- * 不是更听话。四条纪律：
- *
- *   ① **一个概念只在一层说一次**：跨层重复的删掉，只在真正需要它的那层留；
- *   ② **只留判据，删掉解释**：像「站不住就是承重梁用错了料」这种"为什么"是写给人看的，
- *      提示词里只留能判定的那一句；理由搬到代码注释（注释不花 token）；
- *   ③ **负面清单只留最典型的 1~2 条**，不要罗列变体；
- *   ④ **同族规则合并**：反制式化 / 换皮 / 形状重复 / 小东西承重 → 一条，带两个判据。
- *
- * 体积由回归 `probe-prompt-budget` 守着（撞上限时**先删再加**，不要上调预算）。
- */
-
+// 字段写法集中在 prompt-fields.js；以下仅保留固定的任务通则。
 /** 通用层：只要在设计就成立，篇章与章节都发。 */
 const DESIGN_BOTH = [
     '===== 设计通则 =====',
@@ -2664,55 +2609,6 @@ const DESIGN_BOTH = [
     '## 与其它模块的关系',
     '- 冲突时以**角色卡与世界书**里的既有设定为先；别的模块（数据库推进、别的扩展、卡片剧本）当作**已有约束**去适配。',
     '- 玩家明确做过的事永远优先：设计跟着调整，不要逼他回到计划上。',
-    '',
-];
-
-/** 篇章层：**只发给篇章设计**。这里不许出现「拍」怎么写 —— 那是章节层的事。 */
-const DESIGN_ARC = [
-    '===== 篇章层的设计规则 =====',
-    '## 层级与分量',
-    '篇章 ⊃ 章（= 主线）。每一层装的东西不一样，别把小的往大的那层塞：',
-    '- **篇章**：一段处境 / 关系 / 大势怎么变 —— 他要**什么**（去处、位置、这段关系能不能继续），',
-    '  谁**挡着**（一个有同样理由的人、一桩旧账、体制），代价落在**他与别人的关系**上。',
-    '- **章**：一个**有起承转合的完整故事**（起 → 承 → 转 → 合；形状可换，四件事不能缺）。',
-    '- ⚠ **大轴不许架在一件小东西上**（物件、身体特征、气味、一句没头没尾的话）：它们最多当**某一章**的起因、或**某一场**的证据，',
-    '  不许连着几章围着它转，也不许一部接一部都靠它。判据：**拿掉它，这一部还站得住吗？**',
-    '',
-    '## 章表：一条一章，每章自己一套「起承转合」',
-    '- 每一条照四个槽写（槽名照写）：`起：`为什么进这一章。`承：`这一章在争什么（谁挡着、代价怎么加上来）。',
-    '  `转：`最要紧的那一下真的发生（这一章自己的高潮）。`合：`落定成什么样（整部的局面因此改变）。',
-    '- **每一条以〔舞台〕开头**（在哪：地区 / 圈子 / 场合）—— 四章的〔舞台〕**必须四处不同**：连着同一处，就是一个轴。',
-    '- 四条合起来**又是一套更大的起承转合**：第 1 章 起、第 2 章 承、第 3 章 转（大高潮在这里）、第 4 章 合。',
-    '- 形状可以换（先扬后抑 / 双线汇合…），但**要有头有尾、中间有最要紧那一下**。',
-    '- 判据：**把这一章单独讲给人听，能不能从头讲到尾？** 只讲到一半、或只是「推进了一点」，不算一章。',
-    '- ⚠ **不写分镜**：台词、机关 / 道具 / 招式、谁脸上什么表情，都归正文 —— 你写的是事与局面。',
-    '- **章与章不许一个形状，也不许一件事往下接**：连着几章「有人搞事 → 他应对」是制式化；上一章的「合」直接变下一章的「起」，是「一件事拆四天」。',
-    '',
-    '## 换新的一部时：换一套因果，不要换皮',
-    '- **换一个在争的东西**：起因、推动的人、代价、落点都要换。上一部留下的既成事实是**起点**，不是骨架。',
-    '- 判据：把新排的几章和上一部摊开对照 —— **除了换几个名字，还有没有区别？**（又是「施压 → 绝境 → 摊牌 → 妥协」就是套模板。）',
-    '',
-    '## 伏笔：把各自成立的章串成一条线的**暗线**',
-    '- 交 **3~6 个**，每个都**具体到能被复述**；想清楚**大概在哪一章响**；不要为了凑伏笔凭空加新设定。',
-    '- ⚠ **四章各自办自己的事，靠它们才连成一条长线**：一条反复出现的信物 / 一个只在幕后出手的势力 /',
-    '  某个人的处境一章挪一格 / 一句从不同人口中听来的话 —— 一段段看是各自的故事，回头才发现线一直在。',
-    '',
-];
-
-/** 章节层：一拍一级的知识。**发章与支线**（它们都要交「拍」）。 */
-const DESIGN_BEATS = [
-    '===== 章节层的设计规则 =====',
-    '## 拍怎么落',
-    '- 一拍 = **一个场景内的一个转折**：谁在场、气氛怎么变、什么被打破了、谁注意到了。',
-    '- 拍与拍要有**因果**：这一拍能发生，是因为上一拍留下了什么（一个痕迹、一句话、一个决定）。',
-    '- 变化要**看得见**（多看了一眼、说话短了、开始撒谎），不要靠旁白宣布「她的心开始动摇了」。',
-    '- 别每拍一个节奏：有的拍是对话、有的拍是一个动作、有的拍是一段沉默。',
-    '## 伏笔怎么埋',
-    '- **具体到可以被复述**；**一次埋一到两个就够**；要让**别人**注意到（他有没有注意由他自己决定）。',
-    '- **必须顺手埋**：长在当前场景本来就会发生的事里；没有可埋的就不埋，不要凭空造新设定。',
-    '- **准备兑现，不要埋完就解释** —— 让它在后面自己响。',
-    '## 别让一章被一件小东西扛着',
-    '- 小东西当**起因或证据**可以；**不许整章围着它转**，也不许换章了还在同一个着力点上。',
     '',
 ];
 
@@ -2774,7 +2670,6 @@ function buildChapterSystemPrompt({ regenerate = false, rejected = null, remaini
         const mine = chapters[slot - 1] ?? '';
         const climax = epicClimax(epic);
         const hooks = epicHooks(epic);
-        const isClimaxChapter = climax && new RegExp(`第\\s*${slot}\\s*章`).test(climax);
         lines.push(
             `你要设计的是**这一部篇章里的第 ${slot} 章**${chapters.length ? `（共 ${chapters.length} 章）` : ''}：`,
             `${title ? `《${title}》` : ''}${line ? `　在争什么：${line}` : ''}`,
@@ -2795,22 +2690,9 @@ function buildChapterSystemPrompt({ regenerate = false, rejected = null, remaini
                 ? `⚠ **▶ 那一条就是这一章的定位** —— 把它细化成拍（不是另起一章，也不是把整册排一遍）：`
                 : '⚠ 章表里没有对应的那一条（可能刚被换过）—— 顺着上一条的收尾自然接出这一章：',
             mine ? `　「${mine}」` : '',
-            '⚠ **细化不是逐字翻译**：章内容给的是四个槽（起 / 承 / 转 / 合 —— `转` 就是这一章最要紧那一下），怎么发生、谁先动、从哪里切入，由你按当前处境设计；',
-            '　但**四个槽的落点要在拍里对得上**（尤其「高潮」那个槽 —— 它就是这一章最要紧那一下）。',
-            '',
-            '⚠ **这一章自己必须是一个闭环的小故事**：起 → 承 → **转（小高潮：最要紧的那一下真的发生）** → 合。',
-            '　· 走完它，世界上要有一件事**真的落定**（成了/砸了/摊牌了/东西到手了），不能只是"推进了一点"；',
-            '　· 最后几拍必须落到「合」上，结束时局面要有个明确的落点，不能停在半空；',
-            '　· 它得**为整部大故事服务**（推进那个贯通的东西），不是随手一段插曲。',
-            isClimaxChapter
-                ? '　· ★ **这一章就是这一部的大高潮那一章**：全册攒的东西在这里一起兑现 —— 这一章的小高潮就是这部大故事的最高点。'
-                : (climax ? `　· ⚠ **别在这一章里把大高潮用掉**（那是 ${climax}）—— 该攒的还得攒。` : '　· ⚠ **别在这一章里把整部大故事的高潮用掉** —— 该攒的还得攒。'),
-            '',
-            '⚠ **为整部大故事埋伏笔**：这一章至少留**一个**能在后文回收的细节，但**埋法必须自然** ——',
-            '　顺手长在当前场景本来就会发生的事里；没有可埋的就不埋，**不许凭空加新角色 / 新地点 / 新势力**，也不要当场解释它。',
-            '',
-            '⚠ 这一章也必须是**主线**：「又赶了一程路 / 又过了一天」那是**间章**的料。',
-            '',
+            '章表提供当前章的定位与已定事实，按对应字段写法细化，不另排整册。',
+            '本章是否承担大高潮由当前章表决定；不要提前消耗后章的内容。',
+            '具体的小标题、叙事结构与拍的内部组织，按主线各字段规则执行。',
         );
     }
 
@@ -2857,7 +2739,9 @@ function buildChapterSystemPrompt({ regenerate = false, rejected = null, remaini
         '- 有**走不通**的拍 → **现在就换掉或挪个场合**（保持那一拍要达成的结果不变），不要原样交出去指望正文模型自己扛；',
         '- 换了之后要**重新排一遍顺序**，保证因果仍然接得上（这一拍之所以能发生，是因为上一拍留下了什么）；',
         '- **不许**为了让某一拍成立而硬加新角色 / 新地点 / 新势力 / 新前史；',
-        '- 自检之后如果不足 3 拍，就补一拍**能从当前处境自然长出来**的，而不是把被换掉的那拍再写一遍。',
+        partial
+            ? '- 局部重排仅在本次剩余拍数预算内修正，不补回已演内容，也不为达到整章最少拍数而加拍。'
+            : '- 自检之后如果不足 3 拍，就补一拍**能从当前处境自然长出来**的，而不是把被换掉的那拍再写一遍。',
         '',
     );
 
@@ -2903,33 +2787,10 @@ function buildChapterSystemPrompt({ regenerate = false, rejected = null, remaini
             ? `- 只写剩余的 ${budget} 拍（**宁少勿多**），每拍必须能在正文里被真正叙述出来，不要停在「即将发生」。`
             : `- 拍数 ${BEAT_MIN}~${budget} 拍（**宁少勿多**：一两拍能说清就别硬拆），每拍必须能在正文里被真正叙述出来，不要停在「即将发生」。`,
         '- 每拍独占一行，用 `1. ` 起头。',
-        ...BEAT_FORMAT_RULES,
         '',
-        '⚠ **这一章必须「有戏」**（主线与间章的分界）：至少要有一件**实质推进**的事 ——',
-        '　往上走（变强了、挣到了、被认可了）/ 往下沉（付了代价、输了、被算计了）/ 关系挪了一格 / 悬念揭开一点，任何一种都够。',
-        '　赶路、逛街、「又过了一天」这类**日常流水账是间章的料**；轻松段落只能是拍与拍之间的呼吸，不能整章都是。',
-        '',
-        '⚠ **这一章必须有一个「矛盾」**（辩证意义上的：**两样不能同时满足的东西**；缺了它就只是「发生了些事」）：',
-        '- 形态：**想要 vs 挡着** / **两难**（两个都要，只能选一个）/ **身份冲突** / **两个都在理**（最耐看）。',
-        '- **不是「坏人对付他」**：不必有恶意，对立方只是**要的东西不一样** ——',
-        '  要的是「两个不能同时满足的东西」，不是「又一个来找麻烦的人」。',
-        '- **每一条拍都要服务于它**：自问**这条拍是在加压，还是在放掉压力？** 一条都不加压，这一章就散了。',
-        '- 章内走一遍 **正 → 反 → 合**：提出（矛盾亮相）→ 激化（代价变具体、退路被堵上）→ 转化（小高潮）→ 新状态（新局面）。',
-        '- **不要在章内解决长线那个大矛盾**，只处理它在**这一章**的那一层。',
-        '- 两种相反的失败都要避：**太弱**（只是「有点不顺」，没有真正对立的东西）、**太强**（一上来就你死我活，后面没余地）。',
-        '',
-        '⚠ **小高潮**：这一章的拍要拧成一条自己的弧线，**最要紧的那一下真的发生**（摊牌、比赛到关键一局、成了或砸了），',
-        '　之后**留一拍收尾**（别人的察觉、关系的位移、接下来要面对什么）。「一直在铺垫、什么都没落地」不算一章。',
-        '',
-        '- 章目标写成**矛盾的走向**（局面从什么样变成什么样，例：「那位客商原本够不着他 ↔ 现在能单独见到他了」）；',
-        '  不要写成「他查到 / 决定 / 阻止了什么」—— 达成与否看**世界这边的状态**，不看 {{user}} 做了什么。',
-        '- 整章推进：让**别人**动起来（示好、试探、瞒着、交换、催逼）、让**事件**发生（来客、传话、差事、意外、误会），用**伏笔**维持张力。',
         `- 整体节奏：${intensity.label} —— ${intensity.directive}`,
-        '- 范围写清这一章**不碰**什么（别把后面几章的东西提前用掉）；新章的开头要接得住上一章的结尾。',
         '',
         '',
-        '默认字段写法（属于可替换的创作建议）：章标题建议 4~10 字；篇章填写所属长线；范围说明本章涉及与暂不涉及的内容。',
-        '默认章目标写清「谁要什么 ↔ 什么挡着」，将对立的那一边写出来；默认每拍说明谁做了什么、局面发生了什么变化。',
         '按下面格式输出，标签原样照写，且**只输出一个区块**：',
         '',
         '<StoryChapters>',
@@ -2943,7 +2804,6 @@ function buildChapterSystemPrompt({ regenerate = false, rejected = null, remaini
         '</StoryChapters>',
         '',
         ...DESIGN_BOTH,
-        ...DESIGN_BEATS,
     );
     return lines.join('\n');
 }
@@ -2996,8 +2856,6 @@ function buildInterludeChapterSystemPrompt({ rejected = null } = {}) {
         '- **场合要小**：一间铺子、一顿饭、一场雨、一次赶集 —— 就在他日常走动的范围里。',
         `- 整体节奏：${(INTENSITIES[s.intensity] || INTENSITIES.normal).label}。`,
         '',
-        '默认字段写法（属于可替换的创作建议）：标题建议 4~10 字；场合位于当前人物日常走动的范围。',
-        '默认画面描写身边这批人的日常，顺带递出一点与主线有关的信息；每个画面可独立收束。',
         '按下面格式输出，标签原样照写，且**只输出一个区块**：',
         '',
         '<StoryInterludeChapter>',
@@ -3030,7 +2888,7 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
     const lines = [
         '你是「故事导演」的**篇章设计师**，为一个正在进行的角色扮演服务。',
         mode === 'establish'
-            ? '你的唯一任务：**为这个故事定下一部「篇章」**（一部完整的大故事）—— 它由若干「章」组成，每一章都是一个有起承转合的完整故事。'
+            ? '你的唯一任务：**为这个故事定下一部「篇章」**（一部完整的大故事）—— 它由若干「章」组成，每一章有清晰的内容与结果。'
             : (mode === 'audit'
                 // ★ 0.27.0：章末的**检查**任务（用户提的）——「只是检测，看看事情现在的发展，适当调整之后的发展」。
                 //   与「重新校准」最大的区别：**默认不动**。成立就一字不改地抄回来。
@@ -3074,22 +2932,11 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
         '  ⚠ 是「不同」，**不是**「必须更险」—— 稳步登高同样是「势」。',
         '',
         ...TONE_GUARD,
-        `⚠ **章表（你这一层的主产出）：一次把整部 ${perEpic} 章全排出来 —— 一条一章，每条以〔舞台〕开头，写全「起 / 承 / 转 / 合」四个槽。**`,
-        '- 落地格式（一条一行，每个槽一句话）：`1. 起：… ｜ 承：… ｜ 转：… ｜ 合：…`',
-        '- ⚠ **错法一**：把「起承转合」当成四章的名字 —— 那样每条里只有一个槽，**等于没有章**。',
-        '- ⚠ **错法二**：写成**一件事的四个阶段**（第 1 章丢东西 → 第 2 章追 → 第 3 章抢 → 第 4 章夺回）：同一个地方、同一桩案子，后一章踩着前一章的尾巴往下走。',
-        '- **动笔前先排一遍**：四处不同的〔舞台〕、四件要办的事、那条串起它们的暗线，各定一个 —— 定不出四处不同的舞台，就说明它还是一个轴。',
-        '- 正解：**每章换一个舞台与一桩要办的事**（每条的〔舞台〕各不相同）；四章靠**暗线**连 —— 一条反复出现的信物 / 一个只在幕后出手的势力 / 某人的处境一章挪一格 / 一句从不同人口中听来的话。',
-        '- 自检：**把中间两章对调，故事还成立吗？** 必须严格按顺序才成立的，就是「一件事拆成四天」，重排。',
-        '',
+        `章表一次提供整部 ${perEpic} 章，一条对应一章；内部写法按「篇章 · 章内容」字段规则执行。`,
         '⚠ **这一部是一个「有归宿」的完整大故事，不是一串越来越大的事件。**',
         '- **先定下那个贯通的矛盾**：这一部从头到尾在争什么？它**不是**每章同一件事加码，而是在四章各自的事里慢慢露出来。',
         '- **必须有归宿**：最后一章收束到一个具体结果（解决了 / 没解决但付出了代价 / 他变成了不一样的人），不是「更大的事又要来了」。',
         '- **讲完就该换新的一部**：别为了永远写下去而故意不收束。',
-        '',
-        '⚠ **两级高潮 = 两层起承转合**：`转` 就是「最要紧的那一下」—— **每一章都有一个转**，整部只有一个**大高潮**。',
-        '- 大高潮落在**「转」的那一章**（章表第几章），说清**是什么分量的事**（例：「第 3 章 · 预选集会那场」）。',
-        '- **之前要有「攒」**（长本事、攒人望、解决挡路的小麻烦），**之后留一章收束**。',
         '',
     ];
 
@@ -3141,9 +2988,6 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
 
     lines.push(
         '',
-        '默认字段写法（属于可替换的创作建议）：标题建议 6~14 字；篇章用两三句话说明在争什么、人物的位置及参与缘由。',
-        '默认章内容按「起：进入缘由 ｜ 承：诉求与代价 ｜ 转：关键变化 ｜ 合：局部结果」组织，每章自己一套起承转合，整部再形成一套；默认不同章节使用不同舞台。',
-        '默认大高潮说明落在哪一章及其分量；伏笔建议三到六个具体细节，考虑大致在哪一章兑现。',
         '既成事实只记录已发生、不可撤销的内容；首次设计时依据当前处境填写。',
         '按下面格式输出，标签原样照写，且**只输出一个区块**：',
         '',
@@ -3171,7 +3015,6 @@ function buildEpicSystemPrompt({ mode = 'establish', diverged = '', tone = '', c
         '  （攒起来 → 登上高处 → 在大场面兑现）同样是对的写法，就看这个角色与当前处境该走哪条路。',
         '',
         ...DESIGN_BOTH,
-        ...DESIGN_ARC,
     );
     return lines.join('\n');
 }
@@ -3197,14 +3040,12 @@ function buildThreadSystemPrompt() {
         '',
         '一条支线的要求：',
         '- 它必须**服务于主线**：要么给主线提供动机、线索或压力，要么让人物的关系状态发生变化；不许与主线无关地自娱自乐。',
-        ...BEAT_FORMAT_RULES,
         '- 篇幅极小：**一条支线只写一个落点**（一个画面、一次对话、一个发现），不要写成多拍的长线。',
         '- 切入要轻：从最近对话里已经有的场合、人物、物件长出来，不要凭空开一个新场景。',
         '- 它不能越过主线当前的进度：不要让第三方、秘密或冲突提前发生。',
         '- **触发支线的必须是别人**：某个 NPC 起了念头、做了件事、放了句风，而不是 {{user}} 去问了、去做了。',
         `- 节奏：${(INTENSITIES[s.intensity] || INTENSITIES.normal).label}。`,
         '',
-        '默认字段写法（属于可替换的创作建议）：标题建议 4~10 字，目标用一句话说明；切入来自别人或环境的变化，落点是可见的小结果。',
         '按下面格式输出，标签原样照写，且**只输出一个区块**：',
         '',
         '<StoryThreads>',
@@ -3216,7 +3057,6 @@ function buildThreadSystemPrompt() {
         '</StoryThreads>',
         '',
         ...DESIGN_BOTH,
-        ...DESIGN_BEATS,
         ...DESIGN_SIDE,
     );
     return lines.join('\n');
@@ -3240,10 +3080,8 @@ function buildInterludeSystemPrompt() {
         '- **它是「别人在过日子」，不是「{{user}} 去做了什么」**：谁在忙什么、谁跟谁拌了嘴、听说了一件旧事、谁送来了什么。',
         '- 它要有**呼吸感**：写出人物的生活质感与性格侧面，让读者觉得这些人真的在过日子。',
         '- 它可以顺手**埋一根线**（一个以后会兑现的细节），但不要当场兑现，也不要点破。',
-        '- 篇幅：一到两个画面就该结束，不要展开成大场面。',
         `- 节奏：${(INTENSITIES[s.intensity] || INTENSITIES.normal).label}。`,
         '',
-        '默认字段写法（属于可替换的创作建议）：标题建议 4~10 字；内容用一到两句呈现别人或环境的具体画面。',
         '按下面格式输出，标签原样照写，且**只输出一个区块**：',
         '',
         '<StoryInterlude>',
@@ -3597,10 +3435,7 @@ function modeSystemPrompt(userText) {
 function configuredSystemPrompt(builtin, options = {}) {
     const s = settings();
     const target = Math.max(BEAT_MIN, Math.min(BEAT_MAX, Math.round(toNumber(s.beatTarget, 4))));
-    return configureDesignPrompt(builtin, {
-        common: COMMON_RULES, tone_guard: TONE_GUARD, beat_format: BEAT_FORMAT_RULES,
-        design_both: DESIGN_BOTH, design_arc: DESIGN_ARC, design_beats: DESIGN_BEATS, design_side: DESIGN_SIDE,
-    }, { beatTarget: target, beatBudget: options.remaining > 0 ? Math.max(1, Math.min(target, Math.round(options.remaining))) : target,
+    return configureDesignPrompt(builtin, {}, { beatTarget: target, beatBudget: options.remaining > 0 ? Math.max(1, Math.min(target, Math.round(options.remaining))) : target,
         interludeBeats: Math.max(1, Math.min(BEAT_MAX, Math.round(toNumber(s.interludeBeats, 3)))), chaptersPerEpic: chaptersPerEpic(),
         intensity: (INTENSITIES[s.intensity] || INTENSITIES.normal).label, tone: toneDirective(s.tone), ...options });
 }
@@ -5743,6 +5578,15 @@ function renderNowTab() {
     renderDiagnostics();
 }
 
+function fieldPromptHint(key) {
+    return `<small class="sd-field-prompt">生成写法：世界书「故事导演」→「${esc(fieldPromptName(key))}」</small>`;
+}
+
+function fieldPromptDirectory(task) {
+    const fields=Object.entries(FIELD_PROMPTS).filter(([,field])=>field.task===task);
+    return `<details class="sd-fold sd-field-directory"><summary>修改这些字段的生成写法</summary><p class="sd-note">编辑世界书「故事导演」中的对应条目，下一次生成生效。当前框内保存的是剧情结果。</p>${fields.map(([key])=>fieldPromptHint(key)).join('')}</details>`;
+}
+
 function renderMainTab() {
     const host = panel?.querySelector('.sd-main-tab');
     if (!host) return;
@@ -5761,11 +5605,12 @@ function renderMainTab() {
         </div>
         <div class="sd-card">
             <div class="sd-card-head"><span class="sd-card-title">主线（一章一拍地演）</span></div>
-            <label class="sd-field"><span>章标题</span><input name="main-title" value="${esc(String(unwrap(main[MAIN_TITLE]) ?? ''))}"></label>
-            <label class="sd-field"><span>分卷（这一章属于哪一部）</span><input name="main-arc" value="${esc(String(unwrap(main[MAIN_ARC]) ?? ''))}"></label>
-            <label class="sd-field"><span>章目标（写成矛盾的走向：局面从什么样变成什么样）</span><textarea name="main-goal" rows="2">${esc(String(unwrap(main[MAIN_GOAL]) ?? ''))}</textarea></label>
-            <label class="sd-field"><span>范围（不写什么）</span><textarea name="main-scope" rows="2">${esc(String(unwrap(main[MAIN_SCOPE]) ?? ''))}</textarea></label>
-            <label class="sd-field"><span>拍（一行一拍，<code>1. …</code> 起头）</span><textarea name="main-beats" rows="8">${esc(beats.map((text, index) => `${index + 1}. ${text}`).join('\n'))}</textarea></label>
+            <p class="sd-note">下面保存当前章的剧情结果；每个框下方标出了生成写法的世界书条目。</p>
+            <label class="sd-field"><span>章标题</span><input name="main-title" value="${esc(String(unwrap(main[MAIN_TITLE]) ?? ''))}">${fieldPromptHint('chapter_title')}</label>
+            <label class="sd-field"><span>分卷（这一章属于哪一部）</span><input name="main-arc" value="${esc(String(unwrap(main[MAIN_ARC]) ?? ''))}">${fieldPromptHint('chapter_arc')}</label>
+            <label class="sd-field"><span>章目标</span><textarea name="main-goal" rows="2">${esc(String(unwrap(main[MAIN_GOAL]) ?? ''))}</textarea>${fieldPromptHint('chapter_goal')}</label>
+            <label class="sd-field"><span>范围</span><textarea name="main-scope" rows="2">${esc(String(unwrap(main[MAIN_SCOPE]) ?? ''))}</textarea>${fieldPromptHint('chapter_scope')}</label>
+            <label class="sd-field"><span>拍（一行一拍，<code>1. …</code> 起头）</span><textarea name="main-beats" rows="8">${esc(beats.map((text, index) => `${index + 1}. ${text}`).join('\n'))}</textarea>${fieldPromptHint('chapter_beats')}</label>
             <div class="sd-row">
                 <button type="button" class="sd-btn sd-save-main">保存这一章</button>
                 <button type="button" class="sd-btn sd-generate-chapter" title="按当前处境重写整章的拍 —— 拍号会回到第 1 拍">重新生成本章</button>
@@ -5842,11 +5687,13 @@ function renderSideTab() {
     host.innerHTML = `
         <div class="sd-card">
             <div class="sd-card-head"><span class="sd-card-title">支线</span><span class="sd-chip">共 ${threads.length} 条</span></div>
+            ${fieldPromptDirectory('thread')}
             ${threadRows}
             <div class="sd-row"><button type="button" class="sd-btn sd-add-thread">让神谕再加一条</button></div>
         </div>
         <div class="sd-card">
             <div class="sd-card-head"><span class="sd-card-title">插曲</span><span class="sd-chip">共 ${interludes.length} 条</span></div>
+            ${fieldPromptDirectory('interlude')}
             ${interludeRows}
             <div class="sd-row"><button type="button" class="sd-btn sd-add-interlude">让神谕再加一条</button></div>
         </div>`;
@@ -6775,9 +6622,9 @@ function renderInterludeTab(host = panel?.querySelector('.sd-main-tab')) {
             <p class="sd-note">间章是**与主线互斥**的另一种幕：主线收尾后的间隙交给它，演日常、顺手埋伏笔。
             与主线最大的区别是**它不要求跑完** —— 下面的日常画面只是素材，谁都可以跳过；写到合适的地方就收，随时回主线。</p>
             ${scene ? `<p class="sd-sub">场合：${esc(scene)}</p>` : ''}
-            <label class="sd-field"><span>标题</span><input name="il-title" value="${esc(String(unwrap(chapter[IL.title]) ?? ''))}"></label>
-            <label class="sd-field"><span>场合</span><input name="il-scene" value="${esc(String(unwrap(chapter[IL.scene]) ?? ''))}"></label>
-            <label class="sd-field"><span>日常画面（一行一个，可写 <code>1. …</code>）</span><textarea name="il-beats" rows="5">${esc(beats.map((text, index) => `${index + 1}. ${text}`).join('\n'))}</textarea></label>
+            <label class="sd-field"><span>标题</span><input name="il-title" value="${esc(String(unwrap(chapter[IL.title]) ?? ''))}">${fieldPromptHint('interlude_chapter_title')}</label>
+            <label class="sd-field"><span>场合</span><input name="il-scene" value="${esc(String(unwrap(chapter[IL.scene]) ?? ''))}">${fieldPromptHint('interlude_chapter_scene')}</label>
+            <label class="sd-field"><span>日常画面（一行一个，可写 <code>1. …</code>）</span><textarea name="il-beats" rows="5">${esc(beats.map((text, index) => `${index + 1}. ${text}`).join('\n'))}</textarea>${fieldPromptHint('interlude_chapter_beats')}</label>
             ${playedAll || note ? `<p class="sd-note">${playedAll ? '素材都演过了，可以回主线了。' : ''}${note ? `${playedAll ? '　' : ''}顺手埋的线：${esc(note)}` : ''}</p>` : ''}
             <div class="sd-row">
                 <button type="button" class="sd-btn sd-save-interlude">保存这段间章</button>
@@ -7051,16 +6898,17 @@ function renderEpicTab() {
             </select></label>
             <p class="sd-note"><b>基调</b>是给篇章与每一章的最高优先级创作方针；换完要点一次「重新定篇章（换一部）」才生效。
             这里的<b>章表 / 大高潮 / 伏笔</b>都可以手改 —— 每行一章，<b>✔ 已写 · ▶ 正在写 · · 还没写</b>。</p>
+            ${!started ? fieldPromptDirectory('epic') : ''}
             ${started ? `
-                <label class="sd-field"><span>标题</span><input name="epic-title" value="${esc(String(unwrap(epic[EP.title]) ?? ''))}"></label>
-                <label class="sd-field"><span>篇章（两三句，说清在争什么）</span><textarea name="epic-line" rows="3">${esc(String(unwrap(epic[EP.line]) ?? ''))}</textarea></label>
-                <label class="sd-field"><span>章内容（<b>一条一行</b>：每条 起 / 承 / 转 / 合。✔ = 已写、▶ = 正在写、· = 还没写）</span>${total ? `<span class="sd-epic-progress">${done ? '这一部已经写完 —— 点「重新定篇章（换一部）」开新的一部' : `下一章是第 ${written + 1} 章`}</span>` : ''}<textarea name="epic-chapters" rows="${Math.max(4, total + 1)}">${esc(chapters.map((text, i) => `${i + 1}. ${text}`).join('\n'))}</textarea></label>
+                <label class="sd-field"><span>标题</span><input name="epic-title" value="${esc(String(unwrap(epic[EP.title]) ?? ''))}">${fieldPromptHint('epic_title')}</label>
+                <label class="sd-field"><span>篇章概述</span><textarea name="epic-line" rows="3">${esc(String(unwrap(epic[EP.line]) ?? ''))}</textarea>${fieldPromptHint('epic_line')}</label>
+                <label class="sd-field"><span>章内容（<b>一条一章，连续编号</b>。✔ = 已写、▶ = 正在写、· = 还没写）</span>${total ? `<span class="sd-epic-progress">${done ? '这一部已经写完 —— 点「重新定篇章（换一部）」开新的一部' : `下一章是第 ${written + 1} 章`}</span>` : ''}<textarea name="epic-chapters" rows="${Math.max(4, total + 1)}">${esc(chapters.map((text, i) => `${i + 1}. ${text}`).join('\n'))}</textarea>${fieldPromptHint('epic_chapters')}</label>
                 <details class="sd-fold sd-spoiler">
                     <summary>大高潮（${climax ? '已定' : '还没定'}）· 点开看内容<b>（会剧透）</b></summary>
-                    <label class="sd-field"><span>落在第几章、是哪一场</span><input name="epic-climax" value="${esc(climax)}" placeholder="例如：第 3 章 · 武道会决赛那场"></label>
+                    <label class="sd-field"><span>大高潮</span><input name="epic-climax" value="${esc(climax)}" placeholder="例如：第 3 章 · 武道会决赛那场">${fieldPromptHint('epic_climax')}</label>
                 </details>
-                <label class="sd-field"><span>伏笔（用「；」分开）</span><textarea name="epic-hooks" rows="2">${esc(hooks.join('；'))}</textarea></label>
-                <label class="sd-field"><span>既成事实（不可撤销）</span><textarea name="epic-ledger" rows="2">${esc(String(unwrap(epic[EP.ledger]) ?? ''))}</textarea></label>
+                <label class="sd-field"><span>伏笔（用「；」分开）</span><textarea name="epic-hooks" rows="2">${esc(hooks.join('；'))}</textarea>${fieldPromptHint('epic_hooks')}</label>
+                <label class="sd-field"><span>既成事实（不可撤销）</span><textarea name="epic-ledger" rows="2">${esc(String(unwrap(epic[EP.ledger]) ?? ''))}</textarea>${fieldPromptHint('epic_ledger')}</label>
                 <div class="sd-row">
                     <button type="button" class="sd-btn sd-save-epic">保存篇章</button>
                     <button type="button" class="sd-btn sd-evolve-epic">按现在的情况重新校准</button>

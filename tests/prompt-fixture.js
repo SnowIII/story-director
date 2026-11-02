@@ -9,7 +9,7 @@ export function directorFixture() {
     const context=vm.createContext({...model,settings:()=>settings,rootOf:()=>root,liveThreads:()=>[],completedChapterGoals:()=>[],chaptersPerEpic:()=>settings.chaptersPerEpic,
         INTENSITIES:{normal:{label:'适中'}},BEAT_MIN:3,BEAT_MAX:8});
     vm.runInContext(source.slice(source.indexOf('const COMMON_RULES ='),source.indexOf('async function buildUserPrompt(')),context);
-    const sections=vm.runInContext('({common:COMMON_RULES,tone_guard:TONE_GUARD,beat_format:BEAT_FORMAT_RULES,design_both:DESIGN_BOTH,design_arc:DESIGN_ARC,design_beats:DESIGN_BEATS,design_side:DESIGN_SIDE})',context);
+    const sections=vm.runInContext('({common:COMMON_RULES,tone_guard:TONE_GUARD,design_both:DESIGN_BOTH,design_side:DESIGN_SIDE})',context);
     const build=(name,options={})=>{context.options=options;return vm.runInContext(name+'(options)',context);};
     return {source,settings,root,context,sections,build};
 }
