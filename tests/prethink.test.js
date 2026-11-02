@@ -2,13 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import {PRETHINK_PROMPT,setPromptEntries,configureDesignPrompt,splitDesignPrompt,preservePromptEntries} from '../prompt-worldbook.js';
+import {PRETHINK_PROMPTS,setPromptEntries,configureDesignPrompt,splitDesignPrompt,preservePromptEntries} from '../prompt-worldbook.js';
 import {parseBlocks,storyBlockFailure,storyAuditVerdict,chapterFromBlock,MAIN_TITLE} from '../model.js';
 import {hash} from '../coop/model.js';
 import {directorFixture} from './prompt-fixture.js';
 
 const book=JSON.parse(fs.readFileSync(new URL('../worldbook/story-director.json',import.meta.url),'utf8'));
-const config=(content,on=true,raw=false)=>({comment:PRETHINK_PROMPT.name+' '+PRETHINK_PROMPT.marker,content,
+const config=(task,content,on=true,raw=false)=>({comment:PRETHINK_PROMPTS[task].name+' '+PRETHINK_PROMPTS[task].marker,content,
     ...(raw?{disable:!on,enabled:!on}:{enabled:on})});
 const reset=t=>{setPromptEntries([]);t.after(()=>setPromptEntries([]));};
 const tasks={epic:'buildEpicSystemPrompt',chapter:'buildChapterSystemPrompt',interlude_chapter:'buildInterludeChapterSystemPrompt',thread:'buildThreadSystemPrompt',interlude:'buildInterludeSystemPrompt'};
@@ -23,7 +23,7 @@ for(const [task,builder] of Object.entries(tasks)){
     });
     test(task+' opt-in preThink precedes the fixed result without removing fields, quantities or audit suffix',t=>{
         reset(t);const f=directorFixture(),raw=f.build(builder,task==='epic'?{mode:'audit'}:{remaining:2,keep:3}),parts=splitDesignPrompt(raw);
-        setPromptEntries([config('用两句话介绍本次 {{sd.task}} 的主题，保留 {{user}} 与 $&。')]);
+        setPromptEntries([config(task,'用两句话介绍本次 {{sd.task}} 的主题，保留 {{user}} 与 $&。')]);
         const prompt=configureDesignPrompt(raw,f.sections,{task,beatBudget:2,remaining:2,keep:3,epicMode:'audit'});
         const fixed=prompt.split('【固定返回格式：')[1];
         assert.ok(prompt.includes('用两句话介绍本次 '+task+' 的主题，保留 {{user}} 与 $&。'));
@@ -34,25 +34,70 @@ for(const [task,builder] of Object.entries(tasks)){
     });
 }
 
-test('the preThink entry is independently blank and disabled, and blank, missing or disabled configs restore the original format',t=>{
-    reset(t);const found=Object.values(book.entries).filter(entry=>entry.comment.includes(PRETHINK_PROMPT.marker));
-    assert.equal(found.length,1);assert.equal(found[0].content,'');assert.equal(found[0].disable,true);assert.equal(found[0].enabled,false);
-    assert.equal(found[0].constant,false);assert.deepEqual(found[0].key,[]);
+test('five independent preThink entries default to blank and disabled, and blank, missing or disabled configs restore the original format',t=>{
+    reset(t);
+    assert.equal(Object.keys(PRETHINK_PROMPTS).length,5);
+    for(const prompt of Object.values(PRETHINK_PROMPTS)){
+        const found=Object.values(book.entries).filter(entry=>entry.comment.includes(prompt.marker));
+        assert.equal(found.length,1);assert.equal(found[0].content,'');assert.equal(found[0].disable,true);assert.equal(found[0].enabled,false);
+        assert.equal(found[0].constant,false);assert.deepEqual(found[0].key,[]);
+    }
     const f=directorFixture(),raw=f.build('buildChapterSystemPrompt'),expected=configureDesignPrompt(raw,f.sections);
-    for(const entries of [[],[config('自定义前置说明',false)],[config('自定义前置说明',false,true)],[config('')],[config('  ')],[config(null)]]){
+    for(const entries of [[],[config('chapter','自定义前置说明',false)],[config('chapter','自定义前置说明',false,true)],[config('chapter','')],[config('chapter','  ')],[config('chapter',null)]]){
         setPromptEntries(entries);assert.equal(configureDesignPrompt(raw,f.sections),expected);
     }
-    setPromptEntries([config('已保存的前置说明',true,true)]);
+    setPromptEntries([config('chapter','已保存的前置说明',true,true)]);
     assert.ok(configureDesignPrompt(raw,f.sections).includes('已保存的前置说明'));
     setPromptEntries([]);assert.equal(configureDesignPrompt(raw,f.sections),expected);
 });
 
 test('worldbook upgrades retain customized preThink content and its switch without applying field-default migration',()=>{
-    for(const on of [false,true])for(const empty of [false,true]){
-        const previous={...config(empty?'':'本次先介绍人物冲突',on,true),sdPromptDefaultHash:hash('')};
+    for(const task of Object.keys(tasks))for(const on of [false,true])for(const empty of [false,true]){
+        const previous={...config(task,empty?'':'本次先介绍人物冲突',on,true),sdPromptDefaultHash:hash('')};
         const merged=preservePromptEntries(structuredClone(book),[previous]);
-        const found=Object.values(merged.entries).find(entry=>entry.comment.includes(PRETHINK_PROMPT.marker));
+        const found=Object.values(merged.entries).find(entry=>entry.comment.includes(PRETHINK_PROMPTS[task].marker));
         assert.equal(found.content,previous.content);assert.equal(found.enabled,on);assert.equal(found.disable,!on);
+    }
+});
+
+test('all five preThink choices are isolated, and disabling one cannot fall back to the retired shared entry',t=>{
+    reset(t);const f=directorFixture(),configs=Object.keys(tasks).map(task=>config(task,'仅用于 '+task+' 的前置内容'));
+    const legacy={comment:'[sd_return_prethink]',content:'不再直接使用的旧共用内容',enabled:true};
+    for(const disabled of [null,...Object.keys(tasks)]){
+        setPromptEntries([...configs.map(entry=>({...entry,enabled:!entry.comment.includes(PRETHINK_PROMPTS[disabled]?.marker || 'never-match')})),legacy]);
+        for(const [task,builder] of Object.entries(tasks)){
+            const result=configureDesignPrompt(f.build(builder),f.sections);
+            assert.equal(result.includes('仅用于 '+task+' 的前置内容'),task!==disabled);
+            assert.equal(result.includes('<preThink>'),task!==disabled);
+            assert.ok(!result.includes(legacy.content));
+            for(const other of Object.keys(tasks).filter(other=>other!==task))assert.ok(!result.includes('仅用于 '+other+' 的前置内容'));
+        }
+    }
+});
+
+test('upgrading the shared preThink copies its content and switch to each task without keeping the obsolete entry',()=>{
+    for(const on of [false,true]){
+        const legacy={comment:'返回前置内容 [sd_return_prethink]',content:'原有 {{user}} 与 $& 的前置说明',disable:!on};
+        const upgraded=preservePromptEntries(structuredClone(book),[legacy]);
+        const list=Object.values(upgraded.entries);
+        assert.ok(!list.some(entry=>entry.comment.includes('[sd_return_prethink]')));
+        for(const prompt of Object.values(PRETHINK_PROMPTS)){
+            const entry=list.find(entry=>entry.comment.includes(prompt.marker));
+            assert.equal(entry.content,legacy.content);assert.equal(entry.enabled,on);assert.equal(entry.disable,!on);
+        }
+        assert.deepEqual(preservePromptEntries(structuredClone(book),list),upgraded);
+    }
+});
+
+test('an existing task preThink takes precedence over shared migration, including an explicitly blank disabled entry',()=>{
+    const legacy={comment:'[sd_return_prethink]',content:'原共用内容',enabled:true};
+    const upgraded=preservePromptEntries(structuredClone(book),[legacy,config('chapter','',false)]);
+    const list=Object.values(upgraded.entries);
+    const chapter=list.find(entry=>entry.comment.includes(PRETHINK_PROMPTS.chapter.marker));
+    assert.equal(chapter.content,'');assert.equal(chapter.disable,true);
+    for(const [task,prompt] of Object.entries(PRETHINK_PROMPTS).filter(([task])=>task!=='chapter')){
+        const entry=list.find(entry=>entry.comment.includes(prompt.marker));
+        assert.equal(entry.content,legacy.content);assert.equal(entry.disable,false);
     }
 });
 
@@ -91,7 +136,7 @@ test('actual Oracle transport refreshes optional preThink in its existing reques
     const reply='<preThink>本次关注人物的不同目标。</preThink>\n<StoryChapters>章标题: 一起修船\n篇章: 归港\n范围: 港口\n章目标: 船可试航\n拍:\n1. 船匠检查船板\n2. 船匠递来工具</StoryChapters>';
     Object.assign(f.context,{oracleApi:()=>({run:async messages=>{requests.push(messages);return reply;}}),
         genId:1,genCtl:null,genAborted:false,chatKey:()=> 'prethink-test',lastRequestChars:0,console,ORACLE_CANCELLED:'cancelled',providerErrorOf:()=>'',
-        buildUserPrompt:async()=>{reads++;setPromptEntries([config('先简短介绍主题',on)]);return '当前上下文';}});
+        buildUserPrompt:async()=>{reads++;setPromptEntries([config('chapter','先简短介绍主题',on)]);return '当前上下文';}});
     const start=f.source.indexOf('function configuredSystemPrompt('),end=f.source.indexOf('function providerErrorOf(',start);
     vm.runInContext(f.source.slice(start,end),f.context);
     const raw=await vm.runInContext("askOracle({task:'chapter'})",f.context);

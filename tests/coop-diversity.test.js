@@ -35,12 +35,15 @@ test('legacy archives without original event plans remain usable with built-in a
     }
 });
 
-test('worldbook upgrades remove old custom Coop templates regardless of their switch state',()=>{
+test('worldbook upgrades preserve restored rank blueprints while removing retired common Coop templates',()=>{
     for(const on of [true,false]){
         const installed=['design','forms','rank_4','rank_7','rank_10'].map(key=>({comment:'[coop_'+key+']',content:'旧自定义 '+key,disable:!on,enabled:on}));
         const merged=preserveDesignTemplates(clone(bundled),installed);
-        assert.ok(!JSON.stringify(merged).includes('旧自定义'));
-        assert.ok(!Object.values(merged.entries).some(e=>/\[coop_/.test(e.comment)));
+        assert.ok(!Object.values(merged.entries).some(e=>/\[coop_(?:design|forms)\]/.test(e.comment)));
+        for(const count of [4,7,10]){
+            const entry=Object.values(merged.entries).find(e=>e.comment.includes('[coop_rank_'+count+']'));
+            assert.equal(entry.content,'旧自定义 rank_'+count);assert.equal(entry.enabled,on);assert.equal(entry.disable,!on);
+        }
         const next=preserveDesignTemplates(clone(bundled),Object.values(merged.entries));
         assert.deepEqual(next,merged);
     }
@@ -63,6 +66,7 @@ test('event design uses one existing model call without a separate similarity ch
     const messages=[],metadata={},requests=[];
     const host={scope:()=> 'diversity-test',context:()=>({}),metadata:()=>metadata,messages:()=>messages,
         available:()=>true,autoAllowed:()=>false,contextText:async()=> '工作室当前需要核对资料',
+        designTemplates:async p=>designTemplates([{comment:'[coop_rank_4]',enabled:true,content:'## Rank 1\n只采用这一阶的自定义合作方式'}],p),
         locks:{request:async(name,options,fn)=>fn({name})},persist:async doc=>{metadata.storyDirectorCoop=clone(doc);},
         ask:async request=>{requests.push(request);return JSON.stringify({targetRank:1,rounds:3,title:'资料的不同解读',
             scene:'工作室',conflict:'速度与核实质量',goal:'形成协作办法',hook:'画家带来待核对的资料',
@@ -71,5 +75,6 @@ test('event design uses one existing model call without a separate similarity ch
     const runtime=new CoopRuntime(host);t.after(()=>runtime.dispose());await runtime.load();
     await runtime.configure({id:'a',name:'画家',mode:'coop',initialAffinity:30});
     await runtime.generate('a');assert.equal(requests.length,1);
+    assert.ok(requests[0][1].content.includes('只采用这一阶的自定义合作方式'));
     assert.equal(runtime.event().plan.title,'资料的不同解读');
 });

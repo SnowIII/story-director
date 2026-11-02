@@ -3,7 +3,9 @@ import {FIELD_PROMPTS,fieldPromptName,FIELD_PROMPT_DEFAULT_NOTE} from './prompt-
 export {FIELD_PROMPTS,fieldPromptName,FIELD_PROMPT_DEFAULT_NOTE} from './prompt-fields.js';
 
 export const PROMPT_SLOTS=Object.fromEntries(Object.keys(FIELD_PROMPTS).map(key=>[key,fieldPromptName(key)]));
-export const PRETHINK_PROMPT={key:'return_prethink',marker:'[sd_return_prethink]',name:'返回前置内容 · preThink（默认不输出）'};
+export const PRETHINK_PROMPTS=Object.fromEntries(Object.entries({epic:'篇章',chapter:'主线',interlude_chapter:'间章',thread:'支线',interlude:'插曲'})
+    .map(([task,label])=>[task,{key:'return_prethink_'+task,marker:'[sd_return_prethink_'+task+']',name:'返回前置内容 · '+label+' · preThink（默认不输出）'}]));
+const preThinkKeys=new Set(Object.values(PRETHINK_PROMPTS).map(prompt=>prompt.key));
 // 字段名与兼容别名属于传输协议，字段内部的叙事小标题不是新属性。
 export const DESIGN_FIELDS={
     epic:['标题','title','篇章','总纲','纲','line','章内容','章节表','章','chapters','走向','movements','大高潮','高潮','climax','伏笔','hooks','既成事实','事实','ledger'],
@@ -14,10 +16,11 @@ export const DESIGN_FIELDS={
 };
 const marker=entry=>{
     const name=String(entry?.comment ?? entry?.name ?? '');
-    return name.toLowerCase().includes(PRETHINK_PROMPT.marker) ? PRETHINK_PROMPT.key
+    const task=name.match(/\[sd_return_prethink_([a-z_]+)\]/i)?.[1].toLowerCase();
+    return Object.hasOwn(PRETHINK_PROMPTS,task) ? PRETHINK_PROMPTS[task].key
         : name.match(/\[sd_field_([a-z_]+)\]/i)?.[1].toLowerCase();
 };
-const knownKey=key=>Object.hasOwn(PROMPT_SLOTS,key) || key===PRETHINK_PROMPT.key;
+const knownKey=key=>Object.hasOwn(PROMPT_SLOTS,key) || preThinkKeys.has(key);
 const enabled=entry=>typeof entry?.disable==='boolean'?!entry.disable:entry?.enabled===true;
 let selected=new Map();
 
@@ -60,7 +63,7 @@ export function configureDesignPrompt(builtin,_sections={},parameters={}) {
     const fields=Object.entries(FIELD_PROMPTS).filter(([,field])=>field.task===parts.key).map(([key,field])=>
         '【'+field.label+'；返回字段「'+field.field+'」】\n'+applyPromptTemplate(key,field.content,{variables:parameters})
             .replace(/<\/?(?:StoryEpic|StoryChapters|StoryInterludeChapter|StoryThreads|StoryInterlude)\b[^>]*>/gi,''));
-    const preThink=applyPromptTemplate(PRETHINK_PROMPT.key,'',{variables:parameters}).trim();
+    const preThink=applyPromptTemplate(PRETHINK_PROMPTS[parts.key].key,'',{variables:parameters}).trim();
     const runtime=Object.fromEntries(Object.entries(parameters).filter(([key])=>
         ['task','beatTarget','beatBudget','interludeBeats','chaptersPerEpic','keep','remaining','regenerate','rejected','epicMode'].includes(key)));
     const task=parts.key==='epic' ? parameters.epicMode==='audit' ? '检查这一部篇章还成不成立，保留已演章节'
@@ -84,7 +87,8 @@ export function preservePromptEntries(bundled,installed) {
     for(const entry of Object.values(bundled.entries || {})) {
         const key=marker(entry);
         if(!knownKey(key)) continue;
-        const previous=installed.find(item=>marker(item)===key);
+        const previous=installed.find(item=>marker(item)===key) || (preThinkKeys.has(key)
+            ? installed.find(item=>String(item?.comment ?? item?.name ?? '').toLowerCase().includes('[sd_return_prethink]')) : null);
         if(typeof previous?.content!=='string') continue;
         const edited=hash(previous.content.trim())!==previous.sdPromptDefaultHash;
         if(edited) entry.content=previous.content;
