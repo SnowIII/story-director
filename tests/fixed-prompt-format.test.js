@@ -44,7 +44,7 @@ test('a format example mentioned in runtime data cannot select the wrong task pr
 test('audit conclusion and partial replan counts remain in the fixed portion',t=>{
     reset(t);const fixture=directorFixture();
     const audit=splitDesignPrompt(fixture.build(tasks.epic,{mode:'audit'}));
-    assert.ok(audit.format.includes('检查: 照旧'));assert.ok(!audit.body.includes('检查: 照旧'));
+    assert.match(audit.format,/检查:.*照旧/);assert.ok(!audit.body.includes('检查: 照旧'));
     const partial=splitDesignPrompt(fixture.build(tasks.chapter,{remaining:2,keep:3}));
     assert.ok(partial.format.includes('剩余的 2 拍'));
     setPromptEntries([entry('chapter','{{sd.default}}\n只增加场景描写')]);

@@ -1,4 +1,4 @@
-import {applyPromptTemplate} from './prompt-worldbook.js';
+import {applyPromptTemplate,DESIGN_FIELDS} from './prompt-worldbook.js';
 export {configureDesignPrompt} from './prompt-worldbook.js';
 let coopScene = false;
 export function setCoopScene(value) { coopScene = !!value; }
@@ -505,7 +505,7 @@ export function renderEpicSection(epic, { chapterCap = 12, banUserAction = true 
 
 /** 面板上的「采用」按钮要用的东西：把 <StoryEpic> 区块变成可落盘的对象。 */
 export function epicFromBlock(raw, { chapter = 0 } = {}) {
-  const attrs = parseAttributes(raw);
+  const attrs = parseAttributes(raw, { fields: DESIGN_FIELDS.epic });
   // 章表：新标签「章内容」优先，老标签「走向」也认（模型偶尔还按老格式吐）
   const chapters = splitBeats(attrOf(attrs, '章内容', '章节表', '章', 'chapters', '走向', 'movements') || '');
   const hooks = (attrOf(attrs, '伏笔', 'hooks') || '')
@@ -670,6 +670,7 @@ export function capText(text, limit) {
 export function splitBeats(text) {
   const raw = String(text ?? '').replace(/\r/g, '').trim();
   if (!raw) return [];
+  const MARKER = /(?:^|[;；\s])(?:第\s*)?(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*(?:拍|步|节|幕)?\s*[.、．)）:：]\s*/g;
 
   // A. 多行编号
   const lines = raw.split('\n');
@@ -685,10 +686,11 @@ export function splitBeats(text) {
     if (current) current.text = `${current.text}\n${line.trim()}`.trim();
   }
   if (current) items.push(current);
-  if (items.length >= 2) {
+  if (items.length >= 1) {
     const ordered = items.slice().sort((a, b) => a.no - b.no);
     // 编号必须从 1 起连续，否则可能把正文里别的编号行误当拍
-    if (ordered.every((item, index) => item.no === index + 1)) {
+    if (ordered.every((item, index) => item.no === index + 1) &&
+      (items.length > 1 || [...raw.matchAll(MARKER)].length === 1)) {
       return ordered.map((item) => item.text.replace(/\n+/g, ' ').trim()).filter(Boolean);
     }
   }
@@ -696,7 +698,6 @@ export function splitBeats(text) {
   // B. 全平铺的编号列表：`1. 甲 2. 乙 3. 丙` / `一拍：甲；二拍：乙`
   //    先按分号切（`一拍：` 这种中文序数写法），不行再按行内的编号标记切。
   const flat = raw.replace(/\n+/g, ' ').trim();
-  const MARKER = /(?:^|[;；\s])(?:第\s*)?(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*(?:拍|步|节|幕)?\s*[.、．)）:：]\s*/g;
 
   const bySemicolon = flat
     .split(/[;；]/)
@@ -775,7 +776,7 @@ export function parseBlocks(text, tag) {
  *   区块明明在、字段明明在，只是多了层装饰；报出来却是「没解析到区块」，
  *   把排查方向整个带偏（用户换模型、换预设，当然都没用）。
  */
-export function parseAttributes(raw) {
+export function parseAttributes(raw, { fields = null } = {}) {
   let text = String(raw ?? '').replace(/\r/g, '');
   // 调用方可能把整块（含 <StoryChapters> 围栏）传进来，也可能只传内层文本（此时结尾会带一个
   // 孤零零的 </StoryChapters>）。两种都先清掉，否则闭合标签会被算进最后一个字段的值里。
@@ -785,7 +786,8 @@ export function parseAttributes(raw) {
   //（模型把 `拍` 写成多行编号列表时，那样只会留下第一拍）。
   // 行首允许的装饰：列表符 / 引用符 / 标题井号 / 加粗星号（顺序不敏感，叠着写也认）。
   const DECOR = '(?:[-*+][ \\t]+|>+[ \\t]*|#{1,6}[ \\t]*|\\*{1,3}[ \\t]*|[ \\t])*';
-  const re = new RegExp(`^${DECOR}([\\p{Script=Han}A-Za-z_]{1,12})\\*{0,3}[ \\t]*[:：=][ \\t]*([\\s\\S]*?)(?=\\n${DECOR}[\\p{Script=Han}A-Za-z_]{1,12}\\*{0,3}[ \\t]*[:：=]|(?![\\s\\S]))`, 'gmu');
+  const field = fields?.length ? '(?:'+fields.map(value=>value.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|')+')' : '[\\p{Script=Han}A-Za-z_]{1,12}';
+  const re = new RegExp(`^${DECOR}(${field})\\*{0,3}[ \\t]*[:：=][ \\t]*([\\s\\S]*?)(?=\\n${DECOR}${field}\\*{0,3}[ \\t]*[:：=]|(?![\\s\\S]))`, fields?.length ? 'gmiu' : 'gmu');
   const out = {};
   for (const match of text.matchAll(re)) {
     const key = match[1].trim();
@@ -1392,7 +1394,7 @@ export function normalizeInterludeChapter(source, { beatBudget = 4 } = {}) {
 
 /** 面板上的「采用」按钮要用的东西：把 <StoryInterludeChapter> 区块变成可落盘的对象。 */
 export function interludeChapterFromBlock(raw, opts = {}) {
-  const attrs = parseAttributes(raw);
+  const attrs = parseAttributes(raw, { fields: DESIGN_FIELDS.interlude_chapter });
   return normalizeInterludeChapter({
     title: attrOf(attrs, '标题', 'title') || '一段日常',
     scene: attrOf(attrs, '场合', '地点', 'scene'),
@@ -1459,7 +1461,7 @@ export function normalizeInterlude(source, { id = '', after = 0 } = {}) {
 
 /** 面板上的「采用」按钮要用的东西：把区块文本变成一个可落盘的对象。 */
 export function chapterFromBlock(raw, opts = {}) {
-  const attrs = parseAttributes(raw);
+  const attrs = parseAttributes(raw, { fields: DESIGN_FIELDS.chapter });
   return normalizeChapter({
     title: attrOf(attrs, '章标题', '标题', 'title') || '未命名的一章',
     arc: attrOf(attrs, '篇章', '分卷', '弧线', 'arc', 'story'),
@@ -1470,7 +1472,7 @@ export function chapterFromBlock(raw, opts = {}) {
 }
 
 export function threadFromBlock(raw, opts = {}) {
-  const attrs = parseAttributes(raw);
+  const attrs = parseAttributes(raw, { fields: DESIGN_FIELDS.thread });
   return normalizeThread({
     title: attrOf(attrs, '标题', 'title') || '未命名的支线',
     goal: attrOf(attrs, '目标', 'goal'),
@@ -1481,7 +1483,7 @@ export function threadFromBlock(raw, opts = {}) {
 }
 
 export function interludeFromBlock(raw, opts = {}) {
-  const attrs = parseAttributes(raw);
+  const attrs = parseAttributes(raw, { fields: DESIGN_FIELDS.interlude });
   return normalizeInterlude({
     title: attrOf(attrs, '标题', 'title') || '未命名的插曲',
     beat: attrOf(attrs, '内容', '一拍', 'beat'),
