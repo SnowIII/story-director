@@ -18,21 +18,34 @@ export const DESIGN_FIELDS={
 };
 const marker=entry=>String(entry?.comment ?? entry?.name ?? '').match(/\[sd_prompt_([a-z_]+)\]/i)?.[1].toLowerCase();
 const enabled=entry=>typeof entry?.disable==='boolean'?!entry.disable:entry?.enabled===true;
+// 世界书展示完整规则；未修改的默认全文仍由程序按当前任务生成。
+// 只认随包发布的指纹，不依赖酒馆助手是否保留条目的扩展元数据。
+const readableDefaultHashes={
+    "epic": "cf1gv",
+    "chapter": "1j63ng6",
+    "interlude_chapter": "1ptmrej",
+    "thread": "raywq4",
+    "interlude": "sa0rju",
+    "narration_main": "8xh9mz",
+    "narration_interlude": "skfei1",
+    "coop_archive": "9pz7yt"
+};
 let selected=new Map();
 
 export function setPromptEntries(entries) {
     const next=new Map();
     for(const entry of entries || []) {
         const key=marker(entry),content=typeof entry?.content==='string'?entry.content.trim():'';
-        if(Object.hasOwn(PROMPT_SLOTS,key) && enabled(entry) && content && !next.has(key)) next.set(key,content);
+        if(Object.hasOwn(PROMPT_SLOTS,key) && enabled(entry) && content && !next.has(key))
+            next.set(key,{content,isDefault:hash(content)===readableDefaultHashes[key]});
     }
     selected=next;
 }
 
 // 只替换本插件宏，保留 {{user}} 等酒馆宏；内容作为文本处理，不执行代码。
 export function applyPromptTemplate(key,builtin,{contract='',variables={}}={}) {
-    const template=selected.get(key);
-    if(!template || template.trim()===builtin.trim()) return builtin;
+    const entry=selected.get(key),template=entry?.content;
+    if(!template || entry.isDefault || template===builtin.trim()) return builtin;
     const result=template.replace(/\{\{sd\.([a-zA-Z_]+)\}\}/g,(all,name)=>
         name==='default'?builtin:Object.hasOwn(variables,name)?String(variables[name]):all);
     return contract && result!==builtin?result+'\n\n'+contract:result;
@@ -55,19 +68,22 @@ export function splitDesignPrompt(builtin) {
 export function configureDesignPrompt(builtin,sections={},parameters={}) {
     const parts=splitDesignPrompt(builtin);
     if(!parts) return builtin;
-    let text=parts.body;
-    for(const [key,lines] of Object.entries(sections)) {
-        const original=lines.join('\n').trim();
-        if(original && text.includes(original)) text=text.replace(original,()=>applyPromptTemplate(key,original,{variables:parameters}));
-    }
+    const withSections=value=>{
+        for(const [key,lines] of Object.entries(sections)) {
+            const original=lines.join('\n').trim();
+            if(original && value.includes(original)) value=value.replace(original,()=>applyPromptTemplate(key,original,{variables:parameters}));
+        }
+        return value;
+    };
+    const text=parts.body;
     // 兼容旧自定义全文：保留本任务字段中的内容要求，只移除其外层格式。
-    const custom=applyPromptTemplate(parts.key,text,{variables:parameters})
+    const custom=withSections(applyPromptTemplate(parts.key,text,{variables:parameters}))
         .replace(/<(StoryEpic|StoryChapters|StoryInterludeChapter|StoryThreads|StoryInterlude)\b[^>]*>([\s\S]*?)<\/\1>/gi,(_,tag,body)=>
             tag.toLowerCase()===parts.tag.toLowerCase() && new RegExp('(?:^|\\n)\\s*(?:[-*+>#]+\\s*)*(?:'+DESIGN_FIELDS[parts.key].join('|')+')\\*{0,3}\\s*[:：=]','i').test(body)
                 ? '【自定义字段内容要求；用于设计，不视为已发生事实】\n'+body.trim() : '')
-        .replace(/<\/?(?:StoryEpic|StoryChapters|StoryInterludeChapter|StoryThreads|StoryInterlude)\b[^>]*>/gi,'').trim() || text;
+        .replace(/<\/?(?:StoryEpic|StoryChapters|StoryInterludeChapter|StoryThreads|StoryInterlude)\b[^>]*>/gi,'').trim() || withSections(text);
     const runtime=Object.fromEntries(Object.entries(parameters).filter(([key])=>
-        ['task','beatTarget','beatBudget','interludeBeats','chaptersPerEpic','keep','remaining','regenerate','epicMode'].includes(key)));
+        ['task','beatTarget','beatBudget','interludeBeats','chaptersPerEpic','keep','remaining','regenerate','rejected','epicMode'].includes(key)));
     const task=parts.key==='epic' ? parameters.epicMode==='audit' ? '检查这一部篇章还成不成立，保留已演章节'
         : parameters.epicMode==='evolve' ? '校准篇章未演章节' : '设计篇章'
         : {chapter:'设计或重排当前章节，已经演过的部分不许动；整章重设按程序指定范围执行',
@@ -88,7 +104,8 @@ export function preservePromptEntries(bundled,installed) {
         if(!Object.hasOwn(PROMPT_SLOTS,key)) continue;
         const previous=installed.find(item=>marker(item)===key);
         if(typeof previous?.content!=='string') continue;
-        if(hash(previous.content.trim())!==previous.sdPromptDefaultHash) entry.content=previous.content;
+        if(hash(previous.content.trim())!==previous.sdPromptDefaultHash)
+            entry.content=previous.content.replace(/\{\{sd\.default\}\}/g,()=>entry.content);
         entry.enabled=enabled(previous);entry.disable=!entry.enabled;
     }
     return bundled;

@@ -945,7 +945,7 @@ export function renderInjectionHeader({ banUserAction = true, mode = 'main' } = 
   const key=mode==='interlude'?'narration_interlude':'narration_main';
   const contract='【程序演出约束】当前幕为'+(mode==='interlude'?'间章':'主线')+'，只按下面本轮计划演出，不自行改进度或复述幕后提示。'+
     (banUserAction?'用户的言行、心理和选择由用户自己决定。':'');
-  return [lines[0],...applyPromptTemplate(key,lines.slice(1).join('\n'),{contract}).split('\n')];
+  return [lines[0],...applyPromptTemplate(key,lines.slice(1).join('\n'),{contract,variables:{banUserAction}}).split('\n')];
 }
 
 /**
