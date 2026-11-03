@@ -516,7 +516,7 @@ export function epicFromBlock(raw, { chapter = 0 } = {}) {
     ...emptyEpic(),
     [EP.title]: sanitize(attrOf(attrs, '标题', 'title'), 60),
     [EP.line]: sanitize(attrOf(attrs, '篇章', '总纲', '纲', 'line'), 400),
-    [EP.chapters]: chapters.map((text) => sanitize(text, 400)).slice(0, 24),
+    [EP.chapters]: chapters.map((text) => sanitize(text, 2000)).slice(0, 24),
     [EP.climax]: sanitize(attrOf(attrs, '大高潮', '高潮', 'climax'), 120),
     [EP.hooks]: hooks.map((text) => sanitize(text, 200)).slice(0, 8),
     [EP.ledger]: sanitize(attrOf(attrs, '既成事实', '事实', 'ledger'), 600),

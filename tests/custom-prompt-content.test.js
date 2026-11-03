@@ -43,6 +43,20 @@ test('epic free-form chapter content and multiline field notes survive parser an
     const rendered=renderEpicSection(epic);assert.equal(rendered.started,true);assert.match(rendered.lines.join('\n'),/互相展示擅长的工具/);
 });
 
+test('epic chapter plans retain 2000 characters each without changing the overview limit',()=>{
+    const contents=['甲'.repeat(401),'乙'.repeat(1999),'丙'.repeat(2000),'丁'.repeat(2001)];
+    const raw='<StoryEpic>\n标题: 长篇章规划\n篇章: '+'概'.repeat(450)+'\n章内容:\n'+
+        contents.map((text,index)=>(index+1)+'. '+text).join('\n')+'\n大高潮: 本部收束\n</StoryEpic>';
+    const epic=epicFromBlock(parseBlocks(raw,'StoryEpic')[0]);
+    assert.equal(epic[EP.chapters].length,4);
+    assert.equal(epic[EP.chapters][0],contents[0]);
+    assert.equal(epic[EP.chapters][1],contents[1]);
+    assert.equal(epic[EP.chapters][2],contents[2]);
+    assert.equal(epic[EP.chapters][3],'丁'.repeat(2000));
+    assert.equal(epic[EP.line],'概'.repeat(400));
+    assert.ok(renderEpicSection(epic).lines.join('\n').includes(contents[2]));
+});
+
 test('all narrative parsers preserve custom subheadings within their known top-level fields',()=>{
     const chapter=chapterFromBlock('章标题: 同行\n篇章: 归港\n范围: 船坞\n章目标: 完成一件合作作品\n动机: 彼此都希望尝试\n拍:\n1. 角色摆好工具\n观察: 旧刀柄已磨损\n2. 角色邀请用户选择颜色\n期待: 用户真实回应');
     assert.match(chapter[MAIN_GOAL],/动机: 彼此都希望/);assert.match(chapter[MAIN_BEATS][0],/观察: 旧刀柄/);assert.match(chapter[MAIN_BEATS][1],/期待: 用户/);
