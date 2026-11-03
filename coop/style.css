@@ -50,17 +50,4 @@
 #story-director-coop-panel .sdc-disclosure>form button{min-height:44px}
 @media(hover:hover){#story-director-coop-panel .sdc-disclosure>summary:hover{border-color:#a778a8;background:#a778a83d}}
 #story-director-coop-panel pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:350px;overflow:auto}
-dialog.sdc-dialog{width:min(540px,calc(100vw - 32px));max-height:min(86vh,720px);padding:0;border:1px solid #a778a8cc;border-radius:14px;color:var(--SmartThemeBodyColor,#eee);background:var(--SmartThemeBlurTintColor,#20202bf5);box-shadow:0 20px 72px #0009;font-size:15px;overflow:auto}
-dialog.sdc-dialog::backdrop{background:#0008}
-dialog.sdc-dialog form{display:flex;flex-direction:column;gap:10px;padding:18px}
-dialog.sdc-dialog h2{margin:0;font-size:1.1em}
-dialog.sdc-dialog p{margin:0;line-height:1.6}
-dialog.sdc-dialog .sdc-dialog-note{padding:10px 12px;border:1px solid #a778a866;border-radius:10px;background:#a778a81f}
-dialog.sdc-dialog label{display:flex;flex-direction:column;gap:7px;font-weight:600}
-dialog.sdc-dialog textarea{box-sizing:border-box;width:100%;min-height:120px;padding:9px;border:1px solid #a778a866;border-radius:8px;color:inherit;background:#171721;font:inherit;resize:vertical}
-dialog.sdc-dialog .sdc-field-help{font-size:.86em;opacity:.65}
-dialog.sdc-dialog .sdc-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
-dialog.sdc-dialog button{padding:8px 14px;border:1px solid #a778a866;border-radius:8px;color:inherit;background:#a778a81a;font:inherit;cursor:pointer}
-dialog.sdc-dialog button:hover{background:#a778a83d}
-dialog.sdc-dialog .sdc-dialog-primary{border-color:#a778a8;background:#a778a855;font-weight:600}
 @media(max-width:600px){#story-director-coop-panel{inset:12px 12px auto;max-height:calc(100dvh - 24px)}#story-director-coop-panel .sdc-body{max-height:calc(100dvh - 145px);padding:12px}#story-director-coop-panel nav button{white-space:nowrap}}

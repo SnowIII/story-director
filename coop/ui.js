@@ -16,20 +16,20 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
     const run=async task=>{try {await task();} catch(error){runtime.notice(error);}};
     function regenerateDialog(profile,event) {
         return new Promise(resolve=>{
-            for(const old of document.querySelectorAll('dialog.sdc-dialog')) {
+            for(const old of document.querySelectorAll('dialog.sd-dialog')) {
                 try {old.close();} catch {}
                 old.remove();
             }
             const dialog=document.createElement('dialog');
-            dialog.className='sdc-dialog';
-            dialog.innerHTML='<form><h2>重新生成当前事件</h2>'+
-                '<p class="sdc-dialog-note">'+esc(profile.name)+' · Rank '+event.targetRank+' · '+esc(event.plan.title)+
+            dialog.className='sd-dialog';
+            dialog.innerHTML='<div class="sd-dialog-box"><div class="sd-dialog-head">重新生成当前事件</div>'+
+                '<div class="sd-dialog-body"><p class="sd-dialog-note">'+esc(profile.name)+' · Rank '+event.targetRank+' · '+esc(event.plan.title)+
                 '<br>保留已经发生的正文、用户选择和关系路线，只重设尚未演出的部分。</p>'+
-                '<label>本次额外要求（可选）<textarea name="prompt" rows="6" maxlength="4000" placeholder="例如：未演部分转到雨夜；加强分工协商；不要新增敌人。" aria-label="本次重新生成的额外要求"></textarea></label>'+
-                '<p class="sdc-field-help">这份要求只用于本次重新生成，不会写入角色档案或之后的普通事件。</p>'+
-                '<div class="sdc-dialog-actions"><button type="button" data-cancel>取消</button>'+
-                '<button type="submit" class="sdc-dialog-primary">开始重新生成</button></div></form>';
-            const form=dialog.querySelector('form');
+                '<label class="sd-dialog-field"><span>本次额外要求（可选）</span><textarea name="prompt" rows="6" maxlength="4000" placeholder="例如：未演部分转到雨夜；加强分工协商；不要新增敌人。" aria-label="本次重新生成的额外要求"></textarea></label>'+
+                '<p class="sd-dialog-hint">这份要求只用于本次重新生成，不会写入角色档案或之后的普通事件。</p></div>'+
+                '<div class="sd-dialog-actions"><button type="button" class="sd-btn" data-cancel>取消</button>'+
+                '<button type="button" class="sd-btn sd-btn-primary" data-confirm>开始重新生成</button></div></div>';
+            const textarea=dialog.querySelector('textarea');
             let settled=false;
             const finish=value=>{
                 if(settled) return;
@@ -37,17 +37,14 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
                 try {dialog.close();} catch {}
                 dialog.remove();resolve(value);
             };
-            form.querySelector('[data-cancel]').addEventListener('click',()=>finish(null));
-            form.addEventListener('submit',event=>{
-                event.preventDefault();
-                finish(text(form.querySelector('[name="prompt"]')?.value,4000));
-            });
+            dialog.querySelector('[data-cancel]').addEventListener('click',()=>finish(null));
+            dialog.querySelector('[data-confirm]').addEventListener('click',()=>finish(text(textarea?.value,4000)));
             dialog.addEventListener('cancel',event=>{event.preventDefault();finish(null);});
             dialog.addEventListener('click',event=>{if(event.target===dialog) finish(null);});
             dialog.addEventListener('close',()=>finish(null));
             document.body.appendChild(dialog);
             dialog.showModal();
-            setTimeout(()=>form.querySelector('textarea')?.focus(),30);
+            setTimeout(()=>textarea?.focus(),30);
         });
     }
     function open() {
