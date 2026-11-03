@@ -781,6 +781,74 @@ export function currentAnchor(main) {
   return beat ? anchorsOf(main)[index] || beat : '';
 }
 
+export const OUTLINE_STAGES = ['前提', '触发', '反应', '结果'];
+
+/** 强化模式使用的软校验：多个独立结果应拆到不同拍，不能靠一个锚点一次包办。 */
+export function outlineAnchorIssue(anchor) {
+  const text = String(anchor ?? '').trim();
+  if (!text) return '';
+  const clauses = text.split(/[；;\n]+/).map((part) => part.trim()).filter(Boolean);
+  return clauses.length > 1
+    ? '剧情锚点包含多个分句。每拍只写一个可验证结果；若这些分句是两个独立局面变化，请拆到后续拍，分号只用于补充同一结果所需的证据。'
+    : '';
+}
+
+const compactReceiptText = (value) => String(value ?? '')
+  .replace(/[「」『』“”"'《》]/g, '')
+  .replace(/\s+/g, '')
+  .trim();
+
+/**
+ * 解析强化模式下正文模型的隐藏自检回执。
+ * 只提供最小结构门控，不尝试替代语义判断；字段不完整时不授权落拍。
+ */
+export function parseOutlineReceipt(raw, anchor) {
+  const text = String(raw ?? '').replace(/\r/g, '').trim();
+  const read = (label) => {
+    for (const line of text.split('\n')) {
+      const at = line.indexOf(label);
+      if (at >= 0) return line.slice(at + label.length).replace(/^\s*[:：]\s*/, '').trim();
+    }
+    return '';
+  };
+  const anchorText = read('当前拍锚点') || read('剧情锚点') || read('锚点');
+  const stageText = read('本轮推进层级');
+  const completeText = read('本拍完成');
+  const evidence = read('完成证据');
+  const stage = OUTLINE_STAGES.find((item) => stageText.includes(item)) || '';
+  const complete = /^(是|完成|已完成|true|yes)/i.test(completeText);
+  const completeDeclared = !/[\/／]/.test(completeText)
+    && /^(是|否|完成|未完成|已完成|true|false|yes|no)/i.test(completeText);
+  const hasEvidence = Boolean(evidence)
+    && !/^(无|没有|暂无|不适用|n\/a|none|…|\.{3}|〔)/i.test(evidence);
+  const expected = compactReceiptText(anchor);
+  const received = compactReceiptText(anchorText);
+  const anchorMatched = Boolean(expected && received && (received === expected || received.includes(expected)));
+  const conclusions = [...text.matchAll(/结论\s*[:：]/g)];
+  const tail = conclusions.length ? text.slice(conclusions.at(-1).index) : '';
+  const state = REVIEW_STATES.find((item) => tail.includes(item)) || '';
+  const present = Boolean(anchorText || stageText || completeText || evidence);
+  const valid = present && anchorMatched && Boolean(stage) && completeDeclared && Boolean(state);
+  return {
+    present,
+    valid,
+    anchorMatched,
+    stage,
+    complete,
+    evidence,
+    hasEvidence,
+    state,
+    landed: valid && stage === '结果' && complete && hasEvidence
+      && (state === REVIEW_PASS || state === REVIEW_ADJUST),
+  };
+}
+
+/** P2 的最小严格门控：只有强化自检明确证明“结果成立且有证据”才放行。 */
+export function outlineReceiptAllowsLanding(receipt) {
+  return Boolean(receipt?.valid && receipt?.landed
+    && (receipt?.state === REVIEW_PASS || receipt?.state === REVIEW_ADJUST));
+}
+
 /** 前置补充内容不参与剧情解析；未闭合时也不把其中的示例当作真实结果。 */
 export function stripPreThink(text) {
   return String(text ?? '').replace(/<preThink\b[^>]*>[\s\S]*?(?:<\/preThink\s*>|$)/gi, '');
@@ -983,7 +1051,7 @@ export function renderInjectionHeader({ banUserAction = true, mode = 'main' } = 
 /**
  * 主线区块：整条线的拍列表 + 本轮聚焦哪一拍 + 落拍回报怎么写。
  */
-export function renderMainSection(main, { maxBeats = 8, root = null, banUserAction = true, focusStale = '', setupNote = '', beatNote = '', landedHold = '', strengthenOutline = false } = {}) {
+export function renderMainSection(main, { maxBeats = 8, root = null, banUserAction = true, focusStale = '', setupNote = '', beatNote = '', landedHold = '', strengthenOutline = false, outlineHold = '' } = {}) {
   const lines = [];
   const title = String(unwrap(main[MAIN_TITLE]) ?? '').trim();
   const arc = String(unwrap(main[MAIN_ARC]) ?? '').trim();
@@ -1024,7 +1092,7 @@ export function renderMainSection(main, { maxBeats = 8, root = null, banUserActi
     //     （以前它只是叙述里的一行，模型顺手就换成了"用户让我写的事"，见 CURRENT_BEAT_TAG 的说明）。
     lines.push(`<${CURRENT_BEAT_TAG}>本轮是本章第 ${current} 拍 / 共 ${total} 拍：`);
     lines.push(`　▶ ${current}. ${beats[current - 1]}</${CURRENT_BEAT_TAG}>`);
-    if (strengthenOutline) lines.push(...renderAnchorConstraint(currentAnchor(main), { landedHold }));
+    if (strengthenOutline) lines.push(...renderAnchorConstraint(currentAnchor(main), { landedHold, strictHold: outlineHold }));
     if (current > 1) lines.push(`前面 ${current - 1} 拍已经演过了（**不要重演**；它们造成的局面是既成事实）。`);
     lines.push('**后面的拍还没到，这一轮不要抢演** —— 抢跑比慢更糟；这一拍演完就照下面写回报。');
     lines.push(
@@ -1275,25 +1343,28 @@ export function renderInterludeChapterSection(chapter, { maxBeats = 6, banUserAc
  *   现在：主线时段给主线示例，间章时段给间章示例，并且明说另一种被忽略。
  *   整段「怎么回报」的规矩仍然只有这一处 + 世界书那三条常驻条目（不给两份，免得互相打架）。
  */
-function renderAnchorConstraint(anchor, { landedHold = false } = {}) {
+function renderAnchorConstraint(anchor, { landedHold = false, strictHold = '' } = {}) {
   if (!anchor) return [];
   return [
-    '【大纲遵循强化 · 必须执行】',
+    '【大纲遵循强化｜当前拍叙事契约】',
     `<本拍剧情锚点>${anchor}</本拍剧情锚点>`,
     ...(landedHold ? ['本拍已经落地。本轮只承接已发生剧情的余波，不为补齐锚点重演本拍，不推翻既成结果或抢演下一拍。'] : [
-      '你必须主动构思并写出合乎逻辑的剧情发展，让以上锚点通过人物行动与局面变化自然发生。每轮都要安排服务于锚点的具体推进，不能只复述目标、陈述困难或等待它自行发生。',
-      '从当前时间、地点、在场人物的动机、知情范围、能力与已有线索出发，安排实现锚点所需的铺垫和触发条件，再以「人物为什么行动 → 采取什么行动 → 他人或环境如何反应 → 局面怎样变化」连接成因果链，并在正文中演出必要的过渡。',
-      '原路径受阻时，必须主动寻找另一条符合人物性格、关系与既有设定的实现路径；缺少铺垫就安排合理的铺垫，缺少动机就从已知诉求与利害关系中建立动机。先解决叙事问题，不得一遇到阻碍就停滞、放弃锚点或只重复报缺铺垫。',
-      '锚点规定本拍要导向的剧情点，实现方式由你结合实际处境创造；不得偷换结果或用无关事件代替。可跨轮完成，按自然节奏承接玩家回应，不为赶进度把铺垫、交锋和结果全部塞进一轮。',
-      '不得篡改已发生事实、让人物无缘无故改变态度、凭空补设定、依靠巧合救场或代替玩家作选择。只有目标与既成事实或玩家明确选择直接冲突、合理实现路径确实走不通时，才按既有审查说明冲突；其余情况应主动设计合理的发展继续推进。',
-      '落拍沿用原有拍进度规则，不增加锚点逐项核销条件，不为补齐锚点清单机械拖延或重复停留。',
+      '章目标只用于判断方向，不要求本轮完成。执行优先级：{{user}} 最新言行 > 既成事实 > 人物动机、能力与知情范围 > 当前锚点 > 章节目标 > 文风。',
+      '若当前处境允许，本轮必须产生一个与锚点直接相关的可见变化；不能只复述目标、解释困难或空转。',
+      '本轮只选择一个推进层级：前提 / 触发 / 反应 / 结果。不得为了强化锚点而一次包办多个层级；当前拍可以跨轮完成。',
+      '锚点结果必须由正文中可见的人物行动与局面变化产生；旁白宣告、口头承诺和计划预告都不算。',
+      '缺少动机或前提时，只从既有事实、人物诉求、利害与知情范围建立最小因果桥；不得临时改人设、越权知情、凭空补设定或用巧合跳过阻力。',
+      '需要 {{user}} 表态、答应、出手或选择才能继续时，把条件与局面递给他并停笔；本拍未完整成立时不得声称已完成。',
+      '锚点成立后收在本段结果与余波，不追加新的目标来延长完成；原锚点要达成的结果不得偷换。',
+      ...(strictHold ? [`⚠ ${strictHold}`] : []),
     ]),
   ];
 }
 
-export function renderContractSection({ banUserAction = true, mode = 'main', beat = '', landingBy = '', hasCoop = false } = {}) {
+export function renderContractSection({ banUserAction = true, mode = 'main', beat = '', landingBy = '', hasCoop = false, strengthenOutline = false, anchor = '' } = {}) {
   if (mode === 'coop') return ['【当前演出为 Coop】只按 Coop 专用契约回报，主线、间章及普通支线均暂停，不写它们的落拍命令。'];
   const inInterlude = mode === 'interlude';
+  const strictOutline = !inInterlude && strengthenOutline === true && Boolean(anchor);
   const byExtra = landingBy === 'extra';
   const flag = inInterlude ? `${PATH.interlude}.${IL.beatDone}` : `${PATH.main}.${KEY_BEAT_DONE}`;
   const code = inInterlude ? [
@@ -1338,6 +1409,10 @@ export function renderContractSection({ banUserAction = true, mode = 'main', bea
   lines.push(
     inInterlude ? '【这一轮该演的画面 —— 演完它才算落拍】' : '【这一轮该演的一拍 —— 演完它才算落拍】',
     beat ? `<${CURRENT_BEAT_TAG}>${beat}</${CURRENT_BEAT_TAG}>` : beat,
+    ...(strictOutline ? [
+      `<当前拍锚点>${anchor}</当前拍锚点>`,
+      '锚点是本拍唯一完成条件；上面的拍只说明演出方向。只有正文中该锚点结果确实成立，才能确认本拍完成。',
+    ] : []),
     '',
     `【落拍判据：满足这些才把 ${flag} 写成 true】`,
     `　· 正文里 **\`<${CURRENT_BEAT_TAG}>\` 里那件事已经完整发生**了 —— 不是刚要开始、不是只做了一半、不是只被提到或只做了铺垫；`,
@@ -1351,39 +1426,63 @@ export function renderContractSection({ banUserAction = true, mode = 'main', bea
   //   · 世界状态类（本拍已落…）：描述"世界里发生了什么"，额外模型模式下由**变量模型**回填；
   //   · 判断类（合理性审查 / 审查说明）：**只有写正文的模型判断得了**（变量模型只看到成品），
   //     而且额外模型模式下 `_.set` 会被 MVU 丢掉 —— 所以它走**纯文本标签**，插件读走并剥离。
-  lines.push(
-    '【谁写什么】',
-    '· **世界状态类**（本拍已落 / 章目标达成 / 可进下一章 / 间章那几个 / 支线·插曲的已落）：描述「世界里发生了什么」。',
-    byExtra
-      ? '  这个聊天里由**额外的变量模型**在正文写完后回填 —— **讲故事的人什么都不要写**：不要把 `_.set` / `<UpdateVariable>` 写进正文或任何可见输出。'
-      : '  由你在回复末尾用 `_.set` 写（写在 `<UpdateVariable>` 区块里，字段见下）。',
-    '· **判断类**（`合理性审查`）：**只有写正文的模型判断得了** —— 变量模型只看到成品，它不知道你演不演得出来。',
-    '  所以**每一轮都先交一份自检、再动笔写正文**（写在回复**最开头**；插件读走、从消息里剥掉，读者看不到）：',
-    '```',
-    `<${SELF_CHECK_TAG}>`,
-    `① 注入要我演的（把 <${CURRENT_BEAT_TAG}> 里那句抄一遍，别改）：…`,
-    '② 我这一轮实际打算写：…',
-    '③ 两件事是不是一回事：是 / 不是（不是就写差在哪）',
-    '④ 这一拍要成立、还缺的那一步在谁手里：NPC / 环境 / {{user}}（在 {{user}} 手里就别替他做）',
-    `⑤ 结论：${REVIEW_PASS}</${SELF_CHECK_TAG}>`,
-    '```',
-    // ★ 0.38.6：这三条是**冲着一场真事故**写的 —— 用户报的那一轮，自检①②问的是
-    //   「用户这一轮的指令能不能写出来」（永远成立），于是结论永远「通过」，
-    //   而注入那一拍（博士落座→掏卡→问他）根本没演，落拍却被算成了 true。
-    //   所以：**必须先照抄注入那一句**（抄不出来就说明它没在看注入）；**玩家的言行优先**，
-    //   但因此把这一拍带歪时**必须报档**，不许「通过 + 算落拍」。
-    '　· ★ **{{user}} 的言行优先**：他要是把场面带到别处，就照 ③ 报 —— **不许**「结论写通过、再把这一拍算成落拍」。',
-    '　· ★ **结论决定这一轮怎么写**（这就是「先交自检」的意思）：',
-    `　　\`${REVIEW_PASS}\` → 照这一拍演；\`${REVIEW_ADJUST}\` → 按你自己调整后的执行方式演（**要的结果不变**）；`,
-    `　　\`${REVIEW_SETUP}\` → **只演到缺的那一步之前**：缺来由就先把来由补出来，`
-      + '该等 {{user}} 就只把条件 / 问题 / 局面递到他面前 —— **别替他做、别把这一拍演完**（这一轮也不报落拍）；',
-    `　　\`${REVIEW_REJECT}\` → **这一拍先不要演**：把场面落在它之前的处境上，让别的部分自然往前走`
-      + `（要成立就得硬加设定、或者它已经不可能了，就报这一档 —— 插件会请神谕重排剩下的拍）。`,
-    '　· **报档很便宜**（`调整` / `缺铺垫` 不重排、不花一次神谕调用）—— 别为了省事硬演，也别先写完再补一句结论。',
-    `　· 结论写在自检块**最后一行**（以 \`结论：\` 开头）；用 \`<${SELF_CHECK_TAG}>\`，`
-      + '**不要**写成 `<!-- -->` 注释（插件读不到，而且读者会看到）。',
-    '',
-  );
+  if (strictOutline) {
+    lines.push(
+      '【谁写什么 · 大纲遵循强化】',
+      '· **世界状态类**（本拍已落 / 章目标达成 / 可进下一章 / 间章那几个 / 支线·插曲的已落）：描述「世界里发生了什么」。',
+      byExtra
+        ? '  这个聊天里由**额外的变量模型**在正文写完后回填 —— **讲故事的人什么都不要写**：不要把 `_.set` / `<UpdateVariable>` 写进正文或任何可见输出。'
+        : '  由你在回复末尾用 `_.set` 写（写在 `<UpdateVariable>` 区块里，字段见下）。',
+      '· **判断类**（`合理性审查`）：**只有写正文的模型判断得了**；每一轮都先交下面的强化自检，再动笔写正文。',
+      '```',
+      `<${SELF_CHECK_TAG}>`,
+      `当前拍锚点：${anchor}`,
+      '① 本轮推进层级：前提 / 触发 / 反应 / 结果',
+      '② 采取行动的 NPC 及其动机：…',
+      '③ 使用的既有事实或线索：…',
+      '④ 本轮新增的可见局面变化：…',
+      '⑤ 仍需留给 {{user}} 的决定：…',
+      '⑥ 本拍完成：是 / 否',
+      '⑦ 完成证据：…（仅在本拍完成填“是”时填写正文里已经发生的证据）',
+      `⑧ 结论：${REVIEW_PASS}</${SELF_CHECK_TAG}>`,
+      '```',
+      '　· **当前拍锚点必须原样引用**；锚点对不上时，插件不会承认本拍完成。',
+      '　· 只有推进层级为“结果”、本拍完成为“是”、完成证据非空，且结论为“通过”或“调整”时，插件才接受本拍落拍。',
+      '　· 仍需 {{user}} 决定时，可以结论“通过”，但“本拍完成”必须写“否”，把局面递出去后停笔。',
+      '　· **{{user}} 的言行优先**：场面被带到别处、锚点没有成立时，不许写成“本拍完成：是”。',
+      '　· 结论必须写在自检块最后一行；缺字段、抄错锚点或证据为空都不会放行落拍。',
+      '',
+    );
+  } else {
+    lines.push(
+      '【谁写什么】',
+      '· **世界状态类**（本拍已落 / 章目标达成 / 可进下一章 / 间章那几个 / 支线·插曲的已落）：描述「世界里发生了什么」。',
+      byExtra
+        ? '  这个聊天里由**额外的变量模型**在正文写完后回填 —— **讲故事的人什么都不要写**：不要把 `_.set` / `<UpdateVariable>` 写进正文或任何可见输出。'
+        : '  由你在回复末尾用 `_.set` 写（写在 `<UpdateVariable>` 区块里，字段见下）。',
+      '· **判断类**（`合理性审查`）：**只有写正文的模型判断得了** —— 变量模型只看到成品，它不知道你演不演得出来。',
+      '  所以**每一轮都先交一份自检、再动笔写正文**（写在回复**最开头**；插件读走、从消息里剥掉，读者看不到）：',
+      '```',
+      `<${SELF_CHECK_TAG}>`,
+      `① 注入要我演的（把 <${CURRENT_BEAT_TAG}> 里那句抄一遍，别改）：…`,
+      '② 我这一轮实际打算写：…',
+      '③ 两件事是不是一回事：是 / 不是（不是就写差在哪）',
+      '④ 这一拍要成立、还缺的那一步在谁手里：NPC / 环境 / {{user}}（在 {{user}} 手里就别替他做）',
+      `⑤ 结论：${REVIEW_PASS}</${SELF_CHECK_TAG}>`,
+      '```',
+      '　· ★ **{{user}} 的言行优先**：他要是把场面带到别处，就照 ③ 报 —— **不许**「结论写通过、再把这一拍算成落拍」。',
+      '　· ★ **结论决定这一轮怎么写**（这就是「先交自检」的意思）：',
+      `　　\`${REVIEW_PASS}\` → 照这一拍演；\`${REVIEW_ADJUST}\` → 按你自己调整后的执行方式演（**要的结果不变**）；`,
+      `　　\`${REVIEW_SETUP}\` → **只演到缺的那一步之前**：缺来由就先把来由补出来，`
+        + '该等 {{user}} 就只把条件 / 问题 / 局面递到他面前 —— **别替他做、别把这一拍演完**（这一轮也不报落拍）；',
+      `　　\`${REVIEW_REJECT}\` → **这一拍先不要演**：把场面落在它之前的处境上，让别的部分自然往前走`
+        + `（要成立就得硬加设定、或者它已经不可能了，就报这一档 —— 插件会请神谕重排剩下的拍）。`,
+      '　· **报档很便宜**（`调整` / `缺铺垫` 不重排、不花一次神谕调用）—— 别为了省事硬演，也别先写完再补一句结论。',
+      `　· 结论写在自检块**最后一行**（以 \`结论：\` 开头）；用 \`<${SELF_CHECK_TAG}>\`，`
+        + '**不要**写成 `<!-- -->` 注释（插件读不到，而且读者会看到）。',
+      '',
+    );
+  }
   // ③ 世界状态类：谁写、怎么写。
   if (byExtra) {
     lines.push(

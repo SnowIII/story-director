@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {chapterFromBlock,normalizeChapter,anchorsOf,currentAnchor,renderMainSection,renderContractSection,
-    MAIN_BEATS,MAIN_ANCHORS,KEY_BEAT,applyNsCommands,extractNsCommands} from '../model.js';
+    MAIN_BEATS,MAIN_ANCHORS,KEY_BEAT,applyNsCommands,extractNsCommands,outlineAnchorIssue,
+    parseOutlineReceipt,outlineReceiptAllowsLanding} from '../model.js';
 import {setPromptEntries,configureDesignPrompt,splitDesignPrompt,FIELD_PROMPTS} from '../prompt-worldbook.js';
 import {directorFixture} from './prompt-fixture.js';
 
@@ -38,25 +39,53 @@ test('main injection strengthens only the current anchor when explicitly enabled
     assert.ok(!off.includes('大纲遵循强化'));assert.ok(!off.includes('印章确认为旧王室徽记'));
     const on=renderMainSection(chapter,{strengthenOutline:true,focusStale:'同一拍停留多轮'}).lines.join('\n');
     assert.ok(on.includes('<本拍剧情锚点>印章确认为旧王室徽记</本拍剧情锚点>'));
-    assert.ok(on.includes('不得偷换结果'));assert.ok(on.includes('主动构思并写出合乎逻辑的剧情发展'));
-    assert.ok(on.includes('动机、知情范围'));assert.ok(on.includes('人物为什么行动 → 采取什么行动'));
-    assert.ok(on.includes('主动寻找另一条'));assert.ok(on.includes('缺少铺垫就安排合理的铺垫'));
-    assert.ok(on.includes('不增加锚点逐项核销条件'));assert.ok(!on.includes('全部锚点已真实发生'));
-    assert.ok(on.includes('玩家作选择'));assert.ok(on.includes('可跨轮完成'));
+    assert.ok(on.includes('章目标只用于判断方向'));
+    assert.ok(on.includes('本轮只选择一个推进层级'));
+    assert.ok(on.includes('旁白宣告、口头承诺和计划预告都不算'));
+    assert.ok(on.includes('最小因果桥'));
+    assert.ok(on.includes('把条件与局面递给他并停笔'));
+    assert.ok(on.includes('当前拍可以跨轮完成'));
+    assert.ok(!renderMainSection(chapter,{outlineHold:'强化回执无效'}).lines.join('\n').includes('强化回执无效'));
+    assert.ok(renderMainSection(chapter,{strengthenOutline:true,outlineHold:'强化回执无效'}).lines.join('\n').includes('强化回执无效'));
     assert.ok(!on.includes('要么写**别处正在发生的事**'));
     assert.ok(!on.includes('来信者身份明确'));
     chapter[KEY_BEAT]=3;assert.ok(!renderMainSection(chapter,{strengthenOutline:true}).lines.join('\n').includes('本拍剧情锚点'));
     assert.ok(!renderMainSection({[MAIN_BEATS]:[]},{strengthenOutline:true}).lines.join('\n').includes('本拍剧情锚点'));
 });
 
-test('anchor guidance leaves the extra variable model landing contract unchanged',()=>{
+test('outline strengthening adds a read-only anchor and strict receipt without changing off or other modes',()=>{
     const options={beat:'侍女递出旧信',landingBy:'extra'};
     const text=renderContractSection(options).join('\n');
     assert.equal(renderContractSection({...options,anchor:currentAnchor(plan())}).join('\n'),text);
     assert.ok(!text.includes('本拍剧情锚点'));assert.ok(!text.includes('大纲遵循强化'));
     assert.ok(text.includes('额外的变量模型'));assert.ok(text.includes('本拍已落'));
+    const strong=renderContractSection({...options,strengthenOutline:true,anchor:currentAnchor(plan())}).join('\n');
+    assert.ok(strong.includes('<当前拍锚点>旧信交到守卫手中；来信者身份明确</当前拍锚点>'));
+    assert.ok(strong.includes('当前拍锚点：旧信交到守卫手中；来信者身份明确'));
+    assert.ok(strong.includes('本轮推进层级：前提 / 触发 / 反应 / 结果'));
+    assert.ok(strong.includes('本拍完成：是 / 否'));
+    assert.ok(strong.includes('完成证据'));
+    assert.ok(strong.includes('插件才接受本拍落拍'));
     for(const options of [{mode:'interlude',beat:'喝茶'},{mode:'coop',beat:'合作'},{beat:''}])
         assert.ok(!renderContractSection({...options,anchor:'不该出现的主线锚点'}).join('\n').includes('不该出现的主线锚点'));
+});
+
+test('outline receipts require the current anchor, result stage, completion and visible evidence',()=>{
+    const anchor='守卫收到旧信';
+    const receipt=(stage='结果',complete='是',evidence='守卫把旧信锁进证物箱',verdict='通过')=>
+        `<故事导演自检>\n当前拍锚点：${anchor}\n本轮推进层级：${stage}\n本拍完成：${complete}\n完成证据：${evidence}\n结论：${verdict}\n</故事导演自检>`;
+    const valid=parseOutlineReceipt(receipt(),anchor);
+    assert.ok(valid.valid);assert.ok(valid.landed);assert.ok(outlineReceiptAllowsLanding(valid));
+    assert.equal(parseOutlineReceipt(receipt('触发'),anchor).landed,false);
+    assert.equal(parseOutlineReceipt(receipt('结果','否'),anchor).landed,false);
+    assert.equal(parseOutlineReceipt(receipt('结果','是','无'),anchor).landed,false);
+    assert.equal(parseOutlineReceipt(receipt().replace(anchor,'另一封信'),anchor).valid,false);
+    assert.equal(outlineReceiptAllowsLanding(parseOutlineReceipt(receipt('结果','是','守卫收下旧信','驳回'),anchor)),false);
+});
+
+test('one anchor is expected to contain one result; extra clauses receive a non-destructive warning',()=>{
+    assert.equal(outlineAnchorIssue('守卫收到旧信'),'');
+    assert.match(outlineAnchorIssue('守卫收到旧信；他当场认出寄信人'),/每拍只写一个可验证结果/);
 });
 
 test('landed beats do not demand an anchor checklist replay during the pacing hold',()=>{

@@ -44,7 +44,7 @@ import {
     isPlainObject, unwrap, unwrapDeep, display, toNumber, truthy,
     reviewLadder, STRIKES_BEFORE_EPIC, nsHasState, beatRollbackTarget, reviewAction, REVIEW_SETUP,
     capText, splitBeats, beatsOf, parseBlocks, storyAuditVerdict,
-    emptyMain, mainOf, listOf, currentBeat, anchorsOf, reviewStateOf, reviewNoteOf,
+    emptyMain, mainOf, listOf, currentBeat, currentAnchor, anchorsOf, reviewStateOf, reviewNoteOf,
     isLiveThread, threadLanded, interludePending, interludeAfter,
     nextId, takenTitles, completedMainTitles,
     renderMainSection, renderThreadsSection, renderInterludeSection, renderContractSection, renderInjectionHeader,
@@ -53,6 +53,7 @@ import {
     applyNsCommands, extractNsCommands, landingOpsInReply, storyBlockFailure, recognizedFieldNames,
     worldbookDigest, setInterludeWritesAllowed, beatOrderSkipsRead,
     mergeBeats, remainingBeatBudget, worldbookUpdateDecision, setCoopScene, configureDesignPrompt,
+    outlineAnchorIssue, parseOutlineReceipt, outlineReceiptAllowsLanding,
 } from './model.js';
 
 const ID = 'story-director';
@@ -62,7 +63,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.47.0';
+const VERSION = '0.48.0';
 let coop = null;
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
@@ -458,6 +459,10 @@ const DEFAULT = {
          * 注入必须说清，否则模型会以为还没演完（见 evaluateDirector 里那段说明）。
          */
         landedHold: '',
+        /** 强化模式最近一轮的结构化锚点自检；只在当前聊天、当前章、当前拍、当前回复内有效。 */
+        outlineReceipt: null,
+        /** 强化模式拒绝了“已完成”声明后，下一轮要求模型重新核验的原因。 */
+        outlineHold: '',
         /**
          * ★ 用户钉住的要求（「记住它，每轮都带上」）。
          *
@@ -1793,6 +1798,7 @@ function buildInjection(live = null) {
                 maxBeats: BEAT_MAX, root, banUserAction: ban, focusStale: s.run.focusStale,
                 landedHold: s.run?.landedHold || '',
                 strengthenOutline: s.strengthenOutline === true,
+                outlineHold: s.run?.outlineHold || '',
                 // ★ 0.27.0：模型自己报的「缺铺垫」与「微调」各回它一句（只出现一轮 / 补完为止）。
                 setupNote: s.run.setupNote || '',
                 beatNote: s.run.beatNote || '',
@@ -1892,6 +1898,7 @@ function syncMainInjection() {
         // ★ 0.35.0：把「这一轮那一拍」和「谁来写变量」一起交给契约块 ——
         //   契约是唯一到得了**额外变量模型**的通道（见 landingByExtraModel 的注释）。
         const coopContract = coop?.variableContract() || '';
+        const strengthenOutline = s.strengthenOutline === true;
         const mainContract = s.injectContract
             ? substitute(renderContractSection({
                 banUserAction: settings().banUserAction !== false,
@@ -1899,6 +1906,8 @@ function syncMainInjection() {
                 beat: currentBeatLine(),
                 landingBy: landingByExtraModel() ? 'extra' : '',
                 hasCoop: !!coopContract,
+                strengthenOutline,
+                anchor: strengthenOutline ? currentAnchor(mainOf(rootOf())) : '',
             }).join('\n'))
             : '';
         const contract = [mainContract, coopContract].filter(Boolean).join('\n\n');
@@ -1950,7 +1959,11 @@ function renderDiagnostics(text = null, contract = null) {
     if (contractNode) {
         contractNode.textContent = contract
             ?? (settings().injectContract
-                ? renderContractSection({ banUserAction: settings().banUserAction !== false }).join('\n')
+                ? renderContractSection({
+                    banUserAction: settings().banUserAction !== false,
+                    strengthenOutline: settings().strengthenOutline === true,
+                    anchor: settings().strengthenOutline === true ? currentAnchor(main) : '',
+                }).join('\n')
                 : '（变量契约注入已关）');
     }
 }
@@ -2040,6 +2053,20 @@ function harvestReviewTag(messageId) {
         const s = settings();
         // 自检原文留一份给面板（「它到底判断了没」是这套机制唯一的可查凭据）
         if (thinking && s.run.reviewThinking !== thinking) { s.run.reviewThinking = thinking; save(); }
+        if (selfBlock && s.strengthenOutline === true && currentMode() === 'main') {
+            const main = mainState();
+            const anchor = currentAnchor(main);
+            const receipt = parseOutlineReceipt(selfBlock, anchor);
+            s.run.outlineReceipt = {
+                ...receipt,
+                anchor,
+                beat: currentBeat(main),
+                chapterTitle: String(unwrap(main[MAIN_TITLE]) ?? '').trim(),
+                at: aiMessageCount(),
+            };
+            if (receipt.valid) s.run.outlineHold = '';
+            save();
+        }
         if (known) {
             // ★ 结论是「通过」是**例行**（现在每轮都会有一份自检）—— 别往控制台刷（0.38.1 的纪律）。
             const note = String(thinking || legacyNote || '').replace(/\s+/g, ' ').trim().slice(0, 200);
@@ -3610,6 +3637,8 @@ async function applyChapter(chapter, { live = null, quiet = false, keep = undefi
     const rt = s.run;
     rt.focusBeat = played + 1;
     rt.beatAt = aiMessageCount();
+    rt.outlineReceipt = null;
+    rt.outlineHold = '';
     // ★ **只有真的开出一章**（played === 0）才播「这一章」的基准：
     //   重排剩下的拍（played > 0）只是改后面的内容，不该把这一章的时钟与审查额度一起重置 ——
     //   以前这里无条件写，于是①级重排会把 `redesigns` 清零（升级梯永远升不上去）、
@@ -4140,6 +4169,13 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
             reportBlockFailure('StoryChapters', raw, '剧情锚点缺失或与拍数不一致：每拍必须有一个同编号的非空锚点。本次结果未采用，请补齐后重试。');
             markFailed(key);
             return false;
+        }
+        if (settings().strengthenOutline === true) {
+            const issue = anchors.map(outlineAnchorIssue).find(Boolean);
+            if (issue) {
+                console.info(`[故事导演] 强化模式收到粒度偏宽的剧情锚点：${issue}`);
+                if (!quiet) toast(issue, 'warning');
+            }
         }
         clearFailed(key);
         await applyChapter(chapter, { quiet: false, keep });
@@ -4790,7 +4826,24 @@ async function evaluateDirector({ live = null } = {}) {
         //   与间章同一套（见 landingReportedByReply 的长注释：常驻变量分不清「旧值」与「新回报」，
         //   用户报的「新章刚开、第 1 拍自己就落地了」就是旧值被当新回报吃了）。
         const mainReport = landingReportedByReply('main');
-        const mainLanded = mainReport === null ? truthy(main[KEY_BEAT_DONE]) : mainReport;
+        let mainLanded = mainReport === null ? truthy(main[KEY_BEAT_DONE]) : mainReport;
+
+        // ★ P2：仅强化模式启用。普通落拍规则完全不变；强化模式要求同一楼的结构化自检
+        //   真正证明“锚点结果已成立且有正文证据”，否则不消费落拍、不推进拍号。
+        if (s.strengthenOutline === true) {
+            const receipt = rt.outlineReceipt;
+            const chapterTitle = String(unwrap(main[MAIN_TITLE]) ?? '').trim();
+            const freshReceipt = receipt && receipt.at === count && receipt.beat === beat
+                && receipt.chapterTitle === chapterTitle ? receipt : null;
+            if (freshReceipt?.valid) rt.outlineHold = '';
+            if (mainLanded && !outlineReceiptAllowsLanding(freshReceipt)) {
+                rt.outlineHold = `第 ${beat} 拍曾被标为已完成，但当前回复的大纲遵循强化自检没有证明锚点已经成立并给出明确正文证据。本轮不推进；请重新核对当前拍，只有“推进层级=结果、本拍完成=是、完成证据非空”时才写落拍。`;
+                save();
+                if (truthy(main[KEY_BEAT_DONE])) await patchMain({ [KEY_BEAT_DONE]: false }, { live });
+                syncMainInjection();
+                return;
+            }
+        }
 
         // ② 自动换拍（手动模式下也照做：写盘不需要调模型）
         if (s.autoBeat && beat <= total && mainLanded) {
@@ -4803,6 +4856,8 @@ async function evaluateDirector({ live = null } = {}) {
                 rt.focusBeatSince = count;          // 换拍了：同一拍的「连着演了几轮」重新计时
                 rt.focusStale = '';
                 rt.landedHold = '';                 // 换拍了 → 上一条「已落等换拍」的回执作废
+                rt.outlineReceipt = null;
+                rt.outlineHold = '';
                 rt.setupNote = '';                  // 这一拍落了 → 之前按着它的铺垫要求完成使命
                 rt.beatNote = '';
                 save();
@@ -5120,6 +5175,8 @@ function syncBeatBackOnRollback(count) {
     rt.beatAt = 0;                       // 回退后允许立刻重新落拍 —— 用户就是要重来这一拍
     rt.focusBeatSince = count;
     rt.focusStale = '';
+    rt.outlineReceipt = null;
+    rt.outlineHold = '';
     save();
     // 聊天级那一份刚才可能还留着「已落」的进度 —— 对齐一下，否则下一楼从它继承，又跳回去了。
     void syncNsToChat();
@@ -5627,8 +5684,9 @@ function renderMainTab() {
             <label class="sd-field"><span>章目标</span><textarea name="main-goal" rows="2">${esc(String(unwrap(main[MAIN_GOAL]) ?? ''))}</textarea>${fieldPromptHint('chapter_goal')}</label>
             <label class="sd-field"><span>范围</span><textarea name="main-scope" rows="2">${esc(String(unwrap(main[MAIN_SCOPE]) ?? ''))}</textarea>${fieldPromptHint('chapter_scope')}</label>
             <label class="sd-field"><span>拍（一行一拍，<code>1. …</code> 起头）</span><textarea name="main-beats" rows="8">${esc(beats.map((text, index) => `${index + 1}. ${text}`).join('\n'))}</textarea>${fieldPromptHint('chapter_beats')}</label>
-            <label class="sd-field"><span>剧情锚点（与拍号逐条对应，可用分号列出本拍必达点）</span><textarea name="main-anchors" rows="5">${esc(anchorsOf(main).map((text, index) => `${index + 1}. ${text}`).join('\n'))}</textarea>${fieldPromptHint('chapter_anchors')}</label>
-            <p class="sd-note">在「设置 → 注入」勾选「大纲遵循强化」后，每轮要求 AI 主动设计合乎逻辑的剧情发展，实现当前拍锚点；旧章表沿用对应拍内容。</p>
+            <label class="sd-field"><span>剧情锚点（与拍号逐条对应，每拍写一个可验证的主要结果）</span><textarea name="main-anchors" rows="5">${esc(anchorsOf(main).map((text, index) => `${index + 1}. ${text}`).join('\n'))}</textarea>${fieldPromptHint('chapter_anchors')}</label>
+            <p class="sd-note">每拍只写一个可验证的主要结果；分号仅补充同一结果的证据。若出现两个独立局面变化，请拆成后续拍。</p>
+            <p class="sd-note">在「设置 → 注入」勾选「大纲遵循强化」后，正文会收到当前拍的结构化因果契约，自检还必须证明锚点结果与证据；普通模式完全沿用原流程。</p>
             <div class="sd-row">
                 <button type="button" class="sd-btn sd-save-main">保存这一章</button>
                 <button type="button" class="sd-btn sd-generate-chapter" title="按当前处境重写整章的拍 —— 拍号会回到第 1 拍">重新生成本章</button>
@@ -5780,7 +5838,7 @@ function renderSetTab() {
         <div class="sd-card">
             <div class="sd-card-head"><span class="sd-card-title">注入</span></div>
             <label class="sd-switch"><input name="inject-main" type="checkbox"> 注入主线引导</label>
-            <label class="sd-switch"><input name="strengthen-outline" type="checkbox"> <b>大纲遵循强化</b>（默认关闭：主动设计符合人物与因果的剧情，实现当前拍锚点）</label>
+            <label class="sd-switch"><input name="strengthen-outline" type="checkbox"> <b>大纲遵循强化</b>（默认关闭：结构化因果约束 + 锚点证据自检）</label>
             <label class="sd-switch"><input name="inject-threads" type="checkbox"> 注入支线</label>
             <label class="sd-switch"><input name="inject-interludes" type="checkbox"> 注入插曲</label>
             <label class="sd-switch"><input name="inject-contract" type="checkbox"> 注入变量契约（落拍回报的写法）</label>
@@ -5856,6 +5914,10 @@ function renderSetTab() {
             if (kind === 'check') s[key] = node.checked;
             else if (node.type === 'number') s[key] = Number(node.value);
             else s[key] = node.value;
+            if (key === 'strengthenOutline' && !node.checked) {
+                s.run.outlineReceipt = null;
+                s.run.outlineHold = '';
+            }
             save();
             syncMainInjection();
             if (key === 'showBubble' || key === 'bubbleSize' || key === 'bubbleIcon') applyBubbleLook();
@@ -6143,6 +6205,11 @@ async function saveMainFromForm() {
     }
     const current = mainState();
     const before = beatsOf(current);
+    const beforeAnchors = anchorsOf(current);
+    if (settings().strengthenOutline === true) {
+        const issue = anchors.map(outlineAnchorIssue).find(Boolean);
+        if (issue) toast(issue, 'warning');
+    }
     const fields = {
         [MAIN_TITLE]: String(host.querySelector('[name="main-title"]')?.value || '').trim(),
         [MAIN_ARC]: String(host.querySelector('[name="main-arc"]')?.value || '').trim(),
@@ -6154,6 +6221,8 @@ async function saveMainFromForm() {
     };
     // 拍列表变了（条数或内容）＝换了一份演出计划，拍进度回到第 1 拍
     const changed = beats.length !== before.length || beats.some((text, index) => text !== before[index]);
+    const anchorChanged = anchors.length !== beforeAnchors.length
+        || anchors.some((text, index) => text !== beforeAnchors[index]);
     if (changed) {
         fields[KEY_BEAT] = 1;
         fields[KEY_BEAT_DONE] = false;
@@ -6166,6 +6235,11 @@ async function saveMainFromForm() {
         rt.focusBeat = 1;
         rt.beatAt = aiMessageCount();
         rt.closedChapter = '';
+    }
+    if (changed || anchorChanged) {
+        const rt = settings().run;
+        rt.outlineReceipt = null;
+        rt.outlineHold = '';
         save();
     }
     syncMainInjection();
@@ -6184,6 +6258,8 @@ async function manualAdvanceBeat() {
     const rt = settings().run;
     rt.focusBeat = beat + 1;
     rt.beatAt = aiMessageCount();
+    rt.outlineReceipt = null;
+    rt.outlineHold = '';
     save();
     syncMainInjection();
     render();
@@ -6196,6 +6272,9 @@ async function finishChapter() {
     const beats = beatsOf(main);
     await patchMain({ [KEY_BEAT]: beats.length + 1, [KEY_CHAPTER_DONE]: true, [KEY_READY]: true });
     const s = settings();
+    s.run.outlineReceipt = null;
+    s.run.outlineHold = '';
+    save();
     const advance = s.autoDirector && s.autoChapter;
     if (advance) {
         // 手动收尾立即交给导演，记史与 closedChapter 交给正常收尾流程。
