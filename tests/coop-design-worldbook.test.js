@@ -33,7 +33,7 @@ test('worldbook upgrades discard legacy config without archives, preserve curren
     assert.ok(!JSON.stringify(merged).includes('旧 Coop 配置'));assert.ok(!JSON.stringify(merged).includes('旧整段配置'));
     assert.notEqual(merged.entries[0].content,'旧变量契约');
     assert.equal(entries.find(e=>e.comment.includes('[sd_field_chapter_goal]')).content,'保留的新字段写法');
-    assert.equal(entries.length,33);assert.ok(!entries.some(e=>/archive|存档/.test(e.comment)));
+    assert.equal(entries.length,34);assert.ok(!entries.some(e=>/archive|存档/.test(e.comment)));
     assert.ok(merged.entries[0].content.includes('不写入 MVU'));
 });
 

@@ -9,7 +9,7 @@ const preThinkKeys=new Set(Object.values(PRETHINK_PROMPTS).map(prompt=>prompt.ke
 // 字段名与兼容别名属于传输协议，字段内部的叙事小标题不是新属性。
 export const DESIGN_FIELDS={
     epic:['标题','title','篇章','总纲','纲','line','章内容','章节表','章','chapters','走向','movements','大高潮','高潮','climax','伏笔','hooks','既成事实','事实','ledger'],
-    chapter:['章标题','标题','title','篇章','分卷','弧线','arc','story','范围','边界','scope','章目标','目标','goal','拍','beats'],
+    chapter:['章标题','标题','title','篇章','分卷','弧线','arc','story','范围','边界','scope','章目标','目标','goal','拍','beats','剧情锚点','anchors'],
     interlude_chapter:['标题','title','场合','地点','scene','拍','beats'],
     thread:['标题','title','目标','goal','切入','起始迹象','entry','落点','收束','land','时限','due'],
     interlude:['标题','title','内容','一拍','beat','接在','after']
@@ -77,6 +77,7 @@ export function configureDesignPrompt(builtin,_sections={},parameters={}) {
     const format=preThink ? parts.format.replace('且**只输出一个区块**','先输出 <preThink>〔按返回前置内容配置填写〕</preThink>，再输出一个剧情结果区块') : parts.format;
     const contract=['【固定返回格式：仅约束标签、顶层字段与数据结构】',...context,
         '字段值的具体写法遵循上面的对应字段规则；标签、顶层字段、编号、数量和运行边界以本节为准。',
+        ...(parts.key==='chapter' ? ['剧情锚点是必填的独立字段，与拍逐条对应、数量相同，两组都从 1 连续编号。局部重排时只返回本次剩余拍及对应锚点，不重复已演部分；不得将锚点写在 preThink 里代替结果字段。'] : []),
         ...(preThink ? ['返回前置内容是面向用户的补充说明，先放在一个闭合的 <preThink> 区块内，再输出下列剧情结果。两种区块不得嵌套；检查结论仍写在结果区块之后，不放入 preThink。'] : []),
         '下列括号内文字是内容占位，不要照抄。字段名原样保留，字段值按创作规则填写；编号条目可包含分号和自定义小标题。',format].join('\n');
     const preamble=preThink ? '\n\n【返回前置内容】\n'+preThink : '';

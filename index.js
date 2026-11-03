@@ -32,7 +32,7 @@ import {
     world_names, selected_world_info, world_info, onWorldInfoChange, updateWorldInfoList, loadWorldInfo, saveWorldInfo,
 } from '../../../world-info.js';
 import {
-    NS, PATH, THREAD_FIELDS, INTERLUDE_FIELDS, MAIN_TITLE, MAIN_ARC, MAIN_SCOPE, MAIN_GOAL, MAIN_BEATS, MAIN_STARTED, MAIN_ENDED, MAIN_CLOSED,
+    NS, PATH, THREAD_FIELDS, INTERLUDE_FIELDS, MAIN_TITLE, MAIN_ARC, MAIN_SCOPE, MAIN_GOAL, MAIN_BEATS, MAIN_ANCHORS, MAIN_STARTED, MAIN_ENDED, MAIN_CLOSED,
     INTERLUDE, IL, emptyInterlude, interludeChapterOf, interludeActive, interludeBeatsOf, interludeBeat,
     EPIC, EP, emptyEpic, epicOf, epicStarted, migrateEpicKeys, epicChapters, epicMovements, epicClimax,
     epicChapterCount, epicFinished, epicHooks, epicChapter, renderEpicSection, epicFromBlock, epicAskText, userAskText,
@@ -44,7 +44,7 @@ import {
     isPlainObject, unwrap, unwrapDeep, display, toNumber, truthy,
     reviewLadder, STRIKES_BEFORE_EPIC, nsHasState, beatRollbackTarget, reviewAction, REVIEW_SETUP,
     capText, splitBeats, beatsOf, parseBlocks, storyAuditVerdict,
-    emptyMain, mainOf, listOf, currentBeat, reviewStateOf, reviewNoteOf,
+    emptyMain, mainOf, listOf, currentBeat, anchorsOf, reviewStateOf, reviewNoteOf,
     isLiveThread, threadLanded, interludePending, interludeAfter,
     nextId, takenTitles, completedMainTitles,
     renderMainSection, renderThreadsSection, renderInterludeSection, renderContractSection, renderInjectionHeader,
@@ -62,7 +62,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.45.0';
+const VERSION = '0.46.0';
 let coop = null;
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
@@ -267,6 +267,8 @@ const DEFAULT = {
     autoBeat: true,
     /** 换章：章目标达成且场景收尾后自动请神谕开下一章。 */
     autoChapter: true,
+    /** 只强化当前拍已保存的锚点；生成章表时始终生成锚点。 */
+    strengthenOutline: false,
     /** 自动续支线：每 threadEvery 轮给一条新的短支线。 */
     autoThread: true,
     /** 自动插曲：那些不占「幕」的随机小段（与「间章」是两回事）。 */
@@ -1426,8 +1428,8 @@ async function patchMain(fields, _opts = {}) {
         if (!isPlainObject(root[NS])) root[NS] = {};
         if (!isPlainObject(root[NS][MAIN_SECTION])) root[NS][MAIN_SECTION] = emptyMain();
         Object.assign(root[NS][MAIN_SECTION], fields);
-        if (Array.isArray(fields[MAIN_BEATS])) {
-            root[NS][MAIN_SECTION][MAIN_BEATS] = fields[MAIN_BEATS].slice();
+        for (const key of [MAIN_BEATS, MAIN_ANCHORS]) {
+            if (Array.isArray(fields[key])) root[NS][MAIN_SECTION][key] = fields[key].slice();
         }
     });
 }
@@ -1789,7 +1791,8 @@ function buildInjection(live = null) {
         } else if (hasMain) {
             mainLines = renderMainSection(main, {
                 maxBeats: BEAT_MAX, root, banUserAction: ban, focusStale: s.run.focusStale,
-                landedHold: s.run.landedHold || '',
+                landedHold: s.run?.landedHold || '',
+                strengthenOutline: s.strengthenOutline === true,
                 // ★ 0.27.0：模型自己报的「缺铺垫」与「微调」各回它一句（只出现一轮 / 补完为止）。
                 setupNote: s.run.setupNote || '',
                 beatNote: s.run.beatNote || '',
@@ -2801,6 +2804,9 @@ function buildChapterSystemPrompt({ regenerate = false, rejected = null, remaini
         partial ? `拍: 只填写剩余的 ${budget} 拍，从 1 连续编号` : `拍: 共 ${BEAT_MIN}~${budget} 拍，从 1 连续编号`,
         '1. 〔第一拍内容〕',
         '2. 〔第二拍内容；按实际数量继续或删减编号项〕',
+        '剧情锚点: 与以上拍逐条对应，数量相同，从 1 连续编号',
+        '1. 〔第一拍必须实现的剧情点〕',
+        '2. 〔第二拍必须实现的剧情点；按拍数继续或删减编号项〕',
         '</StoryChapters>',
         '',
         ...DESIGN_BOTH,
@@ -3581,12 +3587,16 @@ async function applyChapter(chapter, { live = null, quiet = false, keep = undefi
     // 与注入（renderMainSection 的 maxBeats）和状态机（beats.length）三处同源。
     // 保住已演过的、只换掉后面的 —— 算法在 model.js 里（纯函数，可离线测）。
     const beats = mergeBeats(old, played, fresh, BEAT_MAX);
+    const oldAnchors = anchorsOf(previous), freshAnchors = anchorsOf(chapter);
+    const anchors = mergeBeats(old.map((beat, i) => oldAnchors[i] || beat), played,
+        fresh.map((beat, i) => freshAnchors[i] || beat), BEAT_MAX);
     const fields = {
         [MAIN_TITLE]: played > 0 ? (String(unwrap(previous[MAIN_TITLE]) ?? '').trim() || chapter[MAIN_TITLE]) : chapter[MAIN_TITLE],
         [MAIN_ARC]: played > 0 ? (String(unwrap(previous[MAIN_ARC]) ?? '').trim() || chapter[MAIN_ARC]) : chapter[MAIN_ARC],
         [MAIN_SCOPE]: played > 0 ? (String(unwrap(previous[MAIN_SCOPE]) ?? '').trim() || chapter[MAIN_SCOPE]) : chapter[MAIN_SCOPE],
         [MAIN_GOAL]: played > 0 ? (String(unwrap(previous[MAIN_GOAL]) ?? '').trim() || chapter[MAIN_GOAL]) : chapter[MAIN_GOAL],
         [MAIN_BEATS]: beats,
+        [MAIN_ANCHORS]: anchors,
         [KEY_BEAT]: played + 1,
         [KEY_BEAT_DONE]: false,
         [KEY_CHAPTER_DONE]: false,
@@ -4122,6 +4132,12 @@ async function generateChapter({ quiet = true, regenerate = false, rejected = nu
             reportBlockFailure('StoryChapters', raw, chapter && !chapter[MAIN_BEATS].length
                 ? '区块在，但**拍列表是空的** —— `拍:` 那一行没写出来（或写得认不出来）'
                 : '');
+            markFailed(key);
+            return false;
+        }
+        const anchors = anchorsOf(chapter);
+        if (anchors.length !== chapter[MAIN_BEATS].length || anchors.some((anchor) => !anchor)) {
+            reportBlockFailure('StoryChapters', raw, '剧情锚点缺失或与拍数不一致：每拍必须有一个同编号的非空锚点。本次结果未采用，请补齐后重试。');
             markFailed(key);
             return false;
         }
@@ -5611,6 +5627,8 @@ function renderMainTab() {
             <label class="sd-field"><span>章目标</span><textarea name="main-goal" rows="2">${esc(String(unwrap(main[MAIN_GOAL]) ?? ''))}</textarea>${fieldPromptHint('chapter_goal')}</label>
             <label class="sd-field"><span>范围</span><textarea name="main-scope" rows="2">${esc(String(unwrap(main[MAIN_SCOPE]) ?? ''))}</textarea>${fieldPromptHint('chapter_scope')}</label>
             <label class="sd-field"><span>拍（一行一拍，<code>1. …</code> 起头）</span><textarea name="main-beats" rows="8">${esc(beats.map((text, index) => `${index + 1}. ${text}`).join('\n'))}</textarea>${fieldPromptHint('chapter_beats')}</label>
+            <label class="sd-field"><span>剧情锚点（与拍号逐条对应，可用分号列出本拍必达点）</span><textarea name="main-anchors" rows="5">${esc(anchorsOf(main).map((text, index) => `${index + 1}. ${text}`).join('\n'))}</textarea>${fieldPromptHint('chapter_anchors')}</label>
+            <p class="sd-note">在「设置 → 注入」勾选「大纲遵循强化」后，每轮要求 AI 主动设计合乎逻辑的剧情发展，实现当前拍锚点；旧章表沿用对应拍内容。</p>
             <div class="sd-row">
                 <button type="button" class="sd-btn sd-save-main">保存这一章</button>
                 <button type="button" class="sd-btn sd-generate-chapter" title="按当前处境重写整章的拍 —— 拍号会回到第 1 拍">重新生成本章</button>
@@ -5762,6 +5780,7 @@ function renderSetTab() {
         <div class="sd-card">
             <div class="sd-card-head"><span class="sd-card-title">注入</span></div>
             <label class="sd-switch"><input name="inject-main" type="checkbox"> 注入主线引导</label>
+            <label class="sd-switch"><input name="strengthen-outline" type="checkbox"> <b>大纲遵循强化</b>（默认关闭：主动设计符合人物与因果的剧情，实现当前拍锚点）</label>
             <label class="sd-switch"><input name="inject-threads" type="checkbox"> 注入支线</label>
             <label class="sd-switch"><input name="inject-interludes" type="checkbox"> 注入插曲</label>
             <label class="sd-switch"><input name="inject-contract" type="checkbox"> 注入变量契约（落拍回报的写法）</label>
@@ -5859,6 +5878,7 @@ function renderSetTab() {
     bind('chapter-gap', 'chapterGap', 'value');
     bind('thread-warmup', 'threadWarmup', 'value');
     bind('inject-main', 'injectMain');
+    bind('strengthen-outline', 'strengthenOutline');
     bind('inject-threads', 'injectThreads');
     bind('inject-interludes', 'injectInterludes');
     bind('inject-contract', 'injectContract');
@@ -6115,6 +6135,12 @@ async function saveMainFromForm() {
     const host = panel?.querySelector('.sd-main-tab');
     if (!host) return;
     const beats = splitBeats(host.querySelector('[name="main-beats"]')?.value || '');
+    const anchorText = host.querySelector('[name="main-anchors"]')?.value || '';
+    const anchors = anchorsOf({ [MAIN_ANCHORS]: anchorText });
+    if (anchorText.trim() && (!anchors.length || anchors.length !== beats.length || anchors.some((anchor) => !anchor))) {
+        toast('剧情锚点须与拍逐条对应、数量相同；也可清空锚点，沿用每拍内容。', 'warning');
+        return;
+    }
     const current = mainState();
     const before = beatsOf(current);
     const fields = {
@@ -6124,6 +6150,7 @@ async function saveMainFromForm() {
         [MAIN_SCOPE]: String(host.querySelector('[name="main-scope"]')?.value || '').trim(),
         // 清空输入框也要真的写进去（以前「空文本不写」会让旧拍留在库里，还顺手把游标倒回第 1 拍 → 整章重演）
         [MAIN_BEATS]: beats,
+        [MAIN_ANCHORS]: anchors,
     };
     // 拍列表变了（条数或内容）＝换了一份演出计划，拍进度回到第 1 拍
     const changed = beats.length !== before.length || beats.some((text, index) => text !== before[index]);

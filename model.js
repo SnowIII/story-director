@@ -137,6 +137,7 @@ export const MAIN_ARC = '篇章';
 export const MAIN_SCOPE = '范围';
 export const MAIN_GOAL = '章目标';
 export const MAIN_BEATS = '拍';
+export const MAIN_ANCHORS = '剧情锚点';
 export const MAIN_STARTED = '开始';
 export const MAIN_ENDED = '结束';
 /** 主线这一章是否已经收尾（收尾后进入「间章」时段）。插件写，正文模型只读。 */
@@ -756,6 +757,30 @@ export function beatsOf(target) {
   return splitBeats(beats);
 }
 
+/** 与拍号一一对应；保留空位，避免后面的锚点错配到前一拍。 */
+export function anchorsOf(target) {
+  const raw = unwrap(target?.[MAIN_ANCHORS]);
+  if (Array.isArray(raw)) return raw.map((item) => String(unwrap(item) ?? '').trim());
+  const text = String(raw ?? '').replace(/\r/g, '').trim();
+  if (!text) return [];
+  const marks = [...text.matchAll(/^[ \t]*(?:第[ \t]*)?(\d{1,2})[ \t]*(?:拍)?[ \t]*[.、．)）:：][ \t]*/gm)];
+  if (!marks.length) return [text];
+  const anchors = [];
+  for (const [i, mark] of marks.entries()) {
+    const index = Number(mark[1]) - 1;
+    if (index < 0 || Object.hasOwn(anchors, index)) return [];
+    anchors[index] = text.slice(mark.index + mark[0].length, marks[i + 1]?.index ?? text.length).replace(/\n+/g, ' ').trim();
+  }
+  return Array.from(anchors, (anchor) => anchor || '');
+}
+
+/** 旧章表未存锚点时沿用当前拍，不为兼容旧存档额外请求模型。 */
+export function currentAnchor(main) {
+  const index = currentBeat(main) - 1;
+  const beat = beatsOf(main)[index];
+  return beat ? anchorsOf(main)[index] || beat : '';
+}
+
 /** 前置补充内容不参与剧情解析；未闭合时也不把其中的示例当作真实结果。 */
 export function stripPreThink(text) {
   return String(text ?? '').replace(/<preThink\b[^>]*>[\s\S]*?(?:<\/preThink\s*>|$)/gi, '');
@@ -830,6 +855,7 @@ export function emptyMain() {
     [MAIN_SCOPE]: '',
     [MAIN_GOAL]: '',
     [MAIN_BEATS]: [],
+    [MAIN_ANCHORS]: [],
     [KEY_BEAT]: 1,
     [KEY_BEAT_DONE]: false,
     [KEY_CHAPTER_DONE]: false,
@@ -957,7 +983,7 @@ export function renderInjectionHeader({ banUserAction = true, mode = 'main' } = 
 /**
  * 主线区块：整条线的拍列表 + 本轮聚焦哪一拍 + 落拍回报怎么写。
  */
-export function renderMainSection(main, { maxBeats = 8, root = null, banUserAction = true, focusStale = '', setupNote = '', beatNote = '', landedHold = '' } = {}) {
+export function renderMainSection(main, { maxBeats = 8, root = null, banUserAction = true, focusStale = '', setupNote = '', beatNote = '', landedHold = '', strengthenOutline = false } = {}) {
   const lines = [];
   const title = String(unwrap(main[MAIN_TITLE]) ?? '').trim();
   const arc = String(unwrap(main[MAIN_ARC]) ?? '').trim();
@@ -998,6 +1024,7 @@ export function renderMainSection(main, { maxBeats = 8, root = null, banUserActi
     //     （以前它只是叙述里的一行，模型顺手就换成了"用户让我写的事"，见 CURRENT_BEAT_TAG 的说明）。
     lines.push(`<${CURRENT_BEAT_TAG}>本轮是本章第 ${current} 拍 / 共 ${total} 拍：`);
     lines.push(`　▶ ${current}. ${beats[current - 1]}</${CURRENT_BEAT_TAG}>`);
+    if (strengthenOutline) lines.push(...renderAnchorConstraint(currentAnchor(main), { landedHold }));
     if (current > 1) lines.push(`前面 ${current - 1} 拍已经演过了（**不要重演**；它们造成的局面是既成事实）。`);
     lines.push('**后面的拍还没到，这一轮不要抢演** —— 抢跑比慢更糟；这一拍演完就照下面写回报。');
     lines.push(
@@ -1018,7 +1045,9 @@ export function renderMainSection(main, { maxBeats = 8, root = null, banUserActi
       lines.push(
         `　⚠ **${focusStale}** —— 说明你还没回报「这一拍已经落地」，或者它确实还没发生。`,
         '　　这一轮**必须换个写法**：不要重复上一轮用过的同一句话、同一个动作、同一个场景开头；',
-        '　　要么把这一拍**真正推进下去**（然后照下面写回报），要么写**别处正在发生的事**（别人的动向、外面的变化、被瞒着的那件事的进展）。',
+        strengthenOutline
+          ? '　　主动构思通往本拍锚点的合理因果推进：路径受阻就另找符合人物动机与既有设定的路径，缺铺垫就把铺垫写出来，不得只重复说明困难或改演无关事件。'
+          : '　　要么把这一拍**真正推进下去**（然后照下面写回报），要么写**别处正在发生的事**（别人的动向、外面的变化、被瞒着的那件事的进展）。',
         '　　**绝对不要**把上一轮那段对话换个词再说一遍 —— 那是复读，读者一眼就看得出来。',
       );
     }
@@ -1246,6 +1275,22 @@ export function renderInterludeChapterSection(chapter, { maxBeats = 6, banUserAc
  *   现在：主线时段给主线示例，间章时段给间章示例，并且明说另一种被忽略。
  *   整段「怎么回报」的规矩仍然只有这一处 + 世界书那三条常驻条目（不给两份，免得互相打架）。
  */
+function renderAnchorConstraint(anchor, { landedHold = false } = {}) {
+  if (!anchor) return [];
+  return [
+    '【大纲遵循强化 · 必须执行】',
+    `<本拍剧情锚点>${anchor}</本拍剧情锚点>`,
+    ...(landedHold ? ['本拍已经落地。本轮只承接已发生剧情的余波，不为补齐锚点重演本拍，不推翻既成结果或抢演下一拍。'] : [
+      '你必须主动构思并写出合乎逻辑的剧情发展，让以上锚点通过人物行动与局面变化自然发生。每轮都要安排服务于锚点的具体推进，不能只复述目标、陈述困难或等待它自行发生。',
+      '从当前时间、地点、在场人物的动机、知情范围、能力与已有线索出发，安排实现锚点所需的铺垫和触发条件，再以「人物为什么行动 → 采取什么行动 → 他人或环境如何反应 → 局面怎样变化」连接成因果链，并在正文中演出必要的过渡。',
+      '原路径受阻时，必须主动寻找另一条符合人物性格、关系与既有设定的实现路径；缺少铺垫就安排合理的铺垫，缺少动机就从已知诉求与利害关系中建立动机。先解决叙事问题，不得一遇到阻碍就停滞、放弃锚点或只重复报缺铺垫。',
+      '锚点规定本拍要导向的剧情点，实现方式由你结合实际处境创造；不得偷换结果或用无关事件代替。可跨轮完成，按自然节奏承接玩家回应，不为赶进度把铺垫、交锋和结果全部塞进一轮。',
+      '不得篡改已发生事实、让人物无缘无故改变态度、凭空补设定、依靠巧合救场或代替玩家作选择。只有目标与既成事实或玩家明确选择直接冲突、合理实现路径确实走不通时，才按既有审查说明冲突；其余情况应主动设计合理的发展继续推进。',
+      '落拍沿用原有拍进度规则，不增加锚点逐项核销条件，不为补齐锚点清单机械拖延或重复停留。',
+    ]),
+  ];
+}
+
 export function renderContractSection({ banUserAction = true, mode = 'main', beat = '', landingBy = '', hasCoop = false } = {}) {
   if (mode === 'coop') return ['【当前演出为 Coop】只按 Coop 专用契约回报，主线、间章及普通支线均暂停，不写它们的落拍命令。'];
   const inInterlude = mode === 'interlude';
@@ -1418,6 +1463,7 @@ export function normalizeChapter(source, { index = 0, keepId = '' } = {}) {
     [MAIN_SCOPE]: sanitize(source?.scope ?? source?.[MAIN_SCOPE], 720),
     [MAIN_GOAL]: sanitize(source?.goal ?? source?.[MAIN_GOAL], 900),
     [MAIN_BEATS]: beats.map((beat) => sanitize(beat, 900)).filter(Boolean).slice(0, 10),
+    [MAIN_ANCHORS]: anchorsOf({ [MAIN_ANCHORS]: source?.anchors ?? source?.[MAIN_ANCHORS] }).map((anchor) => sanitize(anchor, 900)).slice(0, 10),
     [KEY_BEAT]: 1,
     [KEY_BEAT_DONE]: false,
     [KEY_CHAPTER_DONE]: false,
@@ -1472,6 +1518,7 @@ export function chapterFromBlock(raw, opts = {}) {
     scope: attrOf(attrs, '范围', '边界', 'scope'),
     goal: attrOf(attrs, '章目标', '目标', 'goal'),
     beats: attrOf(attrs, '拍', 'beats', 'beats:'),
+    anchors: attrOf(attrs, '剧情锚点', 'anchors'),
   }, opts);
 }
 
@@ -1585,7 +1632,7 @@ export function nsPathOfCommand(command) {
 
 /** 只有插件能写的字段（AI 写了也忽略）。`[ ]` 写法与点号写法都要认。 */
 const PLUGIN_OWNED = new Set();
-for (const key of [MAIN_BEATS, MAIN_TITLE, MAIN_ARC, MAIN_SCOPE, MAIN_GOAL]) PLUGIN_OWNED.add(`${NS}.主线.${key}`);
+for (const key of [MAIN_BEATS, MAIN_ANCHORS, MAIN_TITLE, MAIN_ARC, MAIN_SCOPE, MAIN_GOAL]) PLUGIN_OWNED.add(`${NS}.主线.${key}`);
 for (const key of [IL.title, IL.scene, IL.beats]) PLUGIN_OWNED.add(`${NS}.${INTERLUDE}.${key}`);
 // ★ 0.27.11：**幕开关只能插件写**（0.27.10 补的洞）。
 //   以前 `间章.进行中` 是敞开的：模型在间章时段写一句 `_.set('故事导演.间章.进行中', false)`

@@ -266,3 +266,78 @@ for(const group of [false,true]) test('reload verifies persisted '+(group?'group
     await f.run('saveChatBeforeReload()');
     assert.equal(endpoint,group?'/api/chats/group/get':'/api/chats/get');
 });
+
+const anchoredReply='<StoryChapters>\n章标题: 新章\n章目标: 找到来信缘由\n拍:\n1. 信使递信\n2. 守卫辨认印章\n剧情锚点:\n1. 守卫收到旧信\n2. 印章来历明确\n</StoryChapters>';
+
+test('chapter generation saves anchors in the same single oracle request while strengthening is off',async()=>{
+    const f=fixture();f.seed();const requests=[];
+    f.run("buildUserPrompt=async()=> '测试上下文'");
+    f.c.window.StoryOracleAPI.run=async messages=>{requests.push(messages);return anchoredReply;};
+    assert.equal(await f.run('generateChapter({force:true,keep:0})'),true);
+    assert.equal(requests.length,1);assert.ok(requests[0][0].content.includes('剧情锚点:'));
+    assert.equal(f.run('settings().strengthenOutline'),false);
+    assert.deepEqual(Array.from(f.run('mainState()[MAIN_ANCHORS]')),['守卫收到旧信','印章来历明确']);
+    assert.equal(f.currentData().stat_data.故事导演.主线.剧情锚点,undefined);
+});
+
+for(const anchors of ['', '剧情锚点:\n1. 缺一项\n', '剧情锚点:\n1.\n2. 非空\n', '剧情锚点:\n1. 重复\n1. 编号\n'])
+test('incomplete generated anchors leave the previous plan intact without extra calls: '+JSON.stringify(anchors),async()=>{
+    const f=generationFixture();f.seed();let requests=0;
+    f.run("buildUserPrompt=async()=> '测试上下文'");
+    f.c.window.StoryOracleAPI.run=async()=>{requests++;return anchoredReply.replace(/剧情锚点:[\s\S]*?<\/StoryChapters>/,anchors+'</StoryChapters>');};
+    const before=f.run('JSON.stringify(settings().story)');
+    assert.equal(await f.run('generateChapter({force:true,keep:0})'),false);
+    assert.equal(requests,1);assert.equal(f.run('JSON.stringify(settings().story)'),before);
+    assert.ok(f.notices.some(n=>n.message.includes('剧情锚点')));
+});
+
+test('partial replans preserve played anchors and replace only remaining anchors, with the same beat cap',async()=>{
+    const f=fixture();f.seed();
+    f.run("settings().story.主线.当前拍=2;settings().story.主线.剧情锚点=['已演锚点','废弃锚点']");
+    f.c.reply=anchoredReply;
+    await f.run('applyChapter(chapterFromBlock(reply),{keep:1,quiet:true})');
+    assert.deepEqual(Array.from(f.run('mainState()[MAIN_BEATS]')),['第一拍','信使递信','守卫辨认印章']);
+    assert.deepEqual(Array.from(f.run('mainState()[MAIN_ANCHORS]')),['已演锚点','守卫收到旧信','印章来历明确']);
+    assert.equal(f.run('currentBeat(mainState())'),2);
+    await f.run('applyChapter(normalizeChapter({beats:Array.from({length:10},(_,i)=>"新拍"+i),anchors:Array.from({length:10},(_,i)=>"新锚"+i)}),{keep:1,quiet:true})');
+    assert.equal(f.run('mainState()[MAIN_ANCHORS].length'),f.run('BEAT_MAX'));
+    assert.equal(f.run('mainState()[MAIN_ANCHORS].length'),f.run('mainState()[MAIN_BEATS].length'));
+    await f.run('applyChapter(chapterFromBlock(reply),{restart:true,quiet:true})');
+    assert.deepEqual(Array.from(f.run('mainState()[MAIN_ANCHORS]')),['守卫收到旧信','印章来历明确']);
+    assert.equal(f.run('currentBeat(mainState())'),1);
+});
+
+test('the actual settings checkbox updates narrative guidance immediately without changing landing rules',()=>{
+    const f=fixture();f.seed();const slots={},listeners={};
+    const node={checked:true,addEventListener:(name,fn)=>{listeners[name]=fn;}};
+    const view={innerHTML:'',querySelector:selector=>selector==='[name="strengthen-outline"]'?node:null};
+    f.c.testPanel={hidden:true,querySelector:selector=>selector==='.sd-set-tab'?view:null};
+    f.c.setExtensionPrompt=(name,value)=>{slots[name]=value;};
+    f.run("settings().story.主线.剧情锚点=['当前独立锚点','未来独立锚点'];panel=testPanel;renderSetTab();syncMainInjection()");
+    const oldContract=slots[f.run('SLOT.contract')];
+    assert.ok(view.innerHTML.includes('大纲遵循强化'));assert.equal(node.checked,false);
+    node.checked=true;listeners.change();
+    assert.equal(f.run('settings().strengthenOutline'),true);
+    const text=slots[f.run('SLOT.main')];
+    assert.ok(text.includes('<本拍剧情锚点>当前独立锚点</本拍剧情锚点>'));
+    assert.ok(text.includes('主动构思并写出合乎逻辑的剧情发展'));assert.ok(!text.includes('未来独立锚点'));
+    assert.equal(slots[f.run('SLOT.contract')],oldContract);
+    f.run('panel=null');node.checked=false;listeners.change();
+    for(const key of ['main','contract'])assert.ok(!slots[f.run('SLOT.'+key)].includes('本拍剧情锚点'));
+});
+
+test('main form saves anchors without resetting unchanged beat progress and rejects mismatched entries',async()=>{
+    const f=generationFixture();f.seed();f.run("settings().story.主线.当前拍=2;settings().story.主线.本拍已落=true;settings().run.landedHold='第2拍'");
+    const values={'main-title':'当前章','main-beats':'1. 第一拍\n2. 第二拍','main-anchors':'1. 新锚一\n2. 新锚二'};
+    const view={querySelector:selector=>({value:values[selector.match(/name="([^"]+)"/)[1]] || ''})};
+    f.c.testPanel={hidden:true,querySelector:selector=>selector==='.sd-main-tab'?view:null};f.run('panel=testPanel;render=()=>{}');
+    await f.run('saveMainFromForm()');
+    assert.equal(f.run('currentBeat(mainState())'),2);
+    assert.deepEqual(Array.from(f.run('mainState()[MAIN_ANCHORS]')),['新锚一','新锚二']);
+    assert.equal(f.run('mainState()[KEY_BEAT_DONE]'),true);assert.equal(f.run('settings().run.landedHold'),'第2拍');
+    values['main-anchors']='1. 错误数量';const before=f.run('JSON.stringify(settings().story)');
+    await f.run('saveMainFromForm()');assert.equal(f.run('JSON.stringify(settings().story)'),before);
+    assert.ok(f.notices.some(n=>n.type==='warning'&&n.message.includes('逐条对应')));
+    values['main-beats']='';values['main-anchors']='';await f.run('saveMainFromForm()');
+    assert.equal(f.run('mainState()[MAIN_ANCHORS].length'),0);assert.equal(f.run('mainState()[MAIN_BEATS].length'),0);
+});
