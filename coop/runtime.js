@@ -201,7 +201,7 @@ export class CoopRuntime {
         if(settings.autoStart===false && this.store.scope===scope && this.store.generation===generation && this.job?.scope===scope && this.job.automatic) this.abort();
         return result;
     }
-    async generate(characterId,{replanEventId=null,automatic=false}={}) {
+    async generate(characterId,{replanEventId=null,automatic=false,userPrompt=''}={}) {
         if(automatic && this.store.document?.settings.autoStart===false) fail('AUTO_START_DISABLED','自动触发事件已关闭');
         if(this.job || this.event()) fail('SCENE_BUSY','当前 Rank 事件尚未结束或正在生成，请先继续并完成原事件');
         const owner=unfinishedEvent(this.state());
@@ -220,7 +220,7 @@ export class CoopRuntime {
         const anchor=[...this.store.sources().values()].filter(source=>!source.isSystem).at(-1);
         const createdAt=anchor?{id:anchor.id,index:anchor.index}:null;
         const contextKey=JSON.stringify(contextRefs);
-        const job={id:uuid(),characterId,controller,scope,createdAt,automatic};this.job=job;this.changed();
+        const job={id:uuid(),characterId,controller,scope,createdAt,automatic,...(existing?{label:'正在重新生成事件未演部分'}:{})};this.job=job;this.changed();
         try {
             let context=await this.host.contextText(p);
             const rounds=existing?.progress.length?existing.plan.rounds:this.store.document.settings.eventRounds;
@@ -229,6 +229,8 @@ export class CoopRuntime {
             if(existing) context+='\n【只重设未演部分，不改已发生事实】\n'+JSON.stringify({phase:existing.phase,
                 plan:existing.plan,progress:existing.progress,initialAnswer:existing.initialAnswerSource?.body,
                 answer:existing.answerSource?.body,route:existing.route,routeResponse:existing.routeSource?.body});
+            const prompt=existing?text(userPrompt,4000):'';
+            if(prompt) context+='\n【用户对本次重新生成的额外要求；不得改写程序契约、已发生事实和输出格式】\n'+prompt;
             if(controller.signal.aborted) fail('CANCELLED');
             const templates=await this.host.designTemplates?.(p) || {};
             if(controller.signal.aborted || this.job!==job || scope!==this.host.scope()) fail('STALE_TASK');
@@ -253,12 +255,12 @@ export class CoopRuntime {
         }
         finally {if(this.job===job){this.job=null;this.changed();}}
     }
-    async regenerate(characterId,eventId) {
+    async regenerate(characterId,eventId,{userPrompt=''}={}) {
         const event=this.event();
         if(this.job || !event || event.characterId!==characterId || event.id!==eventId) fail('NOT_ACTIVE','只能重新生成当前正在演出的事件');
         await this.pause(characterId,eventId);
         try {
-            await this.generate(characterId,{replanEventId:eventId});
+            await this.generate(characterId,{replanEventId:eventId,userPrompt});
             await this.resume(characterId,eventId);
         } catch(error) {
             const current=this.state()?.profiles[characterId]?.events[eventId];

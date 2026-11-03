@@ -445,13 +445,15 @@ test('replanning after the opening keeps the original rounds in both the request
 test('regenerating the active event replaces only unplayed material and resumes automatically',async t=>{
     const h=await setup(t);await unlockAndStart(h);
     await h.send('我问起画册。','她带来了旧画册。',snapshot=>({event:{eventId:snapshot.event.id,characterId:'a',eventVersion:snapshot.event.version,phase:'hook',evidence:'旧画册'}}));
-    const eventId=h.runtime.event().id,original=clone(h.runtime.event().plan);let request;
+    const eventId=h.runtime.event().id,original=clone(h.runtime.event().plan),userPrompt='未演部分转到雨夜，并加入核对分工。';let request;
     h.host.ask=async messages=>{
         request=messages;
         return JSON.stringify({...eventPlan(h.runtime.state().profiles.a),hook:'不应替换已演开场',dilemma:'重新设计的困境',question:'重新设计的问题'});
     };
-    await h.runtime.regenerate('a',eventId);
+    await h.runtime.regenerate('a',eventId,{userPrompt});
     assert.ok(request[1].content.includes('【只重设未演部分，不改已发生事实】'));
+    assert.ok(request[1].content.includes('【用户对本次重新生成的额外要求'));
+    assert.ok(request[1].content.includes(userPrompt));
     assert.equal(h.runtime.event()?.id,eventId);assert.equal(h.runtime.event().paused,false);
     assert.equal(h.runtime.event().plan.hook,original.hook);assert.equal(h.runtime.event().plan.dilemma,'重新设计的困境');
 });

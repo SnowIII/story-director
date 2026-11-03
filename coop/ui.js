@@ -14,6 +14,42 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
     panel.setAttribute('role',embedded?'region':'dialog');panel.setAttribute('aria-label','Coop 羁绊');
     (container || document.body).appendChild(panel);
     const run=async task=>{try {await task();} catch(error){runtime.notice(error);}};
+    function regenerateDialog(profile,event) {
+        return new Promise(resolve=>{
+            for(const old of document.querySelectorAll('dialog.sdc-dialog')) {
+                try {old.close();} catch {}
+                old.remove();
+            }
+            const dialog=document.createElement('dialog');
+            dialog.className='sdc-dialog';
+            dialog.innerHTML='<form><h2>重新生成当前事件</h2>'+
+                '<p class="sdc-dialog-note">'+esc(profile.name)+' · Rank '+event.targetRank+' · '+esc(event.plan.title)+
+                '<br>保留已经发生的正文、用户选择和关系路线，只重设尚未演出的部分。</p>'+
+                '<label>本次额外要求（可选）<textarea name="prompt" rows="6" maxlength="4000" placeholder="例如：未演部分转到雨夜；加强分工协商；不要新增敌人。" aria-label="本次重新生成的额外要求"></textarea></label>'+
+                '<p class="sdc-field-help">这份要求只用于本次重新生成，不会写入角色档案或之后的普通事件。</p>'+
+                '<div class="sdc-dialog-actions"><button type="button" data-cancel>取消</button>'+
+                '<button type="submit" class="sdc-dialog-primary">开始重新生成</button></div></form>';
+            const form=dialog.querySelector('form');
+            let settled=false;
+            const finish=value=>{
+                if(settled) return;
+                settled=true;
+                try {dialog.close();} catch {}
+                dialog.remove();resolve(value);
+            };
+            form.querySelector('[data-cancel]').addEventListener('click',()=>finish(null));
+            form.addEventListener('submit',event=>{
+                event.preventDefault();
+                finish(text(form.querySelector('[name="prompt"]')?.value,4000));
+            });
+            dialog.addEventListener('cancel',event=>{event.preventDefault();finish(null);});
+            dialog.addEventListener('click',event=>{if(event.target===dialog) finish(null);});
+            dialog.addEventListener('close',()=>finish(null));
+            document.body.appendChild(dialog);
+            dialog.showModal();
+            setTimeout(()=>form.querySelector('textarea')?.focus(),30);
+        });
+    }
     function open() {
         onOpen?.();panel.hidden=false;render();
         panel.querySelector(embedded?'nav button':'[data-action="close"]')?.focus();
@@ -188,9 +224,12 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         if(action==='sync-mvu') run(async()=>{await runtime.syncMvu();render();});
         if(action==='start') run(()=>runtime.generate(key));
         if(action==='replan') run(()=>runtime.generate(key,{replanEventId:button.dataset.event}));
-        if(action==='regenerate' && window.confirm('重新生成当前事件？已经发生的正文、用户选择和关系路线会保留，只重设尚未演出的部分。')) {
-            run(()=>runtime.regenerate(key,button.dataset.event));
-        }
+        if(action==='regenerate') run(async()=>{
+            const profile=runtime.state()?.profiles[key],event=runtime.state()?.profiles[key]?.events?.[button.dataset.event];
+            if(!profile || !event) return;
+            const userPrompt=await regenerateDialog(profile,event);
+            if(userPrompt!==null) await runtime.regenerate(key,event.id,{userPrompt});
+        });
         if(action==='pause') run(()=>runtime.pause(key,button.dataset.event));
         if(action==='resume') run(()=>runtime.resume(key,button.dataset.event));
         if(action==='route') run(()=>runtime.route(button.dataset.route));
