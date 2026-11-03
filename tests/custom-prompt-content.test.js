@@ -43,9 +43,9 @@ test('epic free-form chapter content and multiline field notes survive parser an
     const rendered=renderEpicSection(epic);assert.equal(rendered.started,true);assert.match(rendered.lines.join('\n'),/互相展示擅长的工具/);
 });
 
-test('epic chapter plans retain 2000 characters each without changing the overview limit',()=>{
+test('epic chapter plans retain 2000 characters each with the expanded overview limit',()=>{
     const contents=['甲'.repeat(401),'乙'.repeat(1999),'丙'.repeat(2000),'丁'.repeat(2001)];
-    const raw='<StoryEpic>\n标题: 长篇章规划\n篇章: '+'概'.repeat(450)+'\n章内容:\n'+
+    const raw='<StoryEpic>\n标题: 长篇章规划\n篇章: '+'概'.repeat(1250)+'\n章内容:\n'+
         contents.map((text,index)=>(index+1)+'. '+text).join('\n')+'\n大高潮: 本部收束\n</StoryEpic>';
     const epic=epicFromBlock(parseBlocks(raw,'StoryEpic')[0]);
     assert.equal(epic[EP.chapters].length,4);
@@ -53,7 +53,7 @@ test('epic chapter plans retain 2000 characters each without changing the overvi
     assert.equal(epic[EP.chapters][1],contents[1]);
     assert.equal(epic[EP.chapters][2],contents[2]);
     assert.equal(epic[EP.chapters][3],'丁'.repeat(2000));
-    assert.equal(epic[EP.line],'概'.repeat(400));
+    assert.equal(epic[EP.line],'概'.repeat(1200));
     assert.ok(renderEpicSection(epic).lines.join('\n').includes(contents[2]));
 });
 

@@ -515,11 +515,11 @@ export function epicFromBlock(raw, { chapter = 0 } = {}) {
   return {
     ...emptyEpic(),
     [EP.title]: sanitize(attrOf(attrs, '标题', 'title'), 60),
-    [EP.line]: sanitize(attrOf(attrs, '篇章', '总纲', '纲', 'line'), 400),
+    [EP.line]: sanitize(attrOf(attrs, '篇章', '总纲', '纲', 'line'), 1200),
     [EP.chapters]: chapters.map((text) => sanitize(text, 2000)).slice(0, 24),
-    [EP.climax]: sanitize(attrOf(attrs, '大高潮', '高潮', 'climax'), 120),
-    [EP.hooks]: hooks.map((text) => sanitize(text, 200)).slice(0, 8),
-    [EP.ledger]: sanitize(attrOf(attrs, '既成事实', '事实', 'ledger'), 600),
+    [EP.climax]: sanitize(attrOf(attrs, '大高潮', '高潮', 'climax'), 360),
+    [EP.hooks]: hooks.map((text) => sanitize(text, 600)).slice(0, 8),
+    [EP.ledger]: sanitize(attrOf(attrs, '既成事实', '事实', 'ledger'), 1800),
     [EP.chapter]: Math.max(0, Math.round(Number(chapter) || 0)),
     [EP.updated]: new Date().toISOString(),
   };
@@ -1379,13 +1379,13 @@ const sanitize = (value, limit = 200) => String(value ?? '').trim().replace(/\s*
 
 export function normalizeInterludeChapter(source, { beatBudget = 4 } = {}) {
   const beats = (Array.isArray(source?.beats) ? source.beats : splitBeats(source?.beats ?? source?.拍 ?? ''))
-    .map((beat) => sanitize(beat, 300))
+    .map((beat) => sanitize(beat, 900))
     .filter(Boolean)
     .slice(0, Math.max(1, beatBudget));
   return {
     [IL.active]: true,
     [IL.title]: sanitize(source?.title ?? source?.[IL.title], 60),
-    [IL.scene]: sanitize(source?.scene ?? source?.[IL.scene], 120),
+    [IL.scene]: sanitize(source?.scene ?? source?.[IL.scene], 360),
     [IL.beats]: beats,
     [IL.beat]: 1,
     [IL.beatDone]: false,
@@ -1415,9 +1415,9 @@ export function normalizeChapter(source, { index = 0, keepId = '' } = {}) {
     id: keepId || `c${index + 1}`,
     [MAIN_TITLE]: sanitize(source?.title ?? source?.[MAIN_TITLE], 60),
     [MAIN_ARC]: sanitize(source?.arc ?? source?.[MAIN_ARC], 60),
-    [MAIN_SCOPE]: sanitize(source?.scope ?? source?.[MAIN_SCOPE], 240),
-    [MAIN_GOAL]: sanitize(source?.goal ?? source?.[MAIN_GOAL], 300),
-    [MAIN_BEATS]: beats.map((beat) => sanitize(beat, 300)).filter(Boolean).slice(0, 10),
+    [MAIN_SCOPE]: sanitize(source?.scope ?? source?.[MAIN_SCOPE], 720),
+    [MAIN_GOAL]: sanitize(source?.goal ?? source?.[MAIN_GOAL], 900),
+    [MAIN_BEATS]: beats.map((beat) => sanitize(beat, 900)).filter(Boolean).slice(0, 10),
     [KEY_BEAT]: 1,
     [KEY_BEAT_DONE]: false,
     [KEY_CHAPTER_DONE]: false,
@@ -1434,9 +1434,9 @@ export function normalizeThread(source, { id = '' } = {}) {
     id,
     [THREAD_FIELDS.title]: sanitize(source?.title ?? source?.[THREAD_FIELDS.title], 60),
     [THREAD_FIELDS.status]: STATUS_PENDING,
-    [THREAD_FIELDS.goal]: sanitize(source?.goal ?? source?.[THREAD_FIELDS.goal], 300),
-    [THREAD_FIELDS.entry]: sanitize(source?.entry ?? source?.[THREAD_FIELDS.entry], 240),
-    [THREAD_FIELDS.land]: sanitize(source?.land ?? source?.[THREAD_FIELDS.land], 300),
+    [THREAD_FIELDS.goal]: sanitize(source?.goal ?? source?.[THREAD_FIELDS.goal], 900),
+    [THREAD_FIELDS.entry]: sanitize(source?.entry ?? source?.[THREAD_FIELDS.entry], 720),
+    [THREAD_FIELDS.land]: sanitize(source?.land ?? source?.[THREAD_FIELDS.land], 900),
     [THREAD_FIELDS.due]: sanitize(source?.due ?? source?.[THREAD_FIELDS.due], 40),
     [THREAD_FIELDS.started]: new Date().toISOString(),
     [THREAD_FIELDS.ended]: '',
@@ -1458,7 +1458,7 @@ export function normalizeInterlude(source, { id = '', after = 0 } = {}) {
     [INTERLUDE_FIELDS.after]: asked && !/^随时$/.test(asked) && /[^\d\s拍第之后]/.test(asked)
       ? sanitize(asked, 40)
       : (number > 0 ? `第 ${number} 拍之后` : '随时'),
-    [INTERLUDE_FIELDS.beat]: sanitize(source?.beat ?? source?.[INTERLUDE_FIELDS.beat], 300),
+    [INTERLUDE_FIELDS.beat]: sanitize(source?.beat ?? source?.[INTERLUDE_FIELDS.beat], 900),
     [INTERLUDE_FIELDS.done]: false,
   };
 }
