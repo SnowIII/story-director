@@ -253,6 +253,19 @@ export class CoopRuntime {
         }
         finally {if(this.job===job){this.job=null;this.changed();}}
     }
+    async regenerate(characterId,eventId) {
+        const event=this.event();
+        if(this.job || !event || event.characterId!==characterId || event.id!==eventId) fail('NOT_ACTIVE','只能重新生成当前正在演出的事件');
+        await this.pause(characterId,eventId);
+        try {
+            await this.generate(characterId,{replanEventId:eventId});
+            await this.resume(characterId,eventId);
+        } catch(error) {
+            const current=this.state()?.profiles[characterId]?.events[eventId];
+            if(current?.paused) try {await this.resume(characterId,eventId);} catch {}
+            throw error;
+        }
+    }
     async pause(characterId,eventId) {
         this.abort();return this.store.operation('pause',characterId,{eventId});
     }

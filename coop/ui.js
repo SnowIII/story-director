@@ -89,7 +89,8 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
             (event.phase==='waiting_route' || event.phase==='resolution' && event.targetRank===rankPolicy(p).relationshipRank?'<p>请根据你的真实回应确认关系路线。确认后继续聊天，演绎收束；改变心意时可以重新选择。</p>'+
                 '<button data-action="route" data-route="friendship">确认为挚友／伙伴</button> <button data-action="route" data-route="romance">确认为恋人</button>':'')+
             (event.phase==='resolution'?'<p>当前目标与现场危机实际收束后才会归档。仅制定方案或开始行动会继续当前事件，其他 Rank 保持排队；也可手动核对。</p><button data-action="archive">核对并补齐归档</button>':'')+
-            '<div class="sdc-actions"><button data-action="pause" data-id="'+esc(p.id)+'" data-event="'+esc(event.id)+'">暂停演出</button></div>'+
+            '<div class="sdc-actions"><button data-action="pause" data-id="'+esc(p.id)+'" data-event="'+esc(event.id)+'">暂停演出</button>'+
+            '<button data-action="regenerate" data-id="'+esc(p.id)+'" data-event="'+esc(event.id)+'" title="保留已经发生的剧情和选择，只重设尚未演出的部分">重新生成事件</button></div>'+
             '<details><summary>幕后计划（包含剧透）</summary><pre>'+esc(JSON.stringify(plan,null,2))+'</pre></details>';
     }
     function archive(state) {
@@ -172,7 +173,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
                 (runtime.store.pending?'<p class="sdc-warning">归档待保存。'+(runtime.store.error?esc(runtime.store.error.message)+' <button data-action="retry">重试保存</button>':'正在等待服务器确认……')+'</p>':'')+
                 (runtime.currentNotice?'<p role="status">'+esc(runtime.currentNotice.message)+' <button data-action="dismiss">关闭提示</button></p>':'')+
                 ({roles:roles,event:eventPage,archive:archive,settings:settings}[tab])(state))+'</div>';
-        if(runtime.store.readonly || runtime.store.pending) panel.querySelectorAll('form button,form input,form textarea,form select,[data-action="start"],[data-action="resume"],[data-action="route"],[data-action="archive"],[data-action="delete"],[data-action="import"],#sdc-import,#sdc-auto-start,#sdc-rounds').forEach(node=>{node.disabled=true;});
+        if(runtime.store.readonly || runtime.store.pending) panel.querySelectorAll('form button,form input,form textarea,form select,[data-action="start"],[data-action="resume"],[data-action="regenerate"],[data-action="route"],[data-action="archive"],[data-action="delete"],[data-action="import"],#sdc-import,#sdc-auto-start,#sdc-rounds').forEach(node=>{node.disabled=true;});
     }
     panel.addEventListener('click',event=> {
         const button=event.target.closest('button');if(!button) return;
@@ -187,6 +188,9 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         if(action==='sync-mvu') run(async()=>{await runtime.syncMvu();render();});
         if(action==='start') run(()=>runtime.generate(key));
         if(action==='replan') run(()=>runtime.generate(key,{replanEventId:button.dataset.event}));
+        if(action==='regenerate' && window.confirm('重新生成当前事件？已经发生的正文、用户选择和关系路线会保留，只重设尚未演出的部分。')) {
+            run(()=>runtime.regenerate(key,button.dataset.event));
+        }
         if(action==='pause') run(()=>runtime.pause(key,button.dataset.event));
         if(action==='resume') run(()=>runtime.resume(key,button.dataset.event));
         if(action==='route') run(()=>runtime.route(button.dataset.route));
