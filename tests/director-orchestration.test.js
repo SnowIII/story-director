@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import * as model from '../model.js';
 
 const source = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8');
-const { NS, EPIC, EP, INTERLUDE, IL, MAIN_TITLE, MAIN_BEATS, MAIN_CLOSED, KEY_BEAT, KEY_CHAPTER_DONE, KEY_READY } = model;
+const { NS, EPIC, EP, INTERLUDE, IL, MAIN_TITLE, MAIN_BEATS, MAIN_CLOSED, KEY_BEAT, KEY_BEAT_DONE, KEY_CHAPTER_DONE, KEY_READY } = model;
 const epicReply = '<StoryEpic>\n标题: 新的一部\n篇章: 新的矛盾与因果\n章内容:\n1. 新的起因与落点\n</StoryEpic>';
 
 // 执行实际编排函数，隔离酒馆导入、网络与界面；沿用已有 host / MVU 测试的 VM 方式。
@@ -223,4 +223,36 @@ test('settings-tab chapter count changes are saved as bounded integers', () => {
         assert.equal(h.s.chaptersPerEpic, expected);
         assert.equal(h.calls.length, saved + 1);
     }
+});
+
+test('strengthened outline refuses a landing claim until its hidden receipt proves the result', async () => {
+    const h = fixture({ autoBeat: true, strengthenOutline: true });
+    h.context.landingReportedByReply = () => true;
+    h.s.run.beatAt = 9;
+    h.s.run.outlineReceipt = {
+        valid: true, landed: false, state: '通过', beat: 2, chapterTitle: '当前章', at: 10,
+    };
+    await h.context.evaluateDirector();
+    assert.equal(h.main[KEY_BEAT], 2);
+    assert.equal(h.main[KEY_BEAT_DONE], false);
+    assert.match(h.s.run.outlineHold, /强化自检没有证明锚点/);
+
+    h.s.run.outlineReceipt = {
+        valid: true, landed: true, state: '通过', beat: 2, chapterTitle: '当前章', at: 10,
+    };
+    await h.context.evaluateDirector();
+    assert.equal(h.main[KEY_BEAT], 3);
+    assert.equal(h.s.run.outlineHold, '');
+});
+
+test('turning outline strengthening off preserves the existing landing path', async () => {
+    const h = fixture({ autoBeat: true, strengthenOutline: false });
+    h.context.landingReportedByReply = () => true;
+    h.s.run.beatAt = 9;
+    h.s.run.outlineReceipt = {
+        valid: true, landed: false, state: '通过', beat: 2, chapterTitle: '当前章', at: 10,
+    };
+    await h.context.evaluateDirector();
+    assert.equal(h.main[KEY_BEAT], 3);
+    assert.equal(h.s.run.outlineHold, '');
 });

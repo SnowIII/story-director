@@ -14,6 +14,39 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
     panel.setAttribute('role',embedded?'region':'dialog');panel.setAttribute('aria-label','Coop 羁绊');
     (container || document.body).appendChild(panel);
     const run=async task=>{try {await task();} catch(error){runtime.notice(error);}};
+    function regenerateDialog(profile,event) {
+        return new Promise(resolve=>{
+            for(const old of document.querySelectorAll('dialog.sd-dialog')) {
+                try {old.close();} catch {}
+                old.remove();
+            }
+            const dialog=document.createElement('dialog');
+            dialog.className='sd-dialog';
+            dialog.innerHTML='<div class="sd-dialog-box"><div class="sd-dialog-head">重新生成当前事件</div>'+
+                '<div class="sd-dialog-body"><p class="sd-dialog-note">'+esc(profile.name)+' · Rank '+event.targetRank+' · '+esc(event.plan.title)+
+                '<br>保留已经发生的正文、用户选择和关系路线，只重设尚未演出的部分。</p>'+
+                '<label class="sd-dialog-field"><span>本次额外要求（可选）</span><textarea name="prompt" rows="6" maxlength="4000" placeholder="例如：未演部分转到雨夜；加强分工协商；不要新增敌人。" aria-label="本次重新生成的额外要求"></textarea></label>'+
+                '<p class="sd-dialog-hint">这份要求只用于本次重新生成，不会写入角色档案或之后的普通事件。</p></div>'+
+                '<div class="sd-dialog-actions"><button type="button" class="sd-btn" data-cancel>取消</button>'+
+                '<button type="button" class="sd-btn sd-btn-primary" data-confirm>开始重新生成</button></div></div>';
+            const textarea=dialog.querySelector('textarea');
+            let settled=false;
+            const finish=value=>{
+                if(settled) return;
+                settled=true;
+                try {dialog.close();} catch {}
+                dialog.remove();resolve(value);
+            };
+            dialog.querySelector('[data-cancel]').addEventListener('click',()=>finish(null));
+            dialog.querySelector('[data-confirm]').addEventListener('click',()=>finish(text(textarea?.value,4000)));
+            dialog.addEventListener('cancel',event=>{event.preventDefault();finish(null);});
+            dialog.addEventListener('click',event=>{if(event.target===dialog) finish(null);});
+            dialog.addEventListener('close',()=>finish(null));
+            document.body.appendChild(dialog);
+            dialog.showModal();
+            setTimeout(()=>textarea?.focus(),30);
+        });
+    }
     function open() {
         onOpen?.();panel.hidden=false;render();
         panel.querySelector(embedded?'nav button':'[data-action="close"]')?.focus();
@@ -89,7 +122,8 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
             (event.phase==='waiting_route' || event.phase==='resolution' && event.targetRank===rankPolicy(p).relationshipRank?'<p>请根据你的真实回应确认关系路线。确认后继续聊天，演绎收束；改变心意时可以重新选择。</p>'+
                 '<button data-action="route" data-route="friendship">确认为挚友／伙伴</button> <button data-action="route" data-route="romance">确认为恋人</button>':'')+
             (event.phase==='resolution'?'<p>当前目标与现场危机实际收束后才会归档。仅制定方案或开始行动会继续当前事件，其他 Rank 保持排队；也可手动核对。</p><button data-action="archive">核对并补齐归档</button>':'')+
-            '<div class="sdc-actions"><button data-action="pause" data-id="'+esc(p.id)+'" data-event="'+esc(event.id)+'">暂停演出</button></div>'+
+            '<div class="sdc-actions"><button data-action="pause" data-id="'+esc(p.id)+'" data-event="'+esc(event.id)+'">暂停演出</button>'+
+            '<button data-action="regenerate" data-id="'+esc(p.id)+'" data-event="'+esc(event.id)+'" title="保留已经发生的剧情和选择，只重设尚未演出的部分">重新生成事件</button></div>'+
             '<details><summary>幕后计划（包含剧透）</summary><pre>'+esc(JSON.stringify(plan,null,2))+'</pre></details>';
     }
     function archive(state) {
@@ -172,7 +206,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
                 (runtime.store.pending?'<p class="sdc-warning">归档待保存。'+(runtime.store.error?esc(runtime.store.error.message)+' <button data-action="retry">重试保存</button>':'正在等待服务器确认……')+'</p>':'')+
                 (runtime.currentNotice?'<p role="status">'+esc(runtime.currentNotice.message)+' <button data-action="dismiss">关闭提示</button></p>':'')+
                 ({roles:roles,event:eventPage,archive:archive,settings:settings}[tab])(state))+'</div>';
-        if(runtime.store.readonly || runtime.store.pending) panel.querySelectorAll('form button,form input,form textarea,form select,[data-action="start"],[data-action="resume"],[data-action="route"],[data-action="archive"],[data-action="delete"],[data-action="import"],#sdc-import,#sdc-auto-start,#sdc-rounds').forEach(node=>{node.disabled=true;});
+        if(runtime.store.readonly || runtime.store.pending) panel.querySelectorAll('form button,form input,form textarea,form select,[data-action="start"],[data-action="resume"],[data-action="regenerate"],[data-action="route"],[data-action="archive"],[data-action="delete"],[data-action="import"],#sdc-import,#sdc-auto-start,#sdc-rounds').forEach(node=>{node.disabled=true;});
     }
     panel.addEventListener('click',event=> {
         const button=event.target.closest('button');if(!button) return;
@@ -187,6 +221,12 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         if(action==='sync-mvu') run(async()=>{await runtime.syncMvu();render();});
         if(action==='start') run(()=>runtime.generate(key));
         if(action==='replan') run(()=>runtime.generate(key,{replanEventId:button.dataset.event}));
+        if(action==='regenerate') run(async()=>{
+            const profile=runtime.state()?.profiles[key],event=runtime.state()?.profiles[key]?.events?.[button.dataset.event];
+            if(!profile || !event) return;
+            const userPrompt=await regenerateDialog(profile,event);
+            if(userPrompt!==null) await runtime.regenerate(key,event.id,{userPrompt});
+        });
         if(action==='pause') run(()=>runtime.pause(key,button.dataset.event));
         if(action==='resume') run(()=>runtime.resume(key,button.dataset.event));
         if(action==='route') run(()=>runtime.route(button.dataset.route));
