@@ -17,10 +17,10 @@ for(const count of [4,7,10])test('fixed Coop rules select only the current stage
         if(rank+1<count)assert.ok(!messages[1].content.includes(BLUEPRINTS_BY_RANK[count][rank+1]));
     }
 });
-for(const count of [4,7,10])test('retired common Coop rules and forms do not override the '+count+'-rank built-ins',()=>{
+for(const count of [4,7,10])test('retired common Coop rules do not override the '+count+'-rank built-ins',()=>{
     const p=profile(count);
     for(const raw of [false,true])for(const on of [false,true]){
-        const entries=['design','forms'].map(key=>({comment:'[coop_'+key+']',content:'不应进入请求的旧配置',...(raw?{disable:!on}:{enabled:on})}));
+        const entries=[{comment:'[coop_design]',content:'不应进入请求的旧配置',...(raw?{disable:!on}:{enabled:on})}];
         const selected=designTemplates(entries,p),messages=designMessages(p,'现场资料',selected);
         assert.deepEqual(selected,{});assert.ok(!JSON.stringify(messages).includes('不应进入请求的旧配置'));
         assert.ok(messages[1].content.includes(BLUEPRINTS_BY_RANK[count][0]));
@@ -33,7 +33,7 @@ test('worldbook upgrades discard legacy config without archives, preserve curren
     assert.ok(!JSON.stringify(merged).includes('旧 Coop 配置'));assert.ok(!JSON.stringify(merged).includes('旧整段配置'));
     assert.notEqual(merged.entries[0].content,'旧变量契约');
     assert.equal(entries.find(e=>e.comment.includes('[sd_field_chapter_goal]')).content,'保留的新字段写法');
-    assert.equal(entries.length,34);assert.ok(!entries.some(e=>/archive|存档/.test(e.comment)));
+    assert.equal(entries.length,35);assert.ok(!entries.some(e=>/archive|存档/.test(e.comment)));
     assert.ok(merged.entries[0].content.includes('不写入 MVU'));
 });
 

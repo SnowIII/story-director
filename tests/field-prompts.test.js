@@ -16,8 +16,8 @@ const tasks={epic:'buildEpicSystemPrompt',chapter:'buildChapterSystemPrompt',int
 test('the worldbook contains one readable entry per output field and no old prompt entries or archives',()=>{
     const list=entries(),fields=list.filter(e=>/\[sd_field_/.test(e.comment));
     assert.equal(Object.keys(FIELD_PROMPTS).length,23);assert.equal(fields.length,23);
-    assert.ok(!list.some(e=>/\[(?:sd_prompt_|coop_(?:design|forms)\]|sd_legacy_)/.test(e.comment)));
-    assert.equal(list.length,34);
+    assert.ok(!list.some(e=>/\[(?:sd_prompt_|coop_design\]|sd_legacy_)/.test(e.comment)));
+    assert.equal(list.length,35);
     for(const [key,field] of Object.entries(FIELD_PROMPTS)){
         const found=fields.find(e=>e.comment.includes('[sd_field_'+key+']'));
         assert.ok(found.comment.includes(fieldPromptName(key)));

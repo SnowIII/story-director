@@ -39,7 +39,9 @@ test('worldbook upgrades preserve restored rank blueprints while removing retire
     for(const on of [true,false]){
         const installed=['design','forms','rank_4','rank_7','rank_10'].map(key=>({comment:'[coop_'+key+']',content:'旧自定义 '+key,disable:!on,enabled:on}));
         const merged=preserveDesignTemplates(clone(bundled),installed);
-        assert.ok(!Object.values(merged.entries).some(e=>/\[coop_(?:design|forms)\]/.test(e.comment)));
+        assert.ok(!Object.values(merged.entries).some(e=>/\[coop_design\]/.test(e.comment)));
+        const forms=Object.values(merged.entries).find(e=>e.comment.includes('[coop_forms]'));
+        assert.equal(forms.content,'旧自定义 forms');assert.equal(forms.enabled,on);assert.equal(forms.disable,!on);
         for(const count of [4,7,10]){
             const entry=Object.values(merged.entries).find(e=>e.comment.includes('[coop_rank_'+count+']'));
             assert.equal(entry.content,'旧自定义 rank_'+count);assert.equal(entry.enabled,on);assert.equal(entry.disable,!on);
