@@ -225,23 +225,29 @@ test('settings-tab chapter count changes are saved as bounded integers', () => {
     }
 });
 
-test('strengthened outline refuses a landing claim until its hidden receipt proves the result', async () => {
+test('strengthened outline does not veto a landing fact with a preflight receipt', async () => {
     const h = fixture({ autoBeat: true, strengthenOutline: true });
     h.context.landingReportedByReply = () => true;
     h.s.run.beatAt = 9;
     h.s.run.outlineReceipt = {
         valid: true, landed: false, state: '通过', beat: 2, chapterTitle: '当前章', at: 10,
     };
-    await h.context.evaluateDirector();
-    assert.equal(h.main[KEY_BEAT], 2);
-    assert.equal(h.main[KEY_BEAT_DONE], false);
-    assert.match(h.s.run.outlineHold, /强化自检没有证明锚点/);
-
-    h.s.run.outlineReceipt = {
-        valid: true, landed: true, state: '通过', beat: 2, chapterTitle: '当前章', at: 10,
-    };
+    h.s.run.outlineHold = '旧版留下的强化门控提示';
     await h.context.evaluateDirector();
     assert.equal(h.main[KEY_BEAT], 3);
+    assert.equal(h.main[KEY_BEAT_DONE], false);
+    assert.equal(h.s.run.outlineHold, '');
+});
+
+test('manual chapter finish bypasses strengthened outline preflight state', async () => {
+    const h = fixture({ strengthenOutline: true });
+    h.s.run.outlineReceipt = { valid: false, landed: false, state: '缺铺垫' };
+    h.s.run.outlineHold = '这一拍还需要铺垫';
+    await h.context.finishChapter();
+    assert.equal(h.main[KEY_BEAT], h.main[MAIN_BEATS].length + 1);
+    assert.equal(h.main[KEY_CHAPTER_DONE], true);
+    assert.equal(h.main[KEY_READY], true);
+    assert.equal(h.s.run.outlineReceipt, null);
     assert.equal(h.s.run.outlineHold, '');
 });
 

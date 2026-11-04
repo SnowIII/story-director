@@ -53,7 +53,7 @@ test('main injection strengthens only the current anchor when explicitly enabled
     assert.ok(!renderMainSection({[MAIN_BEATS]:[]},{strengthenOutline:true}).lines.join('\n').includes('本拍剧情锚点'));
 });
 
-test('outline strengthening adds a read-only anchor and strict receipt without changing off or other modes',()=>{
+test('outline strengthening adds a read-only anchor and preflight check without changing off or other modes',()=>{
     const options={beat:'侍女递出旧信',landingBy:'extra'};
     const text=renderContractSection(options).join('\n');
     assert.equal(renderContractSection({...options,anchor:currentAnchor(plan())}).join('\n'),text);
@@ -63,11 +63,26 @@ test('outline strengthening adds a read-only anchor and strict receipt without c
     assert.ok(strong.includes('<当前拍锚点>旧信交到守卫手中；来信者身份明确</当前拍锚点>'));
     assert.ok(strong.includes('当前拍锚点：旧信交到守卫手中；来信者身份明确'));
     assert.ok(strong.includes('本轮推进层级：前提 / 触发 / 反应 / 结果'));
-    assert.ok(strong.includes('本拍完成：是 / 否'));
-    assert.ok(strong.includes('完成证据'));
-    assert.ok(strong.includes('插件才接受本拍落拍'));
+    assert.ok(strong.includes('只负责“写之前检查怎么推进”'));
+    assert.ok(!strong.includes('本拍完成：是 / 否'));
+    assert.ok(!strong.includes('完成证据：'));
+    assert.ok(strong.includes('最终正文的世界状态回报为准'));
     for(const options of [{mode:'interlude',beat:'喝茶'},{mode:'coop',beat:'合作'},{beat:''}])
         assert.ok(!renderContractSection({...options,anchor:'不该出现的主线锚点'}).join('\n').includes('不该出现的主线锚点'));
+});
+
+test('closing contract exists only for strengthened main chapters after the last beat',()=>{
+    const normal=renderContractSection({beat:'',landingBy:'extra'}).join('\n');
+    const strengthenedButNotClosing=renderContractSection({beat:'',landingBy:'extra',strengthenOutline:true}).join('\n');
+    const closing=renderContractSection({beat:'',landingBy:'extra',strengthenOutline:true,chapterClosing:true}).join('\n');
+    assert.equal(strengthenedButNotClosing,normal,'enabling strengthening alone must not change the legacy no-beat guard');
+    assert.ok(normal.includes('不要写任何 `故事导演.*` 回报'));
+    assert.ok(!normal.includes('章目标达成'));
+    assert.ok(closing.includes('大纲遵循强化｜本章收尾阶段'));
+    assert.ok(closing.includes('章目标达成'));
+    assert.ok(closing.includes('可进下一章'));
+    assert.ok(closing.includes('下一轮仍可补报'));
+    assert.ok(!closing.includes('不要写任何 `故事导演.*` 回报'));
 });
 
 test('outline receipts require the current anchor, result stage, completion and visible evidence',()=>{

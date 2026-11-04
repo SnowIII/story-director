@@ -53,7 +53,7 @@ import {
     applyNsCommands, extractNsCommands, landingOpsInReply, storyBlockFailure, recognizedFieldNames,
     worldbookDigest, setInterludeWritesAllowed, beatOrderSkipsRead,
     mergeBeats, remainingBeatBudget, worldbookUpdateDecision, setCoopScene, configureDesignPrompt,
-    outlineAnchorIssue, parseOutlineReceipt, outlineReceiptAllowsLanding,
+    outlineAnchorIssue, parseOutlineReceipt,
 } from './model.js';
 
 const ID = 'story-director';
@@ -1899,6 +1899,12 @@ function syncMainInjection() {
         //   契约是唯一到得了**额外变量模型**的通道（见 landingByExtraModel 的注释）。
         const coopContract = coop?.variableContract() || '';
         const strengthenOutline = s.strengthenOutline === true;
+        const root = rootOf();
+        const main = mainOf(root);
+        const mainBeats = beatsOf(main);
+        const mainBeat = currentBeat(main);
+        const chapterClosing = strengthenOutline && currentMode() === 'main'
+            && mainBeats.length > 0 && mainBeat > mainBeats.length;
         const mainContract = s.injectContract
             ? substitute(renderContractSection({
                 banUserAction: settings().banUserAction !== false,
@@ -1907,7 +1913,8 @@ function syncMainInjection() {
                 landingBy: landingByExtraModel() ? 'extra' : '',
                 hasCoop: !!coopContract,
                 strengthenOutline,
-                anchor: strengthenOutline ? currentAnchor(mainOf(rootOf())) : '',
+                anchor: strengthenOutline ? currentAnchor(main) : '',
+                chapterClosing,
             }).join('\n'))
             : '';
         const contract = [mainContract, coopContract].filter(Boolean).join('\n\n');
@@ -4828,21 +4835,12 @@ async function evaluateDirector({ live = null } = {}) {
         const mainReport = landingReportedByReply('main');
         let mainLanded = mainReport === null ? truthy(main[KEY_BEAT_DONE]) : mainReport;
 
-        // ★ P2：仅强化模式启用。普通落拍规则完全不变；强化模式要求同一楼的结构化自检
-        //   真正证明“锚点结果已成立且有正文证据”，否则不消费落拍、不推进拍号。
-        if (s.strengthenOutline === true) {
-            const receipt = rt.outlineReceipt;
-            const chapterTitle = String(unwrap(main[MAIN_TITLE]) ?? '').trim();
-            const freshReceipt = receipt && receipt.at === count && receipt.beat === beat
-                && receipt.chapterTitle === chapterTitle ? receipt : null;
-            if (freshReceipt?.valid) rt.outlineHold = '';
-            if (mainLanded && !outlineReceiptAllowsLanding(freshReceipt)) {
-                rt.outlineHold = `第 ${beat} 拍曾被标为已完成，但当前回复的大纲遵循强化自检没有证明锚点已经成立并给出明确正文证据。本轮不推进；请重新核对当前拍，只有“推进层级=结果、本拍完成=是、完成证据非空”时才写落拍。`;
-                save();
-                if (truthy(main[KEY_BEAT_DONE])) await patchMain({ [KEY_BEAT_DONE]: false }, { live });
-                syncMainInjection();
-                return;
-            }
+        // 大纲遵循强化只负责“写前合理性检查”（handleBeatReview）与当前锚点引导。
+        // 正文完成后的落拍事实仍由原有世界状态回报决定；不能让写前自检反过来否决已经发生的正文。
+        // 关闭强化时这里没有任何额外分支，因此普通模式的落拍路径保持原样。
+        if (s.strengthenOutline === true && rt.outlineHold) {
+            rt.outlineHold = '';
+            save();
         }
 
         // ② 自动换拍（手动模式下也照做：写盘不需要调模型）
