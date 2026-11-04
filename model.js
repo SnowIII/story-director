@@ -1937,7 +1937,9 @@ export function landingOpsInReply(text) {
  *      换哪个模型都一样，得把长度上限调大，或让它写短。
  *   ② `wrong-tag` —— 它输出的是**别的区块**（比如要 `<StoryEpic>` 却给了 `<StoryChapters>`）：
  *      入口点错了，或者模型没照这次任务的格式走。
- *   ③ `no-block` —— 回复里**压根没有**我们的区块：多半被卡片的预设 / 破限盖掉了。
+ *   ③ `no-block` —— 回复里**压根没有**我们的区块：模型没照这次任务的格式输出。
+ *       0.41.10：**别再说「被预设盖掉」** —— 这条通道（`direct` 裸请求 / `profile` 连接配置）
+ *      根本不经过酒馆的提示词管理器预设，也不套神谕自己的破限。报障的人会照着我们这句话去查预设。
  *   ④ `no-fields` —— 区块在，但字段认不出来（名字对不上 / 值是空的）。调用方拿
  *      `recognizedFieldNames()` 把它实际用的字段名列出来。
  *
@@ -1954,7 +1956,7 @@ export function storyBlockFailure(text, tag) {
   if (other) {
     return { kind: 'wrong-tag', hint: `它输出的是 <Story${other[1]}>，不是这次要的 <${name}>`, saw: `Story${other[1]}` };
   }
-  return { kind: 'no-block', hint: `回复里压根没有 <${name}> 区块（多半被卡片的预设 / 破限盖掉了，或者模型没照格式来）`, saw: '' };
+  return { kind: 'no-block', hint: `回复里压根没有 <${name}> 区块 —— 模型没照这次任务的格式输出（这条通道不经过酒馆预设，不用去查预设）`, saw: '' };
 }
 
 /** 区块在、但字段认不出来时：把**它实际用的字段名**列出来，方便一眼看出差在哪。 */

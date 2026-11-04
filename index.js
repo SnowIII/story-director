@@ -61,7 +61,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.41.9';
+const VERSION = '0.41.10';
 let coop = null;
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
@@ -3568,6 +3568,45 @@ function isBackingOff(key) {
 function oracleApi() { return window.StoryOracleAPI; }
 
 /**
+ *  0.41.10：**设计调用至少给这么多输出预算。**
+ *
+ * 为什么（查过神谕的实现）：它给 gemini-3 系做过一个「输出地板」—— 思考 token 记在 max_tokens 里，
+ * 顶棚小了会被思考吃光，于是 200 空回复 / 被截断（区块没有闭合标签，正是「没解析到区块」的常见真因）。
+ * 但那个地板**只在 direct 出口生效**；走「连接配置」的用户拿不到。
+ * 我们这一侧兜一层：篇章 / 章表 / 拍那一套结构化输出本来就不短，至少 4096。
+ * （神谕认 `run(messages, {maxTokens})`；direct 路径上它自己还会再往上抬，只升不降。）
+ */
+const DESIGN_MIN_MAX_TOKENS = 4096;
+function designMaxTokens() {
+    try {
+        const st = oracleApi()?.context?.getSettings?.();
+        const want = Number(st?.maxTokens);
+        return Math.max(DESIGN_MIN_MAX_TOKENS, Number.isFinite(want) && want > 0 ? Math.round(want) : 0);
+    } catch { return DESIGN_MIN_MAX_TOKENS; }
+}
+
+/**
+ *  0.41.10：**这次调用是从哪个出口出去的** —— 失败时写进日志，报障一眼能分诊。
+ *
+ * 以前我们的报错文案甩锅给「卡片的预设 / 破限」，可这条通道**根本不经过酒馆预设**
+ * （`direct` 是裸请求、`profile` 是连接配置，都不跑提示词管理器）。与其猜，不如把出口摊开。
+ */
+function oracleExitInfo() {
+    try {
+        const st = oracleApi()?.context?.getSettings?.();
+        if (!st) return null;
+        const direct = st.mode === 'direct';
+        return {
+            出口: direct ? 'direct（直连端点，不经过酒馆预设）' : 'profile（连接配置，不经过酒馆预设）',
+            模型: direct ? String(st.model || '') : '（见那条连接配置）',
+            长度上限: Number.isFinite(Number(st.maxTokens)) ? Number(st.maxTokens) : null,
+            实际请求上限: designMaxTokens(),
+            温度: st.sendTemperature ? Number(st.temperature) : '（未覆盖）',
+        };
+    } catch { return null; }
+}
+
+/**
  * 从用户在神谕窗口里打的那句话里嗅出任务类型。
  * ⚠ system 提示词与 user 尾注必须用**同一个**判定，否则会出现「system 要插曲格式、user 尾注要
  * <StoryChapters>」这种自相矛盾的要求（模型只能两套格式对撞）。
@@ -3620,6 +3659,8 @@ async function askOracle({ task = 'chapter', userText = '', regenerate = false, 
         ], {
             signal: ctl?.signal,
             onDelta: (full) => { if (current()) genChars = String(full || '').length; },
+            //  0.41.10：设计调用至少 4096 输出预算（见 designMaxTokens 的说明）
+            maxTokens: designMaxTokens(),
         });
     } catch (error) {
         if (!current()) {
@@ -3640,13 +3681,14 @@ async function askOracle({ task = 'chapter', userText = '', regenerate = false, 
     const providerErr = providerErrorOf(text);
     if (providerErr) {
         const short = providerErr.replace(/\s+/g, ' ').slice(0, 120);
-        console.warn(`[故事导演] 神谕**上游**报错（不是格式问题）：${providerErr}\n原始返回：${text.slice(0, 800)}`);
+        //  0.41.10：把这次的出口一并打出来（direct / profile、模型、长度上限）
+        console.warn(`[故事导演] 神谕**上游**报错（不是格式问题）：${providerErr}\n出口：${JSON.stringify(oracleExitInfo())}\n原始返回：${text.slice(0, 800)}`);
         const error = new Error(`上游报错 —— ${short}（这不是格式问题；稍后重试，或先换个模型 / 中转）`);
         error.providerError = true;
         throw error;
     }
     if (!text.trim()) {
-        console.warn('[故事导演] 神谕返回了空内容（多半是上游报错 / 被截断）。');
+        console.warn(`[故事导演] 神谕返回了空内容（多半是上游报错 / 被截断）。出口：${JSON.stringify(oracleExitInfo())}`);
         const error = new Error('神谕这次返回了**空内容**（多半是上游报错或被截断）—— 稍后重试，或先换个模型 / 中转');
         error.providerError = true;
         throw error;
@@ -3686,11 +3728,14 @@ function providerErrorOf(text) {
  */
 function reportBlockFailure(tag, raw, extra = '') {
     const s = settings();
-    s.run.lastRawReply = { tag, at: aiMessageCount(), text: String(raw ?? '').slice(0, 4000) };
+    //  0.41.10：把「这次从哪个出口出去的」一起存下来（direct/profile、模型、长度上限）——
+    //   以前报障只说「没区块」，谁也不知道是截断、还是模型压根没理格式。
+    const exit = oracleExitInfo();
+    s.run.lastRawReply = { tag, at: aiMessageCount(), text: String(raw ?? '').slice(0, 4000), exit };
     save();
     const info = storyBlockFailure(raw, tag);
     const reason = extra || info.hint || `回复里没有可用的 <${tag}> 区块`;
-    console.info(`[故事导演] 没拿到可用的 <${tag}>（${info.kind}）：${reason}\n原始回复：\n${raw}`);
+    console.info(`[故事导演] 没拿到可用的 <${tag}>（${info.kind}）：${reason}\n出口：${JSON.stringify(exit)}\n原始回复：\n${raw}`);
     toast(`没拿到 <${tag}>：${reason}。原文已存进诊断（控制台 / __storyDirector.state().上次原始回复）。`, 'warning');
     return info.kind;
 }
