@@ -6,7 +6,8 @@
   "js": "index.js",
   "css": "style.css",
   "author": "SnowIII",
-  "version": "0.41.9",
+  "version": "0.41.10",
+
   "homePage": "https://github.com/SnowIII/story-director",
   "auto_update": true,
   "hooks": {
