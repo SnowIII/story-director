@@ -246,7 +246,10 @@ test('manual chapter finish bypasses strengthened outline preflight state', asyn
     await h.context.finishChapter();
     assert.equal(h.main[KEY_BEAT], h.main[MAIN_BEATS].length + 1);
     assert.equal(h.main[KEY_CHAPTER_DONE], true);
-    assert.equal(h.main[KEY_READY], true);
+    assert.equal(h.main[KEY_READY], false, 'automatic interlude entry consumes chapter readiness');
+    assert.equal(h.main[MAIN_CLOSED], true);
+    assert.equal(h.s.story[INTERLUDE][IL.active], true);
+    assert.deepEqual(h.calls.filter(call => call !== 'save'), ['interlude']);
     assert.equal(h.s.run.outlineReceipt, null);
     assert.equal(h.s.run.outlineHold, '');
 });

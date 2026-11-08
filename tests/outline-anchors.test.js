@@ -40,11 +40,11 @@ test('main injection strengthens only the current anchor when explicitly enabled
     const on=renderMainSection(chapter,{strengthenOutline:true,focusStale:'同一拍停留多轮'}).lines.join('\n');
     assert.ok(on.includes('<本拍剧情锚点>印章确认为旧王室徽记</本拍剧情锚点>'));
     assert.ok(on.includes('章目标只用于判断方向'));
-    assert.ok(on.includes('本轮只选择一个推进层级'));
+    assert.ok(on.includes('不是必须逐层轮转的状态机'));
     assert.ok(on.includes('旁白宣告、口头承诺和计划预告都不算'));
     assert.ok(on.includes('最小因果桥'));
     assert.ok(on.includes('把条件与局面递给他并停笔'));
-    assert.ok(on.includes('当前拍可以跨轮完成'));
+    assert.ok(on.includes('可以跨多轮展开'));
     assert.ok(!renderMainSection(chapter,{outlineHold:'强化回执无效'}).lines.join('\n').includes('强化回执无效'));
     assert.ok(renderMainSection(chapter,{strengthenOutline:true,outlineHold:'强化回执无效'}).lines.join('\n').includes('强化回执无效'));
     assert.ok(!on.includes('要么写**别处正在发生的事**'));

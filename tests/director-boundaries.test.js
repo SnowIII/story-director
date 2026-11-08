@@ -342,7 +342,7 @@ test('partial replans preserve played anchors and replace only remaining anchors
     assert.equal(f.run('currentBeat(mainState())'),1);
 });
 
-test('the actual settings checkbox updates narrative guidance and the strict contract immediately',()=>{
+test('the actual settings checkbox updates narrative guidance and the preflight contract immediately',()=>{
     const f=fixture();f.seed();const slots={},listeners={};
     const node={checked:true,addEventListener:(name,fn)=>{listeners[name]=fn;}};
     const view={innerHTML:'',querySelector:selector=>selector==='[name="strengthen-outline"]'?node:null};
@@ -359,7 +359,9 @@ test('the actual settings checkbox updates narrative guidance and the strict con
     const strongContract=slots[f.run('SLOT.contract')];
     assert.notEqual(strongContract,oldContract);
     assert.ok(strongContract.includes('<当前拍锚点>当前独立锚点</当前拍锚点>'));
-    assert.ok(strongContract.includes('本拍完成：是 / 否'));
+    assert.ok(strongContract.includes('只负责“写之前检查怎么推进”'));
+    assert.ok(strongContract.includes('最终正文的世界状态回报为准'));
+    assert.ok(!strongContract.includes('本拍完成：是 / 否'));
     assert.ok(!strongContract.includes('未来独立锚点'));
     f.run('panel=null');node.checked=false;listeners.change();
     for(const key of ['main','contract'])assert.ok(!slots[f.run('SLOT.'+key)].includes('本拍剧情锚点'));
