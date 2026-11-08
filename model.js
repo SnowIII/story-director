@@ -1,3 +1,5 @@
+import {DESIGN_FIELDS} from './prompt-worldbook.js';
+export {configureDesignPrompt} from './prompt-worldbook.js';
 let coopScene = false;
 export function setCoopScene(value) { coopScene = !!value; }
 let coopMvuAuthority = false;
@@ -135,6 +137,7 @@ export const MAIN_ARC = '篇章';
 export const MAIN_SCOPE = '范围';
 export const MAIN_GOAL = '章目标';
 export const MAIN_BEATS = '拍';
+export const MAIN_ANCHORS = '剧情锚点';
 export const MAIN_STARTED = '开始';
 export const MAIN_ENDED = '结束';
 /** 主线这一章是否已经收尾（收尾后进入「间章」时段）。插件写，正文模型只读。 */
@@ -503,7 +506,7 @@ export function renderEpicSection(epic, { chapterCap = 12, banUserAction = true 
 
 /** 面板上的「采用」按钮要用的东西：把 <StoryEpic> 区块变成可落盘的对象。 */
 export function epicFromBlock(raw, { chapter = 0 } = {}) {
-  const attrs = parseAttributes(raw);
+  const attrs = parseAttributes(raw, { fields: DESIGN_FIELDS.epic });
   // 章表：新标签「章内容」优先，老标签「走向」也认（模型偶尔还按老格式吐）
   const chapters = splitBeats(attrOf(attrs, '章内容', '章节表', '章', 'chapters', '走向', 'movements') || '');
   const hooks = (attrOf(attrs, '伏笔', 'hooks') || '')
@@ -513,11 +516,11 @@ export function epicFromBlock(raw, { chapter = 0 } = {}) {
   return {
     ...emptyEpic(),
     [EP.title]: sanitize(attrOf(attrs, '标题', 'title'), 60),
-    [EP.line]: sanitize(attrOf(attrs, '篇章', '总纲', '纲', 'line'), 400),
-    [EP.chapters]: chapters.map((text) => sanitize(text, 400)).slice(0, 24),
-    [EP.climax]: sanitize(attrOf(attrs, '大高潮', '高潮', 'climax'), 120),
-    [EP.hooks]: hooks.map((text) => sanitize(text, 200)).slice(0, 8),
-    [EP.ledger]: sanitize(attrOf(attrs, '既成事实', '事实', 'ledger'), 600),
+    [EP.line]: sanitize(attrOf(attrs, '篇章', '总纲', '纲', 'line'), 1200),
+    [EP.chapters]: chapters.map((text) => sanitize(text, 2000)).slice(0, 24),
+    [EP.climax]: sanitize(attrOf(attrs, '大高潮', '高潮', 'climax'), 360),
+    [EP.hooks]: hooks.map((text) => sanitize(text, 600)).slice(0, 8),
+    [EP.ledger]: sanitize(attrOf(attrs, '既成事实', '事实', 'ledger'), 1800),
     [EP.chapter]: Math.max(0, Math.round(Number(chapter) || 0)),
     [EP.updated]: new Date().toISOString(),
   };
@@ -668,6 +671,7 @@ export function capText(text, limit) {
 export function splitBeats(text) {
   const raw = String(text ?? '').replace(/\r/g, '').trim();
   if (!raw) return [];
+  const MARKER = /(?:^|[;；\s])(?:第\s*)?(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*(?:拍|步|节|幕)?\s*[.、．)）:：]\s*/g;
 
   // A. 多行编号
   const lines = raw.split('\n');
@@ -683,10 +687,11 @@ export function splitBeats(text) {
     if (current) current.text = `${current.text}\n${line.trim()}`.trim();
   }
   if (current) items.push(current);
-  if (items.length >= 2) {
+  if (items.length >= 1) {
     const ordered = items.slice().sort((a, b) => a.no - b.no);
     // 编号必须从 1 起连续，否则可能把正文里别的编号行误当拍
-    if (ordered.every((item, index) => item.no === index + 1)) {
+    if (ordered.every((item, index) => item.no === index + 1) &&
+      (items.length > 1 || [...raw.matchAll(MARKER)].length === 1)) {
       return ordered.map((item) => item.text.replace(/\n+/g, ' ').trim()).filter(Boolean);
     }
   }
@@ -694,7 +699,6 @@ export function splitBeats(text) {
   // B. 全平铺的编号列表：`1. 甲 2. 乙 3. 丙` / `一拍：甲；二拍：乙`
   //    先按分号切（`一拍：` 这种中文序数写法），不行再按行内的编号标记切。
   const flat = raw.replace(/\n+/g, ' ').trim();
-  const MARKER = /(?:^|[;；\s])(?:第\s*)?(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*(?:拍|步|节|幕)?\s*[.、．)）:：]\s*/g;
 
   const bySemicolon = flat
     .split(/[;；]/)
@@ -753,9 +757,110 @@ export function beatsOf(target) {
   return splitBeats(beats);
 }
 
+/** 与拍号一一对应；保留空位，避免后面的锚点错配到前一拍。 */
+export function anchorsOf(target) {
+  const raw = unwrap(target?.[MAIN_ANCHORS]);
+  if (Array.isArray(raw)) return raw.map((item) => String(unwrap(item) ?? '').trim());
+  const text = String(raw ?? '').replace(/\r/g, '').trim();
+  if (!text) return [];
+  const marks = [...text.matchAll(/^[ \t]*(?:第[ \t]*)?(\d{1,2})[ \t]*(?:拍)?[ \t]*[.、．)）:：][ \t]*/gm)];
+  if (!marks.length) return [text];
+  const anchors = [];
+  for (const [i, mark] of marks.entries()) {
+    const index = Number(mark[1]) - 1;
+    if (index < 0 || Object.hasOwn(anchors, index)) return [];
+    anchors[index] = text.slice(mark.index + mark[0].length, marks[i + 1]?.index ?? text.length).replace(/\n+/g, ' ').trim();
+  }
+  return Array.from(anchors, (anchor) => anchor || '');
+}
+
+/** 旧章表未存锚点时沿用当前拍，不为兼容旧存档额外请求模型。 */
+export function currentAnchor(main) {
+  const index = currentBeat(main) - 1;
+  const beat = beatsOf(main)[index];
+  return beat ? anchorsOf(main)[index] || beat : '';
+}
+
+export const OUTLINE_STAGES = ['前提', '触发', '反应', '结果'];
+
+/** 强化模式使用的软校验：多个独立结果应拆到不同拍，不能靠一个锚点一次包办。 */
+export function outlineAnchorIssue(anchor) {
+  const text = String(anchor ?? '').trim();
+  if (!text) return '';
+  const clauses = text.split(/[；;\n]+/).map((part) => part.trim()).filter(Boolean);
+  return clauses.length > 1
+    ? '剧情锚点包含多个分句。每拍只写一个可验证结果；若这些分句是两个独立局面变化，请拆到后续拍，分号只用于补充同一结果所需的证据。'
+    : '';
+}
+
+const compactReceiptText = (value) => String(value ?? '')
+  .replace(/[「」『』“”"'《》]/g, '')
+  .replace(/\s+/g, '')
+  .trim();
+
+/**
+ * 解析强化模式下正文模型的隐藏自检回执。
+ * 只提供最小结构门控，不尝试替代语义判断；字段不完整时不授权落拍。
+ */
+export function parseOutlineReceipt(raw, anchor) {
+  const text = String(raw ?? '').replace(/\r/g, '').trim();
+  const read = (label) => {
+    for (const line of text.split('\n')) {
+      const at = line.indexOf(label);
+      if (at >= 0) return line.slice(at + label.length).replace(/^\s*[:：]\s*/, '').trim();
+    }
+    return '';
+  };
+  const anchorText = read('当前拍锚点') || read('剧情锚点') || read('锚点');
+  const stageText = read('本轮推进层级');
+  const completeText = read('本拍完成');
+  const evidence = read('完成证据');
+  const stage = OUTLINE_STAGES.find((item) => stageText.includes(item)) || '';
+  const complete = /^(是|完成|已完成|true|yes)/i.test(completeText);
+  const completeDeclared = !/[\/／]/.test(completeText)
+    && /^(是|否|完成|未完成|已完成|true|false|yes|no)/i.test(completeText);
+  const hasEvidence = Boolean(evidence)
+    && !/^(无|没有|暂无|不适用|n\/a|none|…|\.{3}|〔)/i.test(evidence);
+  const expected = compactReceiptText(anchor);
+  const received = compactReceiptText(anchorText);
+  const anchorMatched = Boolean(expected && received && (received === expected || received.includes(expected)));
+  const conclusions = [...text.matchAll(/结论\s*[:：]/g)];
+  const tail = conclusions.length ? text.slice(conclusions.at(-1).index) : '';
+  const state = REVIEW_STATES.find((item) => tail.includes(item)) || '';
+  const present = Boolean(anchorText || stageText || completeText || evidence);
+  const valid = present && anchorMatched && Boolean(stage) && completeDeclared && Boolean(state);
+  return {
+    present,
+    valid,
+    anchorMatched,
+    stage,
+    complete,
+    evidence,
+    hasEvidence,
+    state,
+    landed: valid && stage === '结果' && complete && hasEvidence
+      && (state === REVIEW_PASS || state === REVIEW_ADJUST),
+  };
+}
+
+/** P2 的最小严格门控：只有强化自检明确证明“结果成立且有证据”才放行。 */
+export function outlineReceiptAllowsLanding(receipt) {
+  return Boolean(receipt?.valid && receipt?.landed
+    && (receipt?.state === REVIEW_PASS || receipt?.state === REVIEW_ADJUST));
+}
+
+/** 前置补充内容不参与剧情解析；未闭合时也不把其中的示例当作真实结果。 */
+export function stripPreThink(text) {
+  return String(text ?? '').replace(/<preThink\b[^>]*>[\s\S]*?(?:<\/preThink\s*>|$)/gi, '');
+}
+
+export function storyAuditVerdict(text) {
+  return String((stripPreThink(text).match(/检查[:：]\s*([^\n]+)/) || [])[1] ?? '').trim();
+}
+
 /** 解析模型的 <StoryChapters> / <StoryThreads> / <StoryInterlude> 区块。 */
 export function parseBlocks(text, tag) {
-  const source = String(text ?? '');
+  const source = stripPreThink(text);
   const pattern = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'gi');
   const out = [];
   for (const match of source.matchAll(pattern)) out.push(match[1]);
@@ -773,7 +878,7 @@ export function parseBlocks(text, tag) {
  *   区块明明在、字段明明在，只是多了层装饰；报出来却是「没解析到区块」，
  *   把排查方向整个带偏（用户换模型、换预设，当然都没用）。
  */
-export function parseAttributes(raw) {
+export function parseAttributes(raw, { fields = null } = {}) {
   let text = String(raw ?? '').replace(/\r/g, '');
   // 调用方可能把整块（含 <StoryChapters> 围栏）传进来，也可能只传内层文本（此时结尾会带一个
   // 孤零零的 </StoryChapters>）。两种都先清掉，否则闭合标签会被算进最后一个字段的值里。
@@ -783,7 +888,8 @@ export function parseAttributes(raw) {
   //（模型把 `拍` 写成多行编号列表时，那样只会留下第一拍）。
   // 行首允许的装饰：列表符 / 引用符 / 标题井号 / 加粗星号（顺序不敏感，叠着写也认）。
   const DECOR = '(?:[-*+][ \\t]+|>+[ \\t]*|#{1,6}[ \\t]*|\\*{1,3}[ \\t]*|[ \\t])*';
-  const re = new RegExp(`^${DECOR}([\\p{Script=Han}A-Za-z_]{1,12})\\*{0,3}[ \\t]*[:：=][ \\t]*([\\s\\S]*?)(?=\\n${DECOR}[\\p{Script=Han}A-Za-z_]{1,12}\\*{0,3}[ \\t]*[:：=]|(?![\\s\\S]))`, 'gmu');
+  const field = fields?.length ? '(?:'+fields.map(value=>value.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|')+')' : '[\\p{Script=Han}A-Za-z_]{1,12}';
+  const re = new RegExp(`^${DECOR}(${field})\\*{0,3}[ \\t]*[:：=][ \\t]*([\\s\\S]*?)(?=\\n${DECOR}${field}\\*{0,3}[ \\t]*[:：=]|(?![\\s\\S]))`, fields?.length ? 'gmiu' : 'gmu');
   const out = {};
   for (const match of text.matchAll(re)) {
     const key = match[1].trim();
@@ -817,6 +923,7 @@ export function emptyMain() {
     [MAIN_SCOPE]: '',
     [MAIN_GOAL]: '',
     [MAIN_BEATS]: [],
+    [MAIN_ANCHORS]: [],
     [KEY_BEAT]: 1,
     [KEY_BEAT_DONE]: false,
     [KEY_CHAPTER_DONE]: false,
@@ -944,7 +1051,7 @@ export function renderInjectionHeader({ banUserAction = true, mode = 'main' } = 
 /**
  * 主线区块：整条线的拍列表 + 本轮聚焦哪一拍 + 落拍回报怎么写。
  */
-export function renderMainSection(main, { maxBeats = 8, root = null, banUserAction = true, focusStale = '', setupNote = '', beatNote = '', landedHold = '' } = {}) {
+export function renderMainSection(main, { maxBeats = 8, root = null, banUserAction = true, focusStale = '', setupNote = '', beatNote = '', landedHold = '', strengthenOutline = false, outlineHold = '' } = {}) {
   const lines = [];
   const title = String(unwrap(main[MAIN_TITLE]) ?? '').trim();
   const arc = String(unwrap(main[MAIN_ARC]) ?? '').trim();
@@ -985,6 +1092,7 @@ export function renderMainSection(main, { maxBeats = 8, root = null, banUserActi
     //     （以前它只是叙述里的一行，模型顺手就换成了"用户让我写的事"，见 CURRENT_BEAT_TAG 的说明）。
     lines.push(`<${CURRENT_BEAT_TAG}>本轮是本章第 ${current} 拍 / 共 ${total} 拍：`);
     lines.push(`　▶ ${current}. ${beats[current - 1]}</${CURRENT_BEAT_TAG}>`);
+    if (strengthenOutline) lines.push(...renderAnchorConstraint(currentAnchor(main), { landedHold, strictHold: outlineHold }));
     if (current > 1) lines.push(`前面 ${current - 1} 拍已经演过了（**不要重演**；它们造成的局面是既成事实）。`);
     lines.push('**后面的拍还没到，这一轮不要抢演** —— 抢跑比慢更糟；这一拍演完就照下面写回报。');
     lines.push(
@@ -1005,7 +1113,9 @@ export function renderMainSection(main, { maxBeats = 8, root = null, banUserActi
       lines.push(
         `　⚠ **${focusStale}** —— 说明你还没回报「这一拍已经落地」，或者它确实还没发生。`,
         '　　这一轮**必须换个写法**：不要重复上一轮用过的同一句话、同一个动作、同一个场景开头；',
-        '　　要么把这一拍**真正推进下去**（然后照下面写回报），要么写**别处正在发生的事**（别人的动向、外面的变化、被瞒着的那件事的进展）。',
+        strengthenOutline
+          ? '　　主动构思通往本拍锚点的合理因果推进：路径受阻就另找符合人物动机与既有设定的路径，缺铺垫就把铺垫写出来，不得只重复说明困难或改演无关事件。'
+          : '　　要么把这一拍**真正推进下去**（然后照下面写回报），要么写**别处正在发生的事**（别人的动向、外面的变化、被瞒着的那件事的进展）。',
         '　　**绝对不要**把上一轮那段对话换个词再说一遍 —— 那是复读，读者一眼就看得出来。',
       );
     }
@@ -1233,9 +1343,28 @@ export function renderInterludeChapterSection(chapter, { maxBeats = 6, banUserAc
  *   现在：主线时段给主线示例，间章时段给间章示例，并且明说另一种被忽略。
  *   整段「怎么回报」的规矩仍然只有这一处 + 世界书那三条常驻条目（不给两份，免得互相打架）。
  */
-export function renderContractSection({ banUserAction = true, mode = 'main', beat = '', landingBy = '', hasCoop = false } = {}) {
+function renderAnchorConstraint(anchor, { landedHold = false, strictHold = '' } = {}) {
+  if (!anchor) return [];
+  return [
+    '【大纲遵循强化｜当前拍叙事契约】',
+    `<本拍剧情锚点>${anchor}</本拍剧情锚点>`,
+    ...(landedHold ? ['本拍已经落地。本轮只承接已发生剧情的余波，不为补齐锚点重演本拍，不推翻既成结果或抢演下一拍。'] : [
+      '章目标只用于判断方向，不要求本轮完成。执行优先级：{{user}} 最新言行 > 既成事实 > 人物动机、能力与知情范围 > 当前锚点 > 章节目标 > 文风。',
+      '若当前处境允许，本轮必须产生一个与锚点直接相关的可见变化；不能只复述目标、解释困难或空转。',
+      '本轮可用“前提 / 触发 / 反应 / 结果”描述主要推进重点；这只是写作检查，不是必须逐层轮转的状态机。正文若自然完成锚点，可以在同一轮落到结果。',
+      '锚点结果必须由正文中可见的人物行动与局面变化产生；旁白宣告、口头承诺和计划预告都不算。',
+      '缺少动机或前提时，只从既有事实、人物诉求、利害与知情范围建立最小因果桥；不得临时改人设、越权知情、凭空补设定或用巧合跳过阻力。',
+      '需要 {{user}} 表态、答应、出手或选择才能继续时，把条件与局面递给他并停笔；本拍未完整成立时不得声称已完成。',
+      '锚点成立后收在本段结果与余波，不追加新的目标来延长完成；原锚点要达成的结果不得偷换。',
+      ...(strictHold ? [`⚠ ${strictHold}`] : []),
+    ]),
+  ];
+}
+
+export function renderContractSection({ banUserAction = true, mode = 'main', beat = '', landingBy = '', hasCoop = false, strengthenOutline = false, anchor = '', chapterClosing = false } = {}) {
   if (mode === 'coop') return ['【当前演出为 Coop】只按 Coop 专用契约回报，主线、间章及普通支线均暂停，不写它们的落拍命令。'];
   const inInterlude = mode === 'interlude';
+  const strictOutline = !inInterlude && strengthenOutline === true && Boolean(anchor);
   const byExtra = landingBy === 'extra';
   const flag = inInterlude ? `${PATH.interlude}.${IL.beatDone}` : `${PATH.main}.${KEY_BEAT_DONE}`;
   const code = inInterlude ? [
@@ -1262,6 +1391,20 @@ export function renderContractSection({ banUserAction = true, mode = 'main', bea
   //   每一轮的变量快照都说「本拍已落: true」，额外模型看到这句又接着写 true（自我强化）。
   //   所以这里直接告诉它：**现在没有要落的拍，什么都不要写**。
   if (!beat) {
+    // 强化模式下，最后一拍推进到 total + 1 之后仍需要给变量写入方一条明确的“收尾契约”。
+    // 只在调用方确认 chapterClosing 时开放这两个字段；未开篇 / 普通模式继续走原来的空拍保护逻辑。
+    if (!inInterlude && strengthenOutline === true && chapterClosing === true) {
+      return [
+        '【大纲遵循强化｜本章收尾阶段】',
+        '这一章的拍已经全部演完。不要再写 `本拍已落`；现在只判断本章是否真正收束。',
+        `　· 章目标已经在正文中实际达成 → \`_.set('${PATH.main}.${KEY_CHAPTER_DONE}', true);\``,
+        `　· 当前场景已经自然收尾、适合开新的一章 → \`_.set('${PATH.main}.${KEY_READY}', true);\``,
+        byExtra
+          ? '　· 这两个收尾字段由额外变量模型根据最终正文回填；讲故事的人不要把命令写进可见正文。'
+          : '　· 只在事实成立时写上述收尾字段；不要为了换章而提前盖章。',
+        '　· 如果还没收干净，就继续写余波；下一轮仍可补报这两个收尾字段，不会因为“没有下一拍”而失去回报通道。',
+      ];
+    }
     return [
       inInterlude ? '【现在这一轮没有要演的画面】' : '【现在这一轮没有要演的拍】',
       '插件还没有给你这一轮的任务（还没排拍，或者本章的拍已经演完了）。',
@@ -1280,6 +1423,10 @@ export function renderContractSection({ banUserAction = true, mode = 'main', bea
   lines.push(
     inInterlude ? '【这一轮该演的画面 —— 演完它才算落拍】' : '【这一轮该演的一拍 —— 演完它才算落拍】',
     beat ? `<${CURRENT_BEAT_TAG}>${beat}</${CURRENT_BEAT_TAG}>` : beat,
+    ...(strictOutline ? [
+      `<当前拍锚点>${anchor}</当前拍锚点>`,
+      '锚点是本拍唯一完成条件；上面的拍只说明演出方向。只有正文中该锚点结果确实成立，才能确认本拍完成。',
+    ] : []),
     '',
     `【落拍判据：满足这些才把 ${flag} 写成 true】`,
     `　· 正文里 **\`<${CURRENT_BEAT_TAG}>\` 里那件事已经完整发生**了 —— 不是刚要开始、不是只做了一半、不是只被提到或只做了铺垫；`,
@@ -1293,39 +1440,63 @@ export function renderContractSection({ banUserAction = true, mode = 'main', bea
   //   · 世界状态类（本拍已落…）：描述"世界里发生了什么"，额外模型模式下由**变量模型**回填；
   //   · 判断类（合理性审查 / 审查说明）：**只有写正文的模型判断得了**（变量模型只看到成品），
   //     而且额外模型模式下 `_.set` 会被 MVU 丢掉 —— 所以它走**纯文本标签**，插件读走并剥离。
-  lines.push(
-    '【谁写什么】',
-    '· **世界状态类**（本拍已落 / 章目标达成 / 可进下一章 / 间章那几个 / 支线·插曲的已落）：描述「世界里发生了什么」。',
-    byExtra
-      ? '  这个聊天里由**额外的变量模型**在正文写完后回填 —— **讲故事的人什么都不要写**：不要把 `_.set` / `<UpdateVariable>` 写进正文或任何可见输出。'
-      : '  由你在回复末尾用 `_.set` 写（写在 `<UpdateVariable>` 区块里，字段见下）。',
-    '· **判断类**（`合理性审查`）：**只有写正文的模型判断得了** —— 变量模型只看到成品，它不知道你演不演得出来。',
-    '  所以**每一轮都先交一份自检、再动笔写正文**（写在回复**最开头**；插件读走、从消息里剥掉，读者看不到）：',
-    '```',
-    `<${SELF_CHECK_TAG}>`,
-    `① 注入要我演的（把 <${CURRENT_BEAT_TAG}> 里那句抄一遍，别改）：…`,
-    '② 我这一轮实际打算写：…',
-    '③ 两件事是不是一回事：是 / 不是（不是就写差在哪）',
-    '④ 这一拍要成立、还缺的那一步在谁手里：NPC / 环境 / {{user}}（在 {{user}} 手里就别替他做）',
-    `⑤ 结论：${REVIEW_PASS}</${SELF_CHECK_TAG}>`,
-    '```',
-    // ★ 0.38.6：这三条是**冲着一场真事故**写的 —— 用户报的那一轮，自检①②问的是
-    //   「用户这一轮的指令能不能写出来」（永远成立），于是结论永远「通过」，
-    //   而注入那一拍（博士落座→掏卡→问他）根本没演，落拍却被算成了 true。
-    //   所以：**必须先照抄注入那一句**（抄不出来就说明它没在看注入）；**玩家的言行优先**，
-    //   但因此把这一拍带歪时**必须报档**，不许「通过 + 算落拍」。
-    '　· ★ **{{user}} 的言行优先**：他要是把场面带到别处，就照 ③ 报 —— **不许**「结论写通过、再把这一拍算成落拍」。',
-    '　· ★ **结论决定这一轮怎么写**（这就是「先交自检」的意思）：',
-    `　　\`${REVIEW_PASS}\` → 照这一拍演；\`${REVIEW_ADJUST}\` → 按你自己调整后的执行方式演（**要的结果不变**）；`,
-    `　　\`${REVIEW_SETUP}\` → **只演到缺的那一步之前**：缺来由就先把来由补出来，`
-      + '该等 {{user}} 就只把条件 / 问题 / 局面递到他面前 —— **别替他做、别把这一拍演完**（这一轮也不报落拍）；',
-    `　　\`${REVIEW_REJECT}\` → **这一拍先不要演**：把场面落在它之前的处境上，让别的部分自然往前走`
-      + `（要成立就得硬加设定、或者它已经不可能了，就报这一档 —— 插件会请神谕重排剩下的拍）。`,
-    '　· **报档很便宜**（`调整` / `缺铺垫` 不重排、不花一次神谕调用）—— 别为了省事硬演，也别先写完再补一句结论。',
-    `　· 结论写在自检块**最后一行**（以 \`结论：\` 开头）；用 \`<${SELF_CHECK_TAG}>\`，`
-      + '**不要**写成 `<!-- -->` 注释（插件读不到，而且读者会看到）。',
-    '',
-  );
+  if (strictOutline) {
+    lines.push(
+      '【谁写什么 · 大纲遵循强化】',
+      '· **世界状态类**（本拍已落 / 章目标达成 / 可进下一章 / 间章那几个 / 支线·插曲的已落）：描述「世界里发生了什么」。',
+      byExtra
+        ? '  这个聊天里由**额外的变量模型**在正文写完后回填 —— **讲故事的人什么都不要写**：不要把 `_.set` / `<UpdateVariable>` 写进正文或任何可见输出。'
+        : '  由你在回复末尾用 `_.set` 写（写在 `<UpdateVariable>` 区块里，字段见下）。',
+      '· **判断类**（`合理性审查`）：**只有写正文的模型判断得了**；每一轮都先交下面的强化自检，再动笔写正文。',
+      '  这份自检只负责“写之前检查怎么推进”，**不提前宣判正文写完以后是否已经落拍**。',
+      '```',
+      `<${SELF_CHECK_TAG}>`,
+      `当前拍锚点：${anchor}`,
+      '① 本轮推进层级：前提 / 触发 / 反应 / 结果（只描述本轮重点，不是落拍条件）',
+      '② 采取行动的 NPC 及其动机：…',
+      '③ 使用的既有事实或线索：…',
+      '④ 预计产生的可见局面变化：…',
+      '⑤ 仍需留给 {{user}} 的决定：…',
+      `⑥ 结论：${REVIEW_PASS}</${SELF_CHECK_TAG}>`,
+      '```',
+      '　· **当前拍锚点必须原样引用**；它用于确认你正在处理正确的拍，不是一张“落拍授权票”。',
+      `　· 缺来由、需要 {{user}} 先决定时 → 结论写“${REVIEW_SETUP}”；当前拍在现状下根本站不住时 → 写“${REVIEW_REJECT}”。`,
+      `　· 只是需要换一种自然的执行方式、但锚点结果不变 → 可以写“${REVIEW_ADJUST}”。`,
+      '　· **正文写完后是否落拍，以最终正文的世界状态回报为准**；前置自检不会因为缺“完成证据”而否决已经发生的事实。',
+      '　· **{{user}} 的言行优先**：场面被带到别处时就按实际情况写，不要为了追锚点替 {{user}} 做决定。',
+      '　· 结论必须写在自检块最后一行；插件仍会按“通过 / 调整 / 缺铺垫 / 驳回”处理合理性审查。',
+      '',
+    );
+  } else {
+    lines.push(
+      '【谁写什么】',
+      '· **世界状态类**（本拍已落 / 章目标达成 / 可进下一章 / 间章那几个 / 支线·插曲的已落）：描述「世界里发生了什么」。',
+      byExtra
+        ? '  这个聊天里由**额外的变量模型**在正文写完后回填 —— **讲故事的人什么都不要写**：不要把 `_.set` / `<UpdateVariable>` 写进正文或任何可见输出。'
+        : '  由你在回复末尾用 `_.set` 写（写在 `<UpdateVariable>` 区块里，字段见下）。',
+      '· **判断类**（`合理性审查`）：**只有写正文的模型判断得了** —— 变量模型只看到成品，它不知道你演不演得出来。',
+      '  所以**每一轮都先交一份自检、再动笔写正文**（写在回复**最开头**；插件读走、从消息里剥掉，读者看不到）：',
+      '```',
+      `<${SELF_CHECK_TAG}>`,
+      `① 注入要我演的（把 <${CURRENT_BEAT_TAG}> 里那句抄一遍，别改）：…`,
+      '② 我这一轮实际打算写：…',
+      '③ 两件事是不是一回事：是 / 不是（不是就写差在哪）',
+      '④ 这一拍要成立、还缺的那一步在谁手里：NPC / 环境 / {{user}}（在 {{user}} 手里就别替他做）',
+      `⑤ 结论：${REVIEW_PASS}</${SELF_CHECK_TAG}>`,
+      '```',
+      '　· ★ **{{user}} 的言行优先**：他要是把场面带到别处，就照 ③ 报 —— **不许**「结论写通过、再把这一拍算成落拍」。',
+      '　· ★ **结论决定这一轮怎么写**（这就是「先交自检」的意思）：',
+      `　　\`${REVIEW_PASS}\` → 照这一拍演；\`${REVIEW_ADJUST}\` → 按你自己调整后的执行方式演（**要的结果不变**）；`,
+      `　　\`${REVIEW_SETUP}\` → **只演到缺的那一步之前**：缺来由就先把来由补出来，`
+        + '该等 {{user}} 就只把条件 / 问题 / 局面递到他面前 —— **别替他做、别把这一拍演完**（这一轮也不报落拍）；',
+      `　　\`${REVIEW_REJECT}\` → **这一拍先不要演**：把场面落在它之前的处境上，让别的部分自然往前走`
+        + `（要成立就得硬加设定、或者它已经不可能了，就报这一档 —— 插件会请神谕重排剩下的拍）。`,
+      '　· **报档很便宜**（`调整` / `缺铺垫` 不重排、不花一次神谕调用）—— 别为了省事硬演，也别先写完再补一句结论。',
+      `　· 结论写在自检块**最后一行**（以 \`结论：\` 开头）；用 \`<${SELF_CHECK_TAG}>\`，`
+        + '**不要**写成 `<!-- -->` 注释（插件读不到，而且读者会看到）。',
+      '',
+    );
+  }
   // ③ 世界状态类：谁写、怎么写。
   if (byExtra) {
     lines.push(
@@ -1366,13 +1537,13 @@ const sanitize = (value, limit = 200) => String(value ?? '').trim().replace(/\s*
 
 export function normalizeInterludeChapter(source, { beatBudget = 4 } = {}) {
   const beats = (Array.isArray(source?.beats) ? source.beats : splitBeats(source?.beats ?? source?.拍 ?? ''))
-    .map((beat) => sanitize(beat, 300))
+    .map((beat) => sanitize(beat, 900))
     .filter(Boolean)
     .slice(0, Math.max(1, beatBudget));
   return {
     [IL.active]: true,
     [IL.title]: sanitize(source?.title ?? source?.[IL.title], 60),
-    [IL.scene]: sanitize(source?.scene ?? source?.[IL.scene], 120),
+    [IL.scene]: sanitize(source?.scene ?? source?.[IL.scene], 360),
     [IL.beats]: beats,
     [IL.beat]: 1,
     [IL.beatDone]: false,
@@ -1385,7 +1556,7 @@ export function normalizeInterludeChapter(source, { beatBudget = 4 } = {}) {
 
 /** 面板上的「采用」按钮要用的东西：把 <StoryInterludeChapter> 区块变成可落盘的对象。 */
 export function interludeChapterFromBlock(raw, opts = {}) {
-  const attrs = parseAttributes(raw);
+  const attrs = parseAttributes(raw, { fields: DESIGN_FIELDS.interlude_chapter });
   return normalizeInterludeChapter({
     title: attrOf(attrs, '标题', 'title') || '一段日常',
     scene: attrOf(attrs, '场合', '地点', 'scene'),
@@ -1402,9 +1573,10 @@ export function normalizeChapter(source, { index = 0, keepId = '' } = {}) {
     id: keepId || `c${index + 1}`,
     [MAIN_TITLE]: sanitize(source?.title ?? source?.[MAIN_TITLE], 60),
     [MAIN_ARC]: sanitize(source?.arc ?? source?.[MAIN_ARC], 60),
-    [MAIN_SCOPE]: sanitize(source?.scope ?? source?.[MAIN_SCOPE], 240),
-    [MAIN_GOAL]: sanitize(source?.goal ?? source?.[MAIN_GOAL], 300),
-    [MAIN_BEATS]: beats.map((beat) => sanitize(beat, 300)).filter(Boolean).slice(0, 10),
+    [MAIN_SCOPE]: sanitize(source?.scope ?? source?.[MAIN_SCOPE], 720),
+    [MAIN_GOAL]: sanitize(source?.goal ?? source?.[MAIN_GOAL], 900),
+    [MAIN_BEATS]: beats.map((beat) => sanitize(beat, 900)).filter(Boolean).slice(0, 10),
+    [MAIN_ANCHORS]: anchorsOf({ [MAIN_ANCHORS]: source?.anchors ?? source?.[MAIN_ANCHORS] }).map((anchor) => sanitize(anchor, 900)).slice(0, 10),
     [KEY_BEAT]: 1,
     [KEY_BEAT_DONE]: false,
     [KEY_CHAPTER_DONE]: false,
@@ -1421,9 +1593,9 @@ export function normalizeThread(source, { id = '' } = {}) {
     id,
     [THREAD_FIELDS.title]: sanitize(source?.title ?? source?.[THREAD_FIELDS.title], 60),
     [THREAD_FIELDS.status]: STATUS_PENDING,
-    [THREAD_FIELDS.goal]: sanitize(source?.goal ?? source?.[THREAD_FIELDS.goal], 300),
-    [THREAD_FIELDS.entry]: sanitize(source?.entry ?? source?.[THREAD_FIELDS.entry], 240),
-    [THREAD_FIELDS.land]: sanitize(source?.land ?? source?.[THREAD_FIELDS.land], 300),
+    [THREAD_FIELDS.goal]: sanitize(source?.goal ?? source?.[THREAD_FIELDS.goal], 900),
+    [THREAD_FIELDS.entry]: sanitize(source?.entry ?? source?.[THREAD_FIELDS.entry], 720),
+    [THREAD_FIELDS.land]: sanitize(source?.land ?? source?.[THREAD_FIELDS.land], 900),
     [THREAD_FIELDS.due]: sanitize(source?.due ?? source?.[THREAD_FIELDS.due], 40),
     [THREAD_FIELDS.started]: new Date().toISOString(),
     [THREAD_FIELDS.ended]: '',
@@ -1445,25 +1617,26 @@ export function normalizeInterlude(source, { id = '', after = 0 } = {}) {
     [INTERLUDE_FIELDS.after]: asked && !/^随时$/.test(asked) && /[^\d\s拍第之后]/.test(asked)
       ? sanitize(asked, 40)
       : (number > 0 ? `第 ${number} 拍之后` : '随时'),
-    [INTERLUDE_FIELDS.beat]: sanitize(source?.beat ?? source?.[INTERLUDE_FIELDS.beat], 300),
+    [INTERLUDE_FIELDS.beat]: sanitize(source?.beat ?? source?.[INTERLUDE_FIELDS.beat], 900),
     [INTERLUDE_FIELDS.done]: false,
   };
 }
 
 /** 面板上的「采用」按钮要用的东西：把区块文本变成一个可落盘的对象。 */
 export function chapterFromBlock(raw, opts = {}) {
-  const attrs = parseAttributes(raw);
+  const attrs = parseAttributes(raw, { fields: DESIGN_FIELDS.chapter });
   return normalizeChapter({
     title: attrOf(attrs, '章标题', '标题', 'title') || '未命名的一章',
-    arc: attrOf(attrs, '篇章', '弧线', 'arc', 'story'),
+    arc: attrOf(attrs, '篇章', '分卷', '弧线', 'arc', 'story'),
     scope: attrOf(attrs, '范围', '边界', 'scope'),
     goal: attrOf(attrs, '章目标', '目标', 'goal'),
     beats: attrOf(attrs, '拍', 'beats', 'beats:'),
+    anchors: attrOf(attrs, '剧情锚点', 'anchors'),
   }, opts);
 }
 
 export function threadFromBlock(raw, opts = {}) {
-  const attrs = parseAttributes(raw);
+  const attrs = parseAttributes(raw, { fields: DESIGN_FIELDS.thread });
   return normalizeThread({
     title: attrOf(attrs, '标题', 'title') || '未命名的支线',
     goal: attrOf(attrs, '目标', 'goal'),
@@ -1474,7 +1647,7 @@ export function threadFromBlock(raw, opts = {}) {
 }
 
 export function interludeFromBlock(raw, opts = {}) {
-  const attrs = parseAttributes(raw);
+  const attrs = parseAttributes(raw, { fields: DESIGN_FIELDS.interlude });
   return normalizeInterlude({
     title: attrOf(attrs, '标题', 'title') || '未命名的插曲',
     beat: attrOf(attrs, '内容', '一拍', 'beat'),
@@ -1572,7 +1745,7 @@ export function nsPathOfCommand(command) {
 
 /** 只有插件能写的字段（AI 写了也忽略）。`[ ]` 写法与点号写法都要认。 */
 const PLUGIN_OWNED = new Set();
-for (const key of [MAIN_BEATS, MAIN_TITLE, MAIN_ARC, MAIN_SCOPE, MAIN_GOAL]) PLUGIN_OWNED.add(`${NS}.主线.${key}`);
+for (const key of [MAIN_BEATS, MAIN_ANCHORS, MAIN_TITLE, MAIN_ARC, MAIN_SCOPE, MAIN_GOAL]) PLUGIN_OWNED.add(`${NS}.主线.${key}`);
 for (const key of [IL.title, IL.scene, IL.beats]) PLUGIN_OWNED.add(`${NS}.${INTERLUDE}.${key}`);
 // ★ 0.27.11：**幕开关只能插件写**（0.27.10 补的洞）。
 //   以前 `间章.进行中` 是敞开的：模型在间章时段写一句 `_.set('故事导演.间章.进行中', false)`
@@ -1946,11 +2119,15 @@ export function landingOpsInReply(text) {
  * @returns {{kind:'ok'|'truncated'|'wrong-tag'|'no-block'|'no-fields', hint:string, saw:string}}
  */
 export function storyBlockFailure(text, tag) {
-  const s = String(text ?? '');
+  const raw = String(text ?? '');
+  const s = stripPreThink(raw);
   const name = String(tag ?? '');
   if (parseBlocks(s, name).length) return { kind: 'ok', hint: '', saw: name };
   if (new RegExp(`<${name}[^>]*>`, 'i').test(s)) {
     return { kind: 'truncated', hint: `<${name}> 开了头却没有闭合 —— 这次回复**被截断了**（长度上限不够，或上游掐断）`, saw: name };
+  }
+  if (/<preThink\b[^>]*>(?:(?!<\/preThink\s*>)[\s\S])*$/i.test(raw)) {
+    return { kind: 'truncated', hint: '<preThink> 未闭合，尚未收到可用的剧情结果区块（可能输出被截断）', saw: 'preThink' };
   }
   const other = s.match(/<Story([A-Za-z]+)[\s>]/);
   if (other) {

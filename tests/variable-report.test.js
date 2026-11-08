@@ -7,7 +7,7 @@ import {parseReports,sourceMap} from '../coop/messages.js';
 import {visibleBody} from '../coop/body.js';
 import {clone} from '../coop/model.js';
 import {reportContract} from '../coop/prompts.js';
-import {renderContractSection} from '../model.js';
+import {renderContractSection,mainOf,beatsOf,currentBeat} from '../model.js';
 
 const block=report=>'<UpdateVariable><Analysis>核对实际互动。</Analysis><JSONPatch>'+JSON.stringify([
     {op:'replace',path:'/故事导演/间章/可回主线',value:true},
@@ -141,6 +141,7 @@ for(const injectContract of [false,true]) test('shared variable slot receives Co
     const start=source.indexOf('function syncMainInjection() {'),end=source.indexOf('\n}\n',start)+2;
     const context=vm.createContext({settings:()=>({injectContract,injectDepth:4}),toNumber:(value,fallback)=>Number.isFinite(Number(value))?Number(value):fallback,syncInterludeWrites:()=>{},buildInjection:()=>'',
         substitute:value=>value,renderContractSection,currentMode:()=> 'main',currentBeatLine:()=>'',landingByExtraModel:()=>false,
+        rootOf:()=>({}),mainOf,beatsOf,currentBeat,
         SLOT:{main:'main',threads:'threads',interludes:'interludes',contract:'contract',coop:'coop'},
         setExtensionPrompt:(name,value)=>{slots[name]=value;},extension_prompt_types:{IN_CHAT:1},extension_prompt_roles:{SYSTEM:1},
         coop:{variableContract:()=>report,injection:()=> 'scene'},panel:null,console});

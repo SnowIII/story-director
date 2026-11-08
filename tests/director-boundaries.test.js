@@ -249,6 +249,32 @@ test('the last review conclusion wins while spacing around its colon remains sup
     assert.equal(f.run('settings().run.reviewFromReply.state'),'驳回');
 });
 
+test('strengthened outline harvests a structured receipt and strips it from the visible reply',()=>{
+    const f=fixture();f.seed();
+    f.run("settings().strengthenOutline=true;settings().story.主线.剧情锚点=['守卫收到旧信','第二拍锚点']");
+    f.host.chat.push({is_user:false,mes:`<故事导演自检>
+当前拍锚点：守卫收到旧信
+本轮推进层级：结果
+本拍完成：是
+完成证据：守卫把旧信锁进证物箱
+结论：通过
+</故事导演自检>
+正文`});
+    assert.equal(f.run('harvestReviewTag(0)'),true);
+    assert.equal(f.run('settings().run.outlineReceipt.anchorMatched'),true);
+    assert.equal(f.run('settings().run.outlineReceipt.stage'),'结果');
+    assert.equal(f.run('settings().run.outlineReceipt.landed'),true);
+    assert.equal(f.host.chat[0].mes.trim(),'正文');
+});
+
+test('turning outline strengthening off keeps legacy self-check handling without a strict receipt',()=>{
+    const f=fixture();f.seed();
+    f.host.chat.push({is_user:false,mes:'<故事导演自检>结论：通过</故事导演自检>正文'});
+    assert.equal(f.run('harvestReviewTag(0)'),true);
+    assert.equal(f.run('settings().run.outlineReceipt'),null);
+    assert.equal(f.run('settings().run.reviewFromReply.state'),'通过');
+});
+
 test('a fresh manual force-open still works immediately after an earlier cancellation',async()=>{
     const f=fixture();
     f.run("beginGenerate('上次');abortGenerate();globalThis.opened=0;generateEpic=async()=>{const owner=beginGenerate('篇章');endGenerate(owner);return true};generateChapter=async()=>{opened++;return true}");
@@ -265,4 +291,107 @@ for(const group of [false,true]) test('reload verifies persisted '+(group?'group
     disk=[{chat_metadata:f.host.chatMetadata},...f.host.chat];
     await f.run('saveChatBeforeReload()');
     assert.equal(endpoint,group?'/api/chats/group/get':'/api/chats/get');
+});
+
+const anchoredReply='<StoryChapters>\n章标题: 新章\n章目标: 找到来信缘由\n拍:\n1. 信使递信\n2. 守卫辨认印章\n剧情锚点:\n1. 守卫收到旧信\n2. 印章来历明确\n</StoryChapters>';
+
+test('chapter generation saves anchors in the same single oracle request while strengthening is off',async()=>{
+    const f=fixture();f.seed();const requests=[];
+    f.run("buildUserPrompt=async()=> '测试上下文'");
+    f.c.window.StoryOracleAPI.run=async messages=>{requests.push(messages);return anchoredReply;};
+    assert.equal(await f.run('generateChapter({force:true,keep:0})'),true);
+    assert.equal(requests.length,1);assert.ok(requests[0][0].content.includes('剧情锚点:'));
+    assert.equal(f.run('settings().strengthenOutline'),false);
+    assert.deepEqual(Array.from(f.run('mainState()[MAIN_ANCHORS]')),['守卫收到旧信','印章来历明确']);
+    assert.equal(f.currentData().stat_data.故事导演.主线.剧情锚点,undefined);
+});
+
+test('strengthened chapter generation warns when one anchor contains multiple result-like clauses',async()=>{
+    const f=generationFixture();f.seed();
+    f.run("settings().strengthenOutline=true;buildUserPrompt=async()=> '测试上下文'");
+    f.c.window.StoryOracleAPI.run=async()=>anchoredReply.replace('守卫收到旧信','守卫收到旧信；当场认出寄信人');
+    assert.equal(await f.run('generateChapter({force:true,keep:0,quiet:false})'),true);
+    assert.ok(f.notices.some(n=>n.type==='warning'&&n.message.includes('每拍只写一个可验证结果')));
+    assert.equal(f.run('mainState()[MAIN_ANCHORS][0]'),'守卫收到旧信；当场认出寄信人');
+});
+
+for(const anchors of ['', '剧情锚点:\n1. 缺一项\n', '剧情锚点:\n1.\n2. 非空\n', '剧情锚点:\n1. 重复\n1. 编号\n'])
+test('incomplete generated anchors leave the previous plan intact without extra calls: '+JSON.stringify(anchors),async()=>{
+    const f=generationFixture();f.seed();let requests=0;
+    f.run("buildUserPrompt=async()=> '测试上下文'");
+    f.c.window.StoryOracleAPI.run=async()=>{requests++;return anchoredReply.replace(/剧情锚点:[\s\S]*?<\/StoryChapters>/,anchors+'</StoryChapters>');};
+    const before=f.run('JSON.stringify(settings().story)');
+    assert.equal(await f.run('generateChapter({force:true,keep:0})'),false);
+    assert.equal(requests,1);assert.equal(f.run('JSON.stringify(settings().story)'),before);
+    assert.ok(f.notices.some(n=>n.message.includes('剧情锚点')));
+});
+
+test('partial replans preserve played anchors and replace only remaining anchors, with the same beat cap',async()=>{
+    const f=fixture();f.seed();
+    f.run("settings().story.主线.当前拍=2;settings().story.主线.剧情锚点=['已演锚点','废弃锚点']");
+    f.c.reply=anchoredReply;
+    await f.run('applyChapter(chapterFromBlock(reply),{keep:1,quiet:true})');
+    assert.deepEqual(Array.from(f.run('mainState()[MAIN_BEATS]')),['第一拍','信使递信','守卫辨认印章']);
+    assert.deepEqual(Array.from(f.run('mainState()[MAIN_ANCHORS]')),['已演锚点','守卫收到旧信','印章来历明确']);
+    assert.equal(f.run('currentBeat(mainState())'),2);
+    await f.run('applyChapter(normalizeChapter({beats:Array.from({length:10},(_,i)=>"新拍"+i),anchors:Array.from({length:10},(_,i)=>"新锚"+i)}),{keep:1,quiet:true})');
+    assert.equal(f.run('mainState()[MAIN_ANCHORS].length'),f.run('BEAT_MAX'));
+    assert.equal(f.run('mainState()[MAIN_ANCHORS].length'),f.run('mainState()[MAIN_BEATS].length'));
+    await f.run('applyChapter(chapterFromBlock(reply),{restart:true,quiet:true})');
+    assert.deepEqual(Array.from(f.run('mainState()[MAIN_ANCHORS]')),['守卫收到旧信','印章来历明确']);
+    assert.equal(f.run('currentBeat(mainState())'),1);
+});
+
+test('the actual settings checkbox updates narrative guidance and the preflight contract immediately',()=>{
+    const f=fixture();f.seed();const slots={},listeners={};
+    const node={checked:true,addEventListener:(name,fn)=>{listeners[name]=fn;}};
+    const view={innerHTML:'',querySelector:selector=>selector==='[name="strengthen-outline"]'?node:null};
+    f.c.testPanel={hidden:true,querySelector:selector=>selector==='.sd-set-tab'?view:null};
+    f.c.setExtensionPrompt=(name,value)=>{slots[name]=value;};
+    f.run("settings().story.主线.剧情锚点=['当前独立锚点','未来独立锚点'];panel=testPanel;renderSetTab();syncMainInjection()");
+    const oldContract=slots[f.run('SLOT.contract')];
+    assert.ok(view.innerHTML.includes('大纲遵循强化'));assert.equal(node.checked,false);
+    node.checked=true;listeners.change();
+    assert.equal(f.run('settings().strengthenOutline'),true);
+    const text=slots[f.run('SLOT.main')];
+    assert.ok(text.includes('<本拍剧情锚点>当前独立锚点</本拍剧情锚点>'));
+    assert.ok(text.includes('章目标只用于判断方向'));assert.ok(!text.includes('未来独立锚点'));
+    const strongContract=slots[f.run('SLOT.contract')];
+    assert.notEqual(strongContract,oldContract);
+    assert.ok(strongContract.includes('<当前拍锚点>当前独立锚点</当前拍锚点>'));
+    assert.ok(strongContract.includes('只负责“写之前检查怎么推进”'));
+    assert.ok(strongContract.includes('最终正文的世界状态回报为准'));
+    assert.ok(!strongContract.includes('本拍完成：是 / 否'));
+    assert.ok(!strongContract.includes('未来独立锚点'));
+    f.run('panel=null');node.checked=false;listeners.change();
+    for(const key of ['main','contract'])assert.ok(!slots[f.run('SLOT.'+key)].includes('本拍剧情锚点'));
+    assert.equal(slots[f.run('SLOT.contract')],oldContract);
+});
+
+test('main form saves anchors without resetting unchanged beat progress and rejects mismatched entries',async()=>{
+    const f=generationFixture();f.seed();f.run("settings().story.主线.当前拍=2;settings().story.主线.本拍已落=true;settings().run.landedHold='第2拍'");
+    const values={'main-title':'当前章','main-beats':'1. 第一拍\n2. 第二拍','main-anchors':'1. 新锚一\n2. 新锚二'};
+    const view={querySelector:selector=>({value:values[selector.match(/name="([^"]+)"/)[1]] || ''})};
+    f.c.testPanel={hidden:true,querySelector:selector=>selector==='.sd-main-tab'?view:null};f.run('panel=testPanel;render=()=>{}');
+    await f.run('saveMainFromForm()');
+    assert.equal(f.run('currentBeat(mainState())'),2);
+    assert.deepEqual(Array.from(f.run('mainState()[MAIN_ANCHORS]')),['新锚一','新锚二']);
+    assert.equal(f.run('mainState()[KEY_BEAT_DONE]'),true);assert.equal(f.run('settings().run.landedHold'),'第2拍');
+    values['main-anchors']='1. 错误数量';const before=f.run('JSON.stringify(settings().story)');
+    await f.run('saveMainFromForm()');assert.equal(f.run('JSON.stringify(settings().story)'),before);
+    assert.ok(f.notices.some(n=>n.type==='warning'&&n.message.includes('逐条对应')));
+    values['main-beats']='';values['main-anchors']='';await f.run('saveMainFromForm()');
+    assert.equal(f.run('mainState()[MAIN_ANCHORS].length'),0);assert.equal(f.run('mainState()[MAIN_BEATS].length'),0);
+});
+
+test('strengthened outline warns about multi-result anchors without silently rewriting them',async()=>{
+    const f=generationFixture();f.seed();
+    f.run('settings().strengthenOutline=true');
+    const values={'main-title':'当前章','main-beats':'1. 第一拍','main-anchors':'1. 守卫收到旧信；当场认出寄信人'};
+    const view={querySelector:selector=>({value:values[selector.match(/name="([^"]+)"/)[1]] || ''})};
+    f.c.testPanel={hidden:true,querySelector:selector=>selector==='.sd-main-tab'?view:null};
+    f.run('panel=testPanel;render=()=>{}');
+    await f.run('saveMainFromForm()');
+    assert.equal(f.run('mainState()[MAIN_ANCHORS][0]'),'守卫收到旧信；当场认出寄信人');
+    assert.ok(f.notices.some(n=>n.type==='warning'&&n.message.includes('每拍只写一个可验证结果')));
 });
