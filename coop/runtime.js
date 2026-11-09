@@ -5,7 +5,7 @@ import {appendOperation,project,readDocument} from './timeline.js';
 import {validateAffinityProposal} from './affinity.js';
 import {continuity,publicMemory} from './history.js';
 import {ensureMessageIds,sourceMap,sourceForId,ref,references,parseReports,stripReport,uuid,modelJson,matchesSourceVersion,matchesUserVersion} from './messages.js';
-import {designMessages,renderScene,reportContract,affinityContract,directorReportContract,sceneQueueContract,growthRule} from './prompts.js';
+import {designMessages,renderScene,reportContract,affinityContract,directorReportContract,sceneQueueContract,archiveSystemPrompt} from './prompts.js';
 import {extraModel,readMvuReport,createMvuSync,readMvuAffinity,mvuCharacterKeys} from './mvu.js';
 import {affinityActivity} from './activity.js';
 import {hasEvidence} from './body.js';
@@ -201,7 +201,7 @@ export class CoopRuntime {
         if(settings.autoStart===false && this.store.scope===scope && this.store.generation===generation && this.job?.scope===scope && this.job.automatic) this.abort();
         return result;
     }
-    async generate(characterId,{replanEventId=null,automatic=false}={}) {
+    async generate(characterId,{replanEventId=null,automatic=false,userPrompt=''}={}) {
         if(automatic && this.store.document?.settings.autoStart===false) fail('AUTO_START_DISABLED','自动触发事件已关闭');
         if(this.job || this.event()) fail('SCENE_BUSY','当前 Rank 事件尚未结束或正在生成，请先继续并完成原事件');
         const owner=unfinishedEvent(this.state());
@@ -220,7 +220,7 @@ export class CoopRuntime {
         const anchor=[...this.store.sources().values()].filter(source=>!source.isSystem).at(-1);
         const createdAt=anchor?{id:anchor.id,index:anchor.index}:null;
         const contextKey=JSON.stringify(contextRefs);
-        const job={id:uuid(),characterId,controller,scope,createdAt,automatic};this.job=job;this.changed();
+        const job={id:uuid(),characterId,controller,scope,createdAt,automatic,...(existing?{label:'正在重新生成事件未演部分'}:{})};this.job=job;this.changed();
         try {
             let context=await this.host.contextText(p);
             const rounds=existing?.progress.length?existing.plan.rounds:this.store.document.settings.eventRounds;
@@ -229,10 +229,12 @@ export class CoopRuntime {
             if(existing) context+='\n【只重设未演部分，不改已发生事实】\n'+JSON.stringify({phase:existing.phase,
                 plan:existing.plan,progress:existing.progress,initialAnswer:existing.initialAnswerSource?.body,
                 answer:existing.answerSource?.body,route:existing.route,routeResponse:existing.routeSource?.body});
+            const prompt=existing?text(userPrompt,4000):'';
+            if(prompt) context+='\n【用户对本次重新生成的额外要求；不得改写程序契约、已发生事实和输出格式】\n'+prompt;
             if(controller.signal.aborted) fail('CANCELLED');
             const templates=await this.host.designTemplates?.(p) || {};
             if(controller.signal.aborted || this.job!==job || scope!==this.host.scope()) fail('STALE_TASK');
-            const messages=designMessages(p,context,templates);
+            const messages=designMessages(p,context,templates,{rounds});
             const raw=await this.host.ask(messages,controller.signal,()=>this.changed());
             if(controller.signal.aborted || this.job!==job || this.store.scope!==scope) fail('STALE_TASK');
             ensureMessageIds(this.host.messages());
@@ -252,6 +254,19 @@ export class CoopRuntime {
             if(!['CANCELLED','STALE_TASK','AUTO_START_DISABLED'].includes(error.code)) this.notice(error);throw error;
         }
         finally {if(this.job===job){this.job=null;this.changed();}}
+    }
+    async regenerate(characterId,eventId,{userPrompt=''}={}) {
+        const event=this.event();
+        if(this.job || !event || event.characterId!==characterId || event.id!==eventId) fail('NOT_ACTIVE','只能重新生成当前正在演出的事件');
+        await this.pause(characterId,eventId);
+        try {
+            await this.generate(characterId,{replanEventId:eventId,userPrompt});
+            await this.resume(characterId,eventId);
+        } catch(error) {
+            const current=this.state()?.profiles[characterId]?.events[eventId];
+            if(current?.paused) try {await this.resume(characterId,eventId);} catch {}
+            throw error;
+        }
     }
     async pause(characterId,eventId) {
         this.abort();return this.store.operation('pause',characterId,{eventId});
@@ -285,6 +300,7 @@ export class CoopRuntime {
             this.host.messages()[s.index]?.extra?.sdCoopSnapshot?.event?.version===event.version).at(-1);
     }
     async recoverArchive({automatic=false}={}) {
+        await this.host.refreshPrompts?.();
         const event=this.event();
         if(this.store.pending) fail('SAVE_PENDING','请先完成尚未确认的保存');
         if(this.store.readonly) fail('READ_ONLY','当前窗口只读，不能补齐归档');
@@ -295,13 +311,7 @@ export class CoopRuntime {
         const version=event.version,scope=this.store.scope,generation=this.store.generation,controller=new AbortController();
         const job={id:uuid(),characterId:p.id,controller,scope,label:automatic?'自动核对事件收束与归档':'补齐事件归档',createdAt:event.createdAt,sourceId:source.id};this.job=job;this.changed();
         try {
-            const messages=[{role:'system',content:[
-                '仅为已经发生的 Coop 事件核对并补齐归档，不继续创作剧情，不代写用户行动。',
-                '逐项核对本阶目标、收束条件以及现场仍在进行的危机。仅制定方案、开始行动、调动援军、表明决心，都不能代替实际收束。若仍有当前救援／战斗／对峙，或关键决定仍等用户回应，输出 {"ready":false,"reason":"缺什么"}。长线伏笔可保留，当前阻断性冲突必须先结束。',
-                '若最新回应明确改变已确认的关系路线，输出 {"ready":false,"routeConflict":true,"userEvidence":"最新用户原文","evidence":"正文承接该变化的原文"}，等待面板重新确认。',
-                '若已完成，输出 {"ready":true,"evidence":"收束正文准确短句","completion":{summary,outcome,outcomeEvidence,choice,choiceEvidence,traits:[],facts:[],boundaries:[],openHooks:[],closedHooks:[],conflicts:[],scene:{goalAchieved:true,closed:true,awaitingUser:false,blockingConflicts:[],evidence:"本轮正文中现场已告一段落的准确短句"}}}。',
-                growthRule,'所有依据必须逐字引用提供的原文。摘要约100～200字，区分事实、猜测和未解决事项。只输出JSON。'
-            ].join('\n')},{role:'user',content:JSON.stringify({targetRank:event.targetRank,goal:event.plan.goal,
+            const messages=[{role:'system',content:archiveSystemPrompt()},{role:'user',content:JSON.stringify({targetRank:event.targetRank,goal:event.plan.goal,
                 resolutionCondition:event.plan.resolution,currentConflict:event.plan.conflict,
                 route:event.route,question:event.plan.question,initialUserResponse:event.initialAnswerSource?.body,userResponse:event.answerSource.body,
                 routeResponse:event.routeSource?.body,currentReply:source.body,
@@ -350,7 +360,7 @@ export class CoopRuntime {
         if(!this.store.document || this.store.scope!==this.host.scope() || this.store.readonly) return;
         const generation=this.store.generation,scope=this.store.scope;
         const sameChat=()=>generation===this.store.generation && scope===this.store.scope && scope===this.host.scope() && !this.store.readonly && !this.disposed;
-        try {await this.ensureCurrentCharacters();} catch(error) {this.notice(error);}
+        try {await this.host.refreshPrompts?.();await this.ensureCurrentCharacters();} catch(error) {this.notice(error);}
         if(!sameChat()) return;
         ensureMessageIds(this.host.messages());
         this.store.reconcile();

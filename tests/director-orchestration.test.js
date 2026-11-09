@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import * as model from '../model.js';
 
 const source = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8');
-const { NS, EPIC, EP, INTERLUDE, IL, MAIN_TITLE, MAIN_BEATS, MAIN_CLOSED, KEY_BEAT, KEY_CHAPTER_DONE, KEY_READY } = model;
+const { NS, EPIC, EP, INTERLUDE, IL, MAIN_TITLE, MAIN_BEATS, MAIN_CLOSED, KEY_BEAT, KEY_BEAT_DONE, KEY_CHAPTER_DONE, KEY_READY } = model;
 const epicReply = '<StoryEpic>\n标题: 新的一部\n篇章: 新的矛盾与因果\n章内容:\n1. 新的起因与落点\n</StoryEpic>';
 
 // 执行实际编排函数，隔离酒馆导入、网络与界面；沿用已有 host / MVU 测试的 VM 方式。
@@ -223,4 +223,45 @@ test('settings-tab chapter count changes are saved as bounded integers', () => {
         assert.equal(h.s.chaptersPerEpic, expected);
         assert.equal(h.calls.length, saved + 1);
     }
+});
+
+test('strengthened outline does not veto a landing fact with a preflight receipt', async () => {
+    const h = fixture({ autoBeat: true, strengthenOutline: true });
+    h.context.landingReportedByReply = () => true;
+    h.s.run.beatAt = 9;
+    h.s.run.outlineReceipt = {
+        valid: true, landed: false, state: '通过', beat: 2, chapterTitle: '当前章', at: 10,
+    };
+    h.s.run.outlineHold = '旧版留下的强化门控提示';
+    await h.context.evaluateDirector();
+    assert.equal(h.main[KEY_BEAT], 3);
+    assert.equal(h.main[KEY_BEAT_DONE], false);
+    assert.equal(h.s.run.outlineHold, '');
+});
+
+test('manual chapter finish bypasses strengthened outline preflight state', async () => {
+    const h = fixture({ strengthenOutline: true });
+    h.s.run.outlineReceipt = { valid: false, landed: false, state: '缺铺垫' };
+    h.s.run.outlineHold = '这一拍还需要铺垫';
+    await h.context.finishChapter();
+    assert.equal(h.main[KEY_BEAT], h.main[MAIN_BEATS].length + 1);
+    assert.equal(h.main[KEY_CHAPTER_DONE], true);
+    assert.equal(h.main[KEY_READY], false, 'automatic interlude entry consumes chapter readiness');
+    assert.equal(h.main[MAIN_CLOSED], true);
+    assert.equal(h.s.story[INTERLUDE][IL.active], true);
+    assert.deepEqual(h.calls.filter(call => call !== 'save'), ['interlude']);
+    assert.equal(h.s.run.outlineReceipt, null);
+    assert.equal(h.s.run.outlineHold, '');
+});
+
+test('turning outline strengthening off preserves the existing landing path', async () => {
+    const h = fixture({ autoBeat: true, strengthenOutline: false });
+    h.context.landingReportedByReply = () => true;
+    h.s.run.beatAt = 9;
+    h.s.run.outlineReceipt = {
+        valid: true, landed: false, state: '通过', beat: 2, chapterTitle: '当前章', at: 10,
+    };
+    await h.context.evaluateDirector();
+    assert.equal(h.main[KEY_BEAT], 3);
+    assert.equal(h.s.run.outlineHold, '');
 });
