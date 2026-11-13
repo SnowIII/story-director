@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import * as model from '../model.js';
 import {createMessageRefreshQueue} from '../message-render.js';
+import {designTemplates} from '../coop/design-worldbook.js';
 
 const source=fs.readFileSync(new URL('../index.js',import.meta.url),'utf8');
 const code=source.slice(0,source.indexOf('\nlet appReady = false;'))
@@ -42,7 +43,7 @@ function fixture() {
     const seed=()=>run(`settings().story.主线={...emptyMain(),标题:'当前章',拍:['第一拍','第二拍'],当前拍:1};
         settings().story.史诗={...emptyEpic(),标题:'篇章A',章内容:['章一','章二','章三','章四']};
         settings().story.间章=emptyInterlude();`);
-    return {host,c,run,seed,currentData};
+    return {host,c,run,seed,currentData,events,api};
 }
 
 function generationFixture() {
@@ -51,6 +52,154 @@ function generationFixture() {
     f.c.window.StoryOracleAPI.run=async()=>{requests++;return '<StoryChapters>旧结果</StoryChapters>';};
     return {...f,notices,requests:()=>requests};
 }
+
+function coopModeFixture({onlyCoop=false}={}) {
+    const f=generationFixture(),slots={},listeners={},timers=[];
+    const power={classList:{toggle(){}},querySelector:selector=>({
+        addEventListener:(name,handler)=>{listeners[selector]=handler;},
+    })};
+    f.c.testPanel={hidden:true,querySelector:selector=>selector==='.sd-powerbar'?power:null,querySelectorAll:()=>[]};
+    f.c.document.body={};
+    f.c.window.setTimeout=(fn,delay)=>timers.push({fn,delay});
+    f.c.event_types.CHAT_CHANGED='chat_changed';
+    f.c.event_types.WORLDINFO_ENTRIES_LOADED='worldinfo_entries_loaded';
+    f.c.setExtensionPrompt=(slot,text)=>{slots[slot]=text;};
+    f.c.world_info={};
+    f.c.isGenerating=()=>false;
+    let oracleMode,activeMode=false,modeClicks=0;
+    const modeButton={hidden:false,classList:{contains:()=>activeMode},click:()=>{activeMode=false;modeClicks++;}};
+    const oracleHeader={dataset:{},firstChild:modeButton};
+    modeButton.parentNode=oracleHeader;
+    f.c.document.querySelector=selector=>selector==='#so-header-btns'?oracleHeader:null;
+    f.c.document.getElementById=id=>id==='so-story-director-btn'&&oracleMode?modeButton:null;
+    f.c.window.StoryOracleAPI.registerMode=mode=>{oracleMode=mode;return true;};
+    f.c.setPromptEntries=()=>{};
+    f.c.designTemplates=designTemplates;
+    let options,syncs=0;
+    f.c.createCoopSystem=value=>{
+        options=value;
+        const syncMvu=Object.assign(async()=>{syncs++;},{updateLive:()=>{}});
+        return {syncMvu,occupies:()=>false,injection:()=>'<Coop>演出</Coop>',variableContract:()=>'<Coop>好感契约</Coop>'};
+    };
+    f.run(`makeBubble=()=>{};makePanel=()=>{panel=testPanel};injectWandEntry=()=>{};exposeDiagnostics=()=>{};
+        settings().autoInstallBook=false;settings().autoUpdateBook=false;
+        ${onlyCoop?'settings().onlyCoop=true;':''}
+        init();renderPower();`);
+    const toggle=checked=>{
+        const target={checked};listeners['.sd-only-coop']({target});return target.checked;
+    };
+    const prompt=key=>slots[f.run('SLOT.'+key)];
+    const settle=()=>new Promise(resolve=>setImmediate(resolve));
+    return {...f,options,toggle,prompt,settle,syncs:()=>syncs,timers,oracleMode:()=>oracleMode,
+        modeButton,activateMode:()=>{activeMode=true;},modeClicks:()=>modeClicks};
+}
+
+test('the mode switch freezes saved story progress and leaves manual Coop and its prompts available',async()=>{
+    const f=coopModeFixture();await f.settle();f.seed();
+    f.run('saveStory();syncMainInjection()');
+    assert.equal(f.run('settings().onlyCoop'),false);
+    assert.ok(f.oracleMode());
+    assert.match(f.prompt('main'),/当前章/);
+    f.c.isGenerating=()=>true;
+    assert.equal(f.toggle(true),false);
+    f.c.isGenerating=()=>false;
+    for(const busy of ["beginGenerate('正在生成')",'evaluating=true','coop.job={}','coop.store={pending:true}']) {
+        f.run(busy);assert.equal(f.toggle(true),false);
+        f.run('endGenerate(genId);evaluating=false;delete coop.job;delete coop.store');
+    }
+    const story=f.run('JSON.stringify(settings().story)');
+    f.activateMode();
+    assert.equal(f.toggle(true),true);
+    assert.equal(f.modeButton.hidden,true);
+    assert.equal(f.modeClicks(),1);
+    assert.equal(f.run('settings().tab'),'coop');
+    assert.equal(f.prompt('main'),'');
+    assert.equal(f.prompt('contract'),'<Coop>好感契约</Coop>');
+    assert.equal(f.prompt('coop'),'<Coop>演出</Coop>');
+    assert.equal(f.options.autoAllowed(),true);
+    await f.run('generateChapter({force:true})');
+    await f.run('generateThread({force:true})');
+    assert.equal(f.requests(),0);
+    const run=f.run('JSON.stringify(settings().run)');
+    f.options.sceneChanged(true);f.host.chat.push({is_user:false,mes:'独立 Coop 正文'});f.options.sceneChanged(false);
+    assert.equal(f.run('JSON.stringify(settings().run)'),run);
+    f.run('setMaster(false)');
+    assert.equal(f.options.autoAllowed(),false);
+    assert.equal(f.prompt('coop'),'<Coop>演出</Coop>');
+    await f.options.ask([{role:'user',content:'手动设计 Coop'}],new AbortController().signal);
+    assert.equal(f.requests(),1);
+    assert.equal(f.run('JSON.stringify(settings().story)'),story);
+    assert.equal(f.toggle(false),false);
+    assert.equal(f.run('settings().onlyCoop'),false);
+    assert.equal(f.modeButton.hidden,false);
+    assert.match(f.prompt('main'),/当前章/);
+    await f.settle();
+});
+
+test('the mode switch stays locked until both pending MVU writes finish after namespace initialization',async()=>{
+    const f=coopModeFixture();await f.settle();
+    f.currentData().stat_data[model.NS]={};
+    const pending=[],replace=f.api.replaceMvuData;
+    f.api.replaceMvuData=(value,scope)=>new Promise(resolve=>{
+        pending.push({type:scope.type,finish:async()=>{await replace(value);resolve();}});
+    });
+    const initialized=f.run('ensureNamespace()');
+    await f.settle();
+    assert.deepEqual(pending.map(write=>write.type),['message']);
+    const complete=await Promise.race([initialized.then(()=>true),f.settle().then(()=>false)]);
+    assert.equal(complete,true);
+    assert.equal(f.toggle(true),false);
+    await pending.shift().finish();await f.settle();
+    assert.deepEqual(pending.map(write=>write.type),['chat']);
+    assert.equal(f.toggle(true),false);
+    await pending.shift().finish();await f.settle();
+    assert.equal(f.toggle(true),true);
+});
+
+test('a saved standalone Coop mode survives startup signals and filters only our worldbook injections',async()=>{
+    const f=coopModeFixture({onlyCoop:true});await f.settle();
+    assert.equal(f.syncs(),1);
+    assert.equal(f.oracleMode(),undefined);
+    const book='故事导演';
+    const entries=Object.freeze([
+        Object.freeze({world:book,comment:'[mvu_update] 剧情契约',content:'应屏蔽'}),
+        Object.freeze({world:book,name:'[InitVar] 剧情变量',content:'应屏蔽'}),
+        Object.freeze({world:'角色卡',comment:'[mvu_update] 角色契约',content:'应保留'}),
+        Object.freeze({world:book,comment:'[coop_rank_4]',enabled:true,content:'自定义蓝图'}),
+        Object.freeze({world:book,comment:'[coop_forms]',enabled:true,content:'自定义事件形式'}),
+    ]);
+    f.host.loadWorldInfo=async name=>{assert.equal(name,book);return {entries};};
+    const groups=Object.fromEntries(['globalLore','characterLore','chatLore','personaLore'].map(key=>[key,[...entries]]));
+    f.events.get('worldinfo_entries_loaded')(groups);
+    for(const group of Object.values(groups)) assert.deepEqual(group,entries.slice(2));
+    assert.deepEqual(await f.options.designTemplates({rank:0}),{forms:'自定义事件形式',blueprint:'自定义蓝图'});
+    f.host.name='chat-b';f.events.get('chat_changed')();
+    const incoming={stat_data:{[book]:{主线:{标题:'不要导入的旧章',当前拍:2,本拍已落:true}}}};
+    Object.assign(f.currentData(),structuredClone(incoming));
+    f.events.get('mag_variable_update_ended')(incoming);
+    f.events.get('mag_variable_initialized')();
+    model.setCoopMvuAuthority(true);
+    try {
+        const main={type:'set',args:[`${book}.主线.本拍已落`,'false']};
+        const affinity={type:'set',args:[`${book}.Coop.角色["画家"].好感度`,'20']};
+        const ownCard={type:'set',args:['角色卡.状态','"正常"']};
+        const commands=[main,affinity,ownCard];
+        f.events.get('mag_command_parsed')(incoming,commands);
+        assert.deepEqual(commands,[affinity,ownCard]);
+        assert.equal(incoming.stat_data[book].主线.本拍已落,true);
+    } finally { model.setCoopMvuAuthority(false); }
+    for(const timer of f.timers.splice(0)) if(timer.delay!==1500) timer.fn();
+    await f.settle();
+    assert.equal(f.run('settings().story.主线?.标题'),undefined);
+    assert.deepEqual(f.currentData(),incoming);
+    assert.equal(f.prompt('main'),'');
+    assert.equal(f.requests(),0);
+    f.toggle(false);
+    assert.ok(f.oracleMode());
+    const restored={globalLore:[...entries]};f.events.get('worldinfo_entries_loaded')(restored);
+    assert.deepEqual(restored.globalLore,entries);
+    await f.settle();
+});
 
 for(const kind of ['event','coop-job','story-job']) test('force-open explains '+kind+' without recording a failed chapter or resetting progress',async()=>{
     const f=generationFixture();f.seed();

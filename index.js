@@ -63,7 +63,7 @@ const SCHEMA_VERSION = 1;
  * 插件版本 —— **只用于显示**（真正的版本号在 `manifest.json`，酒馆按它判断有没有更新）。
  * ⚠ 改 manifest 的版本号时这里也要跟着改：`probe-about` 钉住了两者一致。
  */
-const VERSION = '0.48.0';
+const VERSION = '0.49.0';
 let coop = null;
 
 /** 我们自己的四个注入槽。故事神谕的引导用 'story_oracle_plan'，别的扩展也用各自的名字，互不占用。 */
@@ -252,6 +252,7 @@ const ORACLE_WORLDINFO_MODES = {
 
 const DEFAULT = {
     enabled: true,
+    onlyCoop: false,
     schema: SCHEMA_VERSION,
     tab: 'now',
     bubbleX: null,
@@ -972,6 +973,11 @@ async function pushTokens() {
  * `d` 就是 `mvuData()` 给的那份（含 `stat_data`）。
  */
 async function writeMvu(d) {
+    namespaceOperations++;
+    try { return await writeMvuImpl(d); } finally { namespaceOperations--; }
+}
+
+async function writeMvuImpl(d) {
     const api = mvu();
     if (!api?.replaceMvuData || !isPlainObject(d?.stat_data)) return false;
     coop?.syncMvu?.updateLive(d);
@@ -1000,8 +1006,10 @@ async function writeMvu(d) {
  * ⚠ 计划不再从 MVU 读 —— MVU 只提供 token（见文件上方那一大段分工说明）。
  */
 function rootOf(live = null) {
-    importStoryFromMvu();
-    if (live && isPlainObject(live.stat_data)) pullTokens(live);
+    if (!settings().onlyCoop) {
+        importStoryFromMvu();
+        if (live && isPlainObject(live.stat_data)) pullTokens(live);
+    }
     return { [NS]: storyNs() };
 }
 
@@ -1087,7 +1095,7 @@ async function patchInterlude(fields, _opts = {}) {
 
 /** 同步「间章时段之外不许写间章变量」这个开关（模型只能在自己那段幕里动它）。 */
 function syncInterludeWrites() {
-    setCoopScene(currentMode() === 'coop');
+    setCoopScene(settings().onlyCoop || currentMode() === 'coop');
     setInterludeWritesAllowed(currentMode() === 'interlude');
 }
 
@@ -1203,6 +1211,7 @@ function bindVariableInterception() {
  * 套用到**活变量**上（那一刻改的与 MVU 同源、不会被覆盖）。跳过 `_.add`，重放增量会翻倍。
  */
 function reconcileFromLatestMessage(live) {
+    if (settings().onlyCoop) return false;
     try {
         const root = live && isPlainObject(live.stat_data) ? live.stat_data : rootOf();
         if (!isPlainObject(root) || !Array.isArray(chat)) return false;
@@ -1287,6 +1296,11 @@ function stableJson(value) {
  * （老聊天只要开一次插件就修好了）。两边一样时不写。
  */
 async function syncNsToChat(live = null) {
+    namespaceOperations++;
+    try { return await syncNsToChatImpl(live); } finally { namespaceOperations--; }
+}
+
+async function syncNsToChatImpl(live = null) {
     const api = mvu();
     if (!api?.getMvuData || !api?.replaceMvuData) return false;
     try {
@@ -1315,7 +1329,15 @@ async function syncNsToChat(live = null) {
  *   · 第一次读时把老存档（计划整棵在 MVU 里）**搬进来**；
  *   · 补齐结构，然后把 token 推给 MVU（模型那一轮才知道第几拍、以及我们复位过的标记）。
  */
-async function ensureNamespace({ notify = false, live = null } = {}) {
+let namespaceOperations = 0;
+async function ensureNamespace(options = {}) {
+    if (settings().onlyCoop) return false;
+    namespaceOperations++;
+    try { return await ensureNamespaceImpl(options); } finally { namespaceOperations--; }
+}
+
+async function ensureNamespaceImpl({ notify = false, live = null } = {}) {
+    if (settings().onlyCoop) return false;
     const api = mvu();
     // ★ **先看有没有回退**（删楼 / 回退一层），而且必须在**任何写 MVU 之前**：
     //   否则我们会先把手里的旧进度推回去，把「快照里那个更早的进度」覆盖掉，就再也退不回来了
@@ -1769,7 +1791,7 @@ function substitute(text) {
  * 支线/插曲按开关与数量注入，位置都在主线之后 —— 冲突时以主线为准。
  */
 function buildInjection(live = null) {
-    if (coop?.occupies()) return '';
+    if (settings().onlyCoop || coop?.occupies()) return '';
     const s = settings();
     const root = rootOf(live);
     const main = mainOf(root);
@@ -1905,7 +1927,7 @@ function syncMainInjection() {
         const mainBeat = currentBeat(main);
         const chapterClosing = strengthenOutline && currentMode() === 'main'
             && mainBeats.length > 0 && mainBeat > mainBeats.length;
-        const mainContract = s.injectContract
+        const mainContract = !s.onlyCoop && s.injectContract
             ? substitute(renderContractSection({
                 banUserAction: settings().banUserAction !== false,
                 mode: currentMode(),
@@ -3294,6 +3316,7 @@ function justAborted(ms = 10000) {
 
 /** 正常等待不算生成失败；手动操作需要说明具体占用者，自动检查保持安静。 */
 function generationBlockReason(label = '剧情') {
+    if (settings().onlyCoop && !String(label).startsWith('Coop')) return '独立 Coop 模式下不能生成剧情导演内容，请先关闭该模式。';
     if (coop?.occupies() && !String(label).startsWith('Coop')) {
         const event = coop.event?.();
         if (event) {
@@ -4587,6 +4610,7 @@ function noteAttempt(ok, error) {
  *   4. 自动续支线 / 插曲：按回复数节奏补充（有并发上限）。
  */
 async function evaluateDirector({ live = null } = {}) {
+    if (settings().onlyCoop) { syncMainInjection(); return; }
     if (coop?.occupies()) { syncMainInjection(); return; }
     if (evaluating) return;
     evaluating = true;
@@ -5053,6 +5077,8 @@ function pinModeButtonFirst() {
         const hdr = document.querySelector('#so-header-btns');
         const btn = document.getElementById(`so-${ORACLE_MODE_ID}-btn`);
         if (!hdr || !btn || !btn.parentNode) return false;
+        if (settings().onlyCoop && btn.classList.contains(`so-${ORACLE_MODE_ID}-active`)) btn.click();
+        btn.hidden = !!settings().onlyCoop;
         if (hdr.firstChild === btn) return true;          // 已经是最左
         hdr.insertBefore(btn, hdr.firstChild);
         return true;
@@ -5290,6 +5316,7 @@ function registerOracleAction(api) {
         icon: 'fa-solid fa-clapperboard',
         title: '采用为本故事的下一章',
         onClick: (_el, raw) => {
+            if (settings().onlyCoop) { toast('独立 Coop 模式下不能采用剧情章节。', 'info'); return; }
             const blocks = parseBlocks(raw, 'StoryChapters');
             if (!blocks.length) {
                 toast('这条回复里没有 <StoryChapters> 区块——在「故事导演」模式里让它设计一章。', 'warning');
@@ -5307,7 +5334,7 @@ function registerOracleAction(api) {
 }
 
 function registerOracleMode(api) {
-    if (modeRegistered || typeof api?.registerMode !== 'function') return;
+    if (settings().onlyCoop || modeRegistered || typeof api?.registerMode !== 'function') return;
     const ok = api.registerMode({
         id: ORACLE_MODE_ID,
         title: '故事导演',
@@ -5385,6 +5412,7 @@ function connectOracle() {
 /** 接上所有可能送达「MVU 变量更新完」的信号，外加不依赖事件总线的兜底。 */
 function bindDirectorSignals() {
     const onEnded = (variables) => {
+        if (settings().onlyCoop) return;
         window.setTimeout(() => stripStatusEchoFromLatest(), 200);
         const live = variables && isPlainObject(variables.stat_data) ? variables : null;
         if (live && settings().enabled) void ensureNamespace({ live });
@@ -5402,6 +5430,7 @@ function bindDirectorSignals() {
     for (const name of ['message_received', 'message_edited', 'message_swiped']) {
         try {
             eventSource?.on?.(name, (id) => {
+                if (settings().onlyCoop) return;
                 if (typeof id !== 'number') { window.setTimeout(() => stripStatusEchoFromLatest(), 300); return; }
                 window.setTimeout(() => stripStatusEcho(id), 250);
                 window.setTimeout(() => stripStatusEcho(id), 4000);
@@ -6081,7 +6110,9 @@ function renderTabs() {
         s.tab = 'main';
         save();
     }
+    if (s.onlyCoop && !['coop', 'set', 'about'].includes(s.tab)) s.tab = 'coop';
     panel.querySelectorAll('.sd-tab').forEach((button) => {
+        button.hidden = s.onlyCoop && !['coop', 'set', 'about'].includes(button.dataset.tab);
         button.classList.toggle('is-active', button.dataset.tab === s.tab);
     });
     panel.querySelectorAll('.sd-page').forEach((page) => {
@@ -6125,7 +6156,7 @@ function setMaster(want, { notify = true } = {}) {
     s.autoDirector = next;
     // ★ 拨到「开」＝**重新就位**（见 run.armedAt）：否则在一个已经聊了几百轮的聊天里
     //   打开它，第一轮心跳就会立刻烧一次生成。
-    if (next) armNow(s.run);
+    if (next && !s.onlyCoop) armNow(s.run);
     // ★ 0.27.7：关掉时顺手把自带世界书从全局挂载里摘掉，开回来时再挂回去（用户提的）。
     const bookNote = syncBookWithMaster(next);
     save();
@@ -6133,7 +6164,7 @@ function setMaster(want, { notify = true } = {}) {
     render();
     if (notify) {
         toast(next
-            ? `总开关已打开：插件会自己推进剧情（定篇章 / 开章 / 换拍 / 支线 / 插曲）。${bookNote}`
+            ? (s.onlyCoop ? `总开关已打开：允许自动 Coop，剧情导演仍暂停。${bookNote}` : `总开关已打开：插件会自己推进剧情（定篇章 / 开章 / 换拍 / 支线 / 插曲）。${bookNote}`)
             : `总开关已关闭：不再自己调模型（不再花钱）；注入与手动按钮照常。${bookNote}`,
         next ? 'success' : 'info');
     }
@@ -6217,14 +6248,28 @@ function renderPower() {
     host.classList.toggle('is-off', !on);
     host.innerHTML = `
         <button type="button" class="sd-power" aria-pressed="${on ? 'true' : 'false'}"
-            title="${on ? '点一下 = 关掉总开关：插件不再自己调模型' : '点一下 = 打开总开关：插件会自己推进剧情'}">
+            title="${on ? '点一下 = 关掉总开关：插件不再自己调模型' : (settings().onlyCoop ? '点一下 = 允许自动 Coop' : '点一下 = 打开总开关：插件会自己推进剧情')}">
             <span class="sd-power-dot">⏻</span>
             <span class="sd-power-label">总开关 · ${on ? '开' : '关'}</span>
         </button>
-        <span class="sd-power-hint">${on
-            ? '它正在自己推进：定篇章 / 开章 / 换拍 / 支线 / 插曲。不想让它烧，就点左边关掉。'
-            : '已关：不会自己调模型（不花钱）。注入与手动按钮照常 —— 点左边重新打开。'}</span>`;
+        <span class="sd-power-hint">${settings().onlyCoop
+            ? (on ? '独立 Coop：允许自动 Coop；剧情导演暂停。' : '独立 Coop：自动调用已暂停，手动 Coop 仍可使用。')
+            : (on ? '它正在自己推进：定篇章 / 开章 / 换拍 / 支线 / 插曲。' : '已关：不会自己调模型，注入与手动按钮照常。')}</span>
+        <label><input type="checkbox" class="sd-only-coop" ${settings().onlyCoop ? 'checked' : ''}> 只使用 Coop</label>`;
     host.querySelector('.sd-power')?.addEventListener('click', () => { toggleMaster(); });
+    host.querySelector('.sd-only-coop')?.addEventListener('change', (event) => {
+        if (isGenerating() || storyGenerating || evaluating || namespaceOperations || coop?.job || coop?.store?.pending) {
+            event.target.checked = !!settings().onlyCoop;
+            toast('正在生成或处理剧情，请等待结束后再切换模式。', 'info');
+            return;
+        }
+        settings().onlyCoop = event.target.checked;
+        settings().tab = settings().onlyCoop ? 'coop' : 'now';
+        if (!settings().onlyCoop) registerOracleMode(oracleApi());
+        pinModeButtonFirst();
+        save(); syncMainInjection(); render();
+        if (!settings().onlyCoop) { void ensureNamespace(); void evaluateDirector(); }
+    });
     renderBusyBar();
 }
 
@@ -6446,7 +6491,13 @@ async function forceOpenStory() {
  *
  * @returns {Promise<{story: object|null, message: object|null, chat: object|null, changed: boolean}>}
  */
-async function migrateLegacyKeysBothScopes({ notify = false } = {}) {
+async function migrateLegacyKeysBothScopes(options = {}) {
+    if (settings().onlyCoop) return;
+    namespaceOperations++;
+    try { return await migrateLegacyKeysBothScopesImpl(options); } finally { namespaceOperations--; }
+}
+
+async function migrateLegacyKeysBothScopesImpl({ notify = false } = {}) {
     const api = mvu();
     const report = { story: null, message: null, chat: null, pace: null, changed: false };
     // ③′ 换拍节奏的迁移，**一个版本标记只做一步**（顺序执行、绝不互相打架）。
@@ -7323,6 +7374,7 @@ async function askCoop(messages, signal) {
     }
 }
 function coopSceneChanged(occupied) {
+    if (settings().onlyCoop) return;
     const s = settings(), count = aiMessageCount(), rt = s.run;
     if (occupied) {
         if (!Number.isFinite(rt.coopPausedAt)) rt.coopPausedAt = count;
@@ -7378,11 +7430,11 @@ function init() {
         await ensureNamespace();
         void coop.syncMvu();
         // ★ 老存档的旧字段名（`史诗.总纲`）改掉 —— 两个存放位置都过一遍（见 0.21.1 的事故说明）。
-        void migrateLegacyKeysBothScopes();
+        if (!settings().onlyCoop) void migrateLegacyKeysBothScopes();
         syncMainInjection();
         if (!panel.hidden) render();
         void evaluateDirector();
-        window.setTimeout(() => cleanupStatusEchoInChat({ notify: true }), 2500);
+        window.setTimeout(() => { if (!settings().onlyCoop) cleanupStatusEchoInChat({ notify: true }); }, 2500);
     });
     try {
         eventSource?.on?.(event_types.CHAT_CHANGED, () => {
@@ -7394,8 +7446,19 @@ function init() {
             void ensureNamespace();
             injectWandEntry();          // 换聊天时菜单可能被 ST 重建过：顺手补一颗（幂等）
             window.setTimeout(() => { void evaluateDirector(); }, AFTER_MVU_DELAY);
-            window.setTimeout(() => cleanupStatusEchoInChat({ notify: true }), 2500);
+            window.setTimeout(() => { if (!settings().onlyCoop) cleanupStatusEchoInChat({ notify: true }); }, 2500);
             if (!panel.hidden) render();
+        });
+        eventSource?.on?.(event_types.WORLDINFO_ENTRIES_LOADED, (groups) => {
+            if (!settings().onlyCoop) return;
+            for (const key of ['globalLore', 'characterLore', 'chatLore', 'personaLore']) {
+                const entries = groups?.[key];
+                if (!Array.isArray(entries)) continue;
+                for (let i = entries.length - 1; i >= 0; i--) {
+                    const entry = entries[i];
+                    if (entry?.world === PLUGIN_WORLD && /\[(?:mvu_update|InitVar)\]/i.test(String(entry.comment ?? entry.name ?? ''))) entries.splice(i, 1);
+                }
+            }
         });
         eventSource?.on?.(event_types.WORLDINFO_SETTINGS_UPDATED, async () => {
             await readOurWorldbookEntries(); syncMainInjection();

@@ -78,6 +78,9 @@
     scrollbar-width: thin;
     flex: 0 0 auto;
 }
+#so-story-director-btn[hidden],
+#story-director-panel .sd-tab[hidden] { display: none !important; }
+
 #story-director-panel .sd-tab {
     flex: 0 0 auto;
     min-width: 52px;
