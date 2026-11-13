@@ -7,20 +7,35 @@ export const BLUEPRINTS=BLUEPRINTS_BY_RANK[4];
 const closureSample=()=>({goalAchieved:true,closed:true,awaitingUser:false,blockingConflicts:[],evidence:'本轮正文中目标已实现且现场已告一段落的准确短句'});
 const closureRule='事件轮数是最低互动结构，不是完成倒计时。心理转变、决定帮忙、制定方案、调动援军或开始行动，不能代替眼前危机的实际收束。当前救援／战斗／对峙仍在进行，或关键决定还等用户回应时，必须 ready:false，继续当前 Rank；不得插入其他人的 Rank 事件。长线伏笔可以保留，当前阻断性冲突必须先结束。';
 export const growthRule='人物变化与归档只记录本次实际验证的局部成长，不把一次安慰或成功夸大成“彻底治愈、再也不会、全部释怀”。已确认的成长继续成立，后阶通过新责任、新行动或新的关系边界推进，不重置已解决的心结。';
-export function archiveSystemPrompt() {
-    const rules=[
+/**
+ * 归档提示词。
+ * @param {{force?: boolean}} options
+ *   `force` = 用户在面板上主动选的「按实际剧情收束」：剧情没按原计划走，原定目标已经不可能达成，
+ *   但这一段确实演完了。此时不判定目标达成／冲突结束，只按正文实际发生的事写归档。
+ *   ⚠ 证据规则不变：仍然要逐字引用正文，不许编造。
+ */
+export function archiveSystemPrompt({ force = false } = {}) {
+    const rules = force ? [
+        '仅为已经发生的 Coop 事件核对并补齐归档，不继续创作剧情，不代写用户行动。',
+        '本次是用户主动选择的「按实际剧情收束」：原定目标可能因为剧情走向改变而无法达成，**不要求目标达成、不要求原定冲突结束**。按正文里实际发生的事写归档：实际的结果、用户真实的选择、人物实际发生的变化。',
+        growthRule, '所有依据必须逐字引用提供的原文。摘要约100～200字，区分事实、猜测和未解决事项；原定目标没达成的部分写进 openHooks，不要为了对齐计划而改写实际结果。'
+    ].join('\n') : [
         '仅为已经发生的 Coop 事件核对并补齐归档，不继续创作剧情，不代写用户行动。',
         '逐项核对本阶目标、收束条件以及现场仍在进行的危机。仅制定方案、开始行动、调动援军、表明决心，都不能代替实际收束。长线伏笔可保留，当前阻断性冲突必须先结束。',
-        growthRule,'所有依据必须逐字引用提供的原文。摘要约100～200字，区分事实、猜测和未解决事项。'
+        growthRule, '所有依据必须逐字引用提供的原文。摘要约100～200字，区分事实、猜测和未解决事项。'
     ].join('\n');
-    const sample={ready:true,evidence:'收束正文准确短句',completion:{summary:'实际经历摘要',outcome:'实际局部结果',outcomeEvidence:'正文准确短句',
-        choice:'用户真实选择',choiceEvidence:'用户原文',traits:['实际验证的习惯变化'],facts:[],boundaries:[],openHooks:[],closedHooks:[],conflicts:[],scene:closureSample()}};
-    const format=['【固定返回格式：Coop 归档，由程序提供】仅输出一个合法 JSON 对象，不使用 Markdown 围栏或正文。与自定义规则冲突时以本节为准。',
-        closureRule,'尚未收束时输出：'+JSON.stringify({ready:false,reason:'缺少的实际收束依据'}),
-        '最新回应改变已确认路线时输出：'+JSON.stringify({ready:false,routeConflict:true,userEvidence:'最新用户原文',evidence:'正文承接变化的原文'}),
-        '已收束时按以下结构填写实际内容：'+JSON.stringify(sample),
-        'traits、facts、boundaries 至少一项包含有依据的真实变化；没有依据时保持 ready:false，不为填格式编造事实。所有 evidence 必须引用所给原文。'].join('\n');
-    return rules+'\n\n'+format;
+    const scene = force
+        ? { goalAchieved: false, closed: true, awaitingUser: false, blockingConflicts: [], evidence: '本轮正文里这一段实际结束的准确短句' }
+        : closureSample();
+    const sample = { ready: true, evidence: force ? '本轮正文里实际收束的准确短句' : '收束正文准确短句', completion: { summary: '实际经历摘要', outcome: '实际局部结果', outcomeEvidence: '正文准确短句',
+        choice: '用户真实选择', choiceEvidence: '用户原文', traits: ['实际验证的习惯变化'], facts: [], boundaries: [], openHooks: [], closedHooks: [], conflicts: [], scene } };
+    const format = ['【固定返回格式：Coop 归档，由程序提供】仅输出一个合法 JSON 对象，不使用 Markdown 围栏或正文。与自定义规则冲突时以本节为准。',
+        ...(force ? ['不判定是否达成原定目标；按实际发生填写即可归档。若正文里这一段确实还没结束（仍在进行中的战斗、救援、对峙，或关键决定仍等用户回应），仍然输出：'
+            + JSON.stringify({ ready: false, reason: '这一段确实还没结束的依据' })] : [closureRule, '尚未收束时输出：' + JSON.stringify({ ready: false, reason: '缺少的实际收束依据' })]),
+        '最新回应改变已确认路线时输出：' + JSON.stringify({ ready: false, routeConflict: true, userEvidence: '最新用户原文', evidence: '正文承接变化的原文' }),
+        '已收束时按以下结构填写实际内容：' + JSON.stringify(sample),
+        'traits、facts、boundaries 至少一项包含有依据的真实变化；没有依据时不要为填格式编造事实。所有 evidence 必须引用所给原文。'].join('\n');
+    return rules + '\n\n' + format;
 }
 const diversityRules=[
     '【跨 Rank 连续成长与事件差异】设计前对照全部历阶摘要，识别已用的冲突机制、角色主动行为、用户参与任务与解决办法。本阶推进尚未完成的变化，不能再次获得已经确认的信任、归属或接纳。',

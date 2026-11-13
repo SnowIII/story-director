@@ -121,7 +121,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
                 '好感 '+p.affinity+' 已锁定。事件结束并归档成功后解锁。')+'</p>'+
             (event.phase==='waiting_route' || event.phase==='resolution' && event.targetRank===rankPolicy(p).relationshipRank?'<p>请根据你的真实回应确认关系路线。确认后继续聊天，演绎收束；改变心意时可以重新选择。</p>'+
                 '<button data-action="route" data-route="friendship">确认为挚友／伙伴</button> <button data-action="route" data-route="romance">确认为恋人</button>':'')+
-            (event.phase==='resolution'?'<p>当前目标与现场危机实际收束后才会归档。仅制定方案或开始行动会继续当前事件，其他 Rank 保持排队；也可手动核对。</p><button data-action="archive">核对并补齐归档</button>':'')+
+            (event.phase==='resolution'?'<p>当前目标与现场危机实际收束后才会归档。仅制定方案或开始行动会继续当前事件，其他 Rank 保持排队；也可手动核对。</p><button data-action="archive">核对并补齐归档</button>'+' <button data-action="force-archive" title="剧情没按原计划走、原定目标已经不可能达成时用：按正文实际发生的事写下这一阶的归档，正常加一阶并解锁">按实际剧情收束</button>':'')+
             '<div class="sdc-actions"><button data-action="pause" data-id="'+esc(p.id)+'" data-event="'+esc(event.id)+'">暂停演出</button>'+
             '<button data-action="regenerate" data-id="'+esc(p.id)+'" data-event="'+esc(event.id)+'" title="保留已经发生的剧情和选择，只重设尚未演出的部分">重新生成事件</button></div>'+
             '<details><summary>幕后计划（包含剧透）</summary><pre>'+esc(JSON.stringify(plan,null,2))+'</pre></details>';
@@ -138,6 +138,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
             '<p>未回收伏笔：'+esc(p.openHooks.join('；') || '尚无')+'</p>'+
             (p.history.length?p.history.map(h=>'<article class="sdc-card"><strong>Rank '+h.rank+'</strong><p>'+esc(h.summary)+'</p>'+
                 (h.createdAt?'<p class="sdc-field-help">创建时楼层：#'+h.createdAt.index+'</p>':'')+
+                (h.closedBy==='force'?'<p class="sdc-field-help">本阶按实际剧情收束：原定目标未达成，档案按正文实际发生的事记录。</p>':'')+
                 '<p>实际选择：'+esc(h.choice)+'</p><p>结果：'+esc(h.outcome)+'</p>'+
                 '<p>未解决：'+esc(h.openHooks.join('；') || '无')+'</p><p>已回收：'+esc(h.closedHooks.join('；') || '无')+'</p>'+
                 '<details><summary>修正本阶摘要</summary><form data-summary="'+esc(h.eventId)+'" data-character="'+esc(p.id)+'">'+
@@ -231,6 +232,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         if(action==='resume') run(()=>runtime.resume(key,button.dataset.event));
         if(action==='route') run(()=>runtime.route(button.dataset.route));
         if(action==='archive') run(()=>runtime.recoverArchive());
+        if(action==='force-archive') run(()=>runtime.recoverArchive({force:true}));
         if(action==='abort') runtime.abort();
         if(action==='retry') run(async()=>{await runtime.store.retrySave();await runtime.ensureCurrentCharacters();render();});
         if(action==='takeover') run(()=>runtime.takeover());
