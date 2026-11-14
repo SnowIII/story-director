@@ -292,40 +292,54 @@ export class CoopRuntime {
             document.summaryEdits[eventId]={summary,version:h.summaryVersion+1,sourceVersion:h.source.version,reviewedAt:Date.now()};
         });
     }
-    archiveSource(event=this.event()) {
+    /**
+     * 「用户回应之后的那段收束正文」。
+     * @param {object} event
+     * @param {{force?: boolean}} [options]
+     *   `force`（按实际剧情收束）时不再要求楼层快照里的 `event.version` 与当前一致 ——
+     *   暂停／继续／重新生成都会抬 version，抬过之后严格比对就找不到任何正文，
+     *   于是「手动核对」永远报「尚无收束正文」。强制收束本来就是按实际剧情写，不依赖当时那份计划。
+     */
+    archiveSource(event=this.event(),{force=false}={}) {
         if(!event?.answerSource) return null;
         return [...this.store.sources().values()].filter(s=>!s.isUser && !s.isSystem && s.userId===event.answerSource.id &&
             s.index>event.answerSource.index && this.host.messages()[s.index]?.extra?.sdCoopSnapshot?.event?.id===event.id &&
             this.host.messages()[s.index]?.extra?.sdCoopSnapshot?.event?.phase==='resolution' &&
-            this.host.messages()[s.index]?.extra?.sdCoopSnapshot?.event?.version===event.version).at(-1);
+            (force || this.host.messages()[s.index]?.extra?.sdCoopSnapshot?.event?.version===event.version)).at(-1);
     }
-    async recoverArchive({automatic=false}={}) {
+    /**
+     * @param {{automatic?: boolean, force?: boolean}} [options]
+     *   `force` = 「按实际剧情收束」：剧情没按原计划走、原定目标已经不可能达成，但这一段确实演完了。
+     *   不再要求目标达成／现场冲突结束，只要求证据仍能引到正文、成长仍有依据。
+     */
+    async recoverArchive({automatic=false,force=false}={}) {
         await this.host.refreshPrompts?.();
         const event=this.event();
         if(this.store.pending) fail('SAVE_PENDING','请先完成尚未确认的保存');
         if(this.store.readonly) fail('READ_ONLY','当前窗口只读，不能补齐归档');
         if(this.disposed || this.store.scope!==this.host.scope()) fail('STALE_TASK');
         if(!event || event.phase!=='resolution' || this.job) fail('NOT_READY','只在已有真实收束正文但归档回报不完整时使用');
-        const p=profileOf(this.state(),event.characterId),source=this.archiveSource(event);
+        const p=profileOf(this.state(),event.characterId),source=this.archiveSource(event,{force});
         if(!source) fail('INVALID_SOURCE','尚无用户回应后的收束正文，请继续当前事件');
         const version=event.version,scope=this.store.scope,generation=this.store.generation,controller=new AbortController();
-        const job={id:uuid(),characterId:p.id,controller,scope,label:automatic?'自动核对事件收束与归档':'补齐事件归档',createdAt:event.createdAt,sourceId:source.id};this.job=job;this.changed();
+        const job={id:uuid(),characterId:p.id,controller,scope,label:automatic?'自动核对事件收束与归档':force?'按实际剧情收束':'补齐事件归档',createdAt:event.createdAt,sourceId:source.id};this.job=job;this.changed();
         try {
-            const messages=[{role:'system',content:archiveSystemPrompt()},{role:'user',content:JSON.stringify({targetRank:event.targetRank,goal:event.plan.goal,
+            const messages=[{role:'system',content:archiveSystemPrompt({force})},{role:'user',content:JSON.stringify({targetRank:event.targetRank,goal:event.plan.goal,
                 resolutionCondition:event.plan.resolution,currentConflict:event.plan.conflict,
                 route:event.route,question:event.plan.question,initialUserResponse:event.initialAnswerSource?.body,userResponse:event.answerSource.body,
                 routeResponse:event.routeSource?.body,currentReply:source.body,
+                ...(force?{closureMode:'force',note:'用户选择按实际剧情收束：原定目标可能已无法达成，按正文实际发生的收束填写'}:{}),
                 earlierActs:event.progress.map(v=>({phase:v.phase,evidence:v.evidence})),history:continuity(p)})}];
             const raw=await this.host.ask(messages,controller.signal);
             const currentSource=this.store.sources().get(source.id);
             if(controller.signal.aborted || this.job!==job || this.store.scope!==scope || this.host.scope()!==scope ||
                 this.store.generation!==generation || this.store.readonly || this.disposed || this.event()?.id!==event.id ||
-                this.event()?.version!==version || !matchesSourceVersion(currentSource,source.version) ||
+                (!force && this.event()?.version!==version) || !matchesSourceVersion(currentSource,source.version) ||
                 !matchesUserVersion(currentSource,source.userVersion)) fail('STALE_TASK');
             const result=modelJson(raw);
             if(automatic && result.ready===false && result.routeConflict!==true) return false;
             if(result.ready!==true && result.routeConflict!==true) fail('NOT_COMPLETE',text(result.reason,400) || '当前正文尚未达到收束条件');
-            await this.store.operation('beat',p.id,{eventId:event.id,characterId:p.id,eventVersion:version,requireSceneClosure:true,
+            await this.store.operation('beat',p.id,{eventId:event.id,characterId:p.id,eventVersion:this.event()?.version ?? version,requireSceneClosure:!force,
                 phase:'resolution',source,evidence:result.evidence,completion:result.completion,
                 routeConflict:result.routeConflict,userEvidence:result.userEvidence},references(source),
                 'archive:'+event.id+':'+source.id+':'+source.version);

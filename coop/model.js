@@ -248,6 +248,8 @@ export function completeEvent(state,input,{replay=false}={}) {
     }
     const history={rank:e.targetRank,eventId:e.id,summary,summaryVersion:1,outcome,choice,traits,facts,boundaries,openHooks,closedHooks,
         ...(e.createdAt?{createdAt:clone(e.createdAt)}:{}),
+        // 「按实际剧情收束」：用户主动跳过「原定目标达成」这道门时在档案里留痕（档案页显示一句说明）。
+        ...(input.requireSceneClosure===false?{closedBy:'force'}:{}),
         route:e.route || p.route,source:clone(s),initialAnswerSource:clone(e.initialAnswerSource || e.answerSource),
         answerSource:clone(e.answerSource),sharedFacts:shared};
     if(p.history.some(h=>h.rank===e.targetRank || h.eventId===e.id)) fail('ALREADY_COMMITTED');
