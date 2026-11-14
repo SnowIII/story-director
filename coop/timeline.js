@@ -1,5 +1,5 @@
 import {SCHEMA,MODES,clone,fail,hash,object,thresholds,id,initialState,applyAffinity,activateGate,adoptPlan,pauseEvent,resumeEvent,
-    acceptAnswer,chooseRoute,acceptBeat,replanEvent,assertState,activeEvent,unfinishedEvent,rankPolicy} from './model.js';
+    acceptAnswer,chooseRoute,acceptBeat,replanEvent,assertState,activeEvent,unfinishedEvent,isTerminalEvent,rankPolicy} from './model.js';
 import {matchesSourceVersion} from './messages.js';
 export function newDocument(scope) {
     return {schemaVersion:SCHEMA,scope,revision:0,roster:{},journal:[],settings:{autoStart:true,eventRounds:3},updatedAt:null};
@@ -21,14 +21,23 @@ export function validRefs(refs,sources) {
 }
 /** 楼层号用于显示，删除判断使用消息 ID；中间删楼后编号会改变。 */
 export function deletedEventIds(document,sources) {
-    const plans=document.journal.filter(op=>op.kind==='plan'),cuts=new Map();
-    for(const op of plans) {
+    const plans=document.journal.flatMap((op,index)=>op.kind==='plan' && op.confirmed!==false?[{op,index}]:[]),cuts=[];
+    for(const {op,index} of plans) {
         const anchor=op.data.createdAt?.id || op.refs?.[0]?.id;
         if(anchor && !sources.has(anchor) || (op.refs || []).some(ref=>!sources.has(ref.id))) {
-            cuts.set(op.characterId,Math.min(cuts.get(op.characterId) ?? Infinity,op.data.plan.targetRank));
+            cuts.push({characterId:op.characterId,rank:op.data.plan.targetRank,index});
         }
     }
-    return new Set(plans.filter(op=>op.data.plan.targetRank>=(cuts.get(op.characterId) ?? Infinity)).map(op=>op.data.eventId));
+    // A deleted failure report restores its original attempt; only later attempts
+    // depend on that failure. Never remove an earlier failed attempt at the same Rank.
+    document.journal.forEach((op,index)=>{
+        if(op.kind!=='beat' || op.data?.failed!==true || op.confirmed===false ||
+            !(op.refs || []).some(ref=>!sources.has(ref.id))) return;
+        const plan=plans.find(entry=>entry.op.data.eventId===op.data.eventId)?.op;
+        if(plan) cuts.push({characterId:op.characterId,rank:plan.data.plan.targetRank,index:index+1});
+    });
+    return new Set(plans.filter(({op,index})=>cuts.some(cut=>cut.characterId===op.characterId &&
+        index>=cut.index && op.data.plan.targetRank>=cut.rank)).map(({op})=>op.data.eventId));
 }
 export function pruneDeletedEvents(document,sources) {
     const removed=deletedEventIds(document,sources);
@@ -42,13 +51,15 @@ export function roleSignature(state,characterId) {
     const p=state.profiles[characterId];
     if(!p) return '';
     return hash(JSON.stringify({rank:p.rank,affinity:p.affinity,lock:p.lock,
-        history:p.history.map(h=>h.eventId),events:Object.values(p.events).map(e=>[e.id,e.version,e.phase,e.paused])}));
+        history:p.history.map(h=>h.eventId),events:Object.values(p.events).map(e=>[e.id,e.version,e.phase,e.paused]),
+        ...((p.failedHistory || []).length?{failures:p.failedHistory.map(h=>h.eventId)}:{})}));
 }
 function operationDependencies(state,op) {
     const p=state.profiles[op.characterId],e=p?.events[op.data?.eventId];
     const sourceRef=source=>source?{id:source.id,version:source.version}:null;
     // Recheck thresholds in the model; unrelated totals and events are not prerequisites.
     return {rank:p?.rank,route:p?.route,gate:op.mvuAuthority?null:p?.lock?clone(p.lock):null,history:p?.history.map(h=>h.eventId) || [],
+        ...((p?.failedHistory || []).length?{failures:p.failedHistory.map(h=>h.eventId)}:{}),
         event:e?hash(JSON.stringify({id:e.id,version:e.version,phase:e.phase,paused:e.paused,plan:e.plan,
             history:e.historySignature,progress:e.progress.map(step=>[step.phase,sourceRef(step.source)]),
             question:sourceRef(e.questionSource),initialAnswer:sourceRef(e.initialAnswerSource),
@@ -87,7 +98,7 @@ export function project(document,sources) {
         if(op.confirmed===false) {skipped.push({id:op.id,code:'SUPERSEDED'});continue;}
         const confirmed=op.confirmed===true;
         const hadCompletion=priorCompletions.has(op.characterId);
-        if(op.kind==='beat' && op.data?.phase==='resolution') priorCompletions.add(op.characterId);
+        if(op.kind==='beat' && op.data?.phase==='resolution' && op.data?.failed!==true) priorCompletions.add(op.characterId);
         // 已确认的记录不因编辑正文而撤销；只有引用楼层被删除才回退。
         if(!(confirmed?(op.refs || []).every(ref=>sources.has(ref.id)):validRefs(op.refs,sources))) {skipped.push({id:op.id,code:'STALE_SOURCE'});continue;}
         const p=state.profiles[op.characterId];
@@ -114,7 +125,7 @@ export function project(document,sources) {
                 if(source && (confirmed || matchesSourceVersion(source,hydrated.data.source.version))) hydrated.data.source=clone(source);
             }
             applyOperation(state,hydrated,{replay:confirmed});
-            for(const p of Object.values(state.profiles)) for(const h of p.history) {
+            for(const p of Object.values(state.profiles)) for(const h of [...p.history,...(p.failedHistory || [])]) {
                 const edit=document.summaryEdits?.[h.eventId];
                 if(edit && (confirmed?sources.has(h.source.id):matchesSourceVersion(sources.get(h.source.id),edit.sourceVersion)) && typeof edit.summary==='string' && edit.summary.length>=20) {
                     h.summary=edit.summary.slice(0,1200);h.summaryVersion=edit.version;h.manuallyReviewed=true;
@@ -132,7 +143,7 @@ export function project(document,sources) {
     // Keep old archived history, while only the earliest unfinished Rank may resume.
     const owner=unfinishedEvent(state);
     if(owner) for(const profile of Object.values(state.profiles)) for(const pending of Object.values(profile.events)) {
-        if(pending.phase!=='completed' && pending.id!==owner.id) {
+        if(!isTerminalEvent(pending) && pending.id!==owner.id) {
             pending.paused=true;
             if(state.activeEventId===pending.id) state.activeEventId=null;
         }
@@ -148,6 +159,19 @@ export function appendOperation(document,state,op,sources) {
     const candidate=clone(state);
     applyOperation(candidate,op);assertState(candidate);
     const durable=clone(op);
+    if(op.kind==='plan' && candidate.profiles[op.characterId]?.events[op.data.eventId]?.retryOf) {
+        durable.data.retryOf=candidate.profiles[op.characterId].events[op.data.eventId].retryOf;
+    }
+    if(op.kind==='beat') {
+        const profile=candidate.profiles[op.characterId];
+        const archive=[...profile.history,...(profile.failedHistory || [])].find(h=>h.eventId===op.data.eventId);
+        const choiceSource=archive?.choiceSource;
+        if(choiceSource?.id && !(durable.refs || []).some(ref=>ref.id===choiceSource.id)) {
+            const source=sources.get(choiceSource.id);
+            if(!matchesSourceVersion(source,choiceSource.version)) fail('STALE_SOURCE');
+            durable.refs=[...(durable.refs || []),{id:choiceSource.id,version:choiceSource.version}];
+        }
+    }
     durable.confirmed=true;
     durable.precondition=roleSignature(state,op.characterId);
     if(op.kind==='affinity') durable.affinityHistory=state.profiles[op.characterId].history.map(h=>h.eventId);

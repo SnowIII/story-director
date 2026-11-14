@@ -1,40 +1,50 @@
-import {text,rankPolicy} from './model.js';
+import {text,rankPolicy,isTerminalEvent} from './model.js';
 import {continuity,publicMemory} from './history.js';
 import {BLUEPRINTS_BY_RANK} from './blueprints.js';
 import {EVENT_FORM_GUIDE} from './event-forms.js';
 export {BLUEPRINTS_BY_RANK} from './blueprints.js';
 export const BLUEPRINTS=BLUEPRINTS_BY_RANK[4];
 const closureSample=()=>({goalAchieved:true,closed:true,awaitingUser:false,blockingConflicts:[],evidence:'本轮正文中目标已实现且现场已告一段落的准确短句'});
-const closureRule='事件轮数是最低互动结构，不是完成倒计时。心理转变、决定帮忙、制定方案、调动援军或开始行动，不能代替眼前危机的实际收束。当前救援／战斗／对峙仍在进行，或关键决定还等用户回应时，必须 ready:false，继续当前 Rank；不得插入其他人的 Rank 事件。长线伏笔可以保留，当前阻断性冲突必须先结束。';
+const closureRule='事件轮数是最低互动结构，不是完成倒计时。在目标仍可达成、用户未明确放弃的前提下，心理转变、决定帮忙、制定方案、调动援军或开始行动，不能代替眼前危机的实际收束。当前救援／战斗／对峙仍在进行，或关键决定还等用户回应时，必须 ready:false，继续当前 Rank；不得插入其他人的 Rank 事件。长线伏笔可以保留，成功归档前当前阻断性冲突必须先结束。目标已不可达成或用户明确放弃时，优先按固定失败契约报告，不为等待原定收束而困在本事件。';
+const failureSample=()=>({failed:true,evidence:'本轮正文中目标已不可达成或已承接用户放弃的准确短句',failure:{
+    reason:'原目标为何已经无法继续达成，或用户已明确放弃本次事件',summary:'实际失败经过与后果，不写成功升阶或不存在的成长',
+    outcome:'已经发生的实际结果',outcomeEvidence:'本轮正文中的实际结果原文',openHooks:[],sharedFacts:[]}});
+const failureRule=[
+    '【固定失败判定契约，由程序提供】先判断本次事件是否已经失败，再判断当前幕是否完成或是否仍需等待。此契约适用于 hook、dilemma、waiting_user、waiting_route、resolution 的任何阶段，优先于当前幕必须演完、等待路线和成功收束的要求，不可被自定义规则覆盖。',
+    '只有真实剧情明确使本次目标不可能达成（例如关键前提不可逆地消失），或用户明确放弃本次事件，才报告 failed:true。必须有本轮正文已经承接该事实的原文依据；不能为解除阻塞而猜测失败或编造用户选择。',
+    '仍在进行、只是绕路或暂时受阻、没有回应、路线尚未确认、没有成长、缺少回报或资料，都不是失败；继续当前事件并按阶段等待，收束未完成时使用 ready:false。用户只改选另一条有效关系路线时仍按 routeConflict 处理；明确拒绝两种路线并放弃本次关系事件时可报告失败，不能强迫其选一条。',
+    '失败回报只包含 failed:true、evidence 和 failure，不同时提交 ready:true、completion 或 routeConflict。failure 必填 reason、summary、outcome、outcomeEvidence；evidence 与 outcomeEvidence 必须逐字引用本轮正文。已有真实用户选择时才附 choice、choiceEvidence，并逐字引用对应用户原文；没有选择时省略这两项。',
+    '结合提供的本事件历次真实回应（userResponses）及首次、最新回应：真正的选择变化以最后一次明确决定为准，之后的普通闲聊不撤销它；不能用首次同意覆盖中途的明确放弃。choiceEvidence 可引用其中实际决定的准确原文。',
+    '失败无需目标达成、现场冲突全部结束、人物成长或关系路线确认。它只归档本次失败，Rank 不增加，好感锁定保留；程序随后另行设计同一目标 Rank 的新事件，本轮正文不擅自重开、不抹去失败事实。未解决的后果记入 openHooks；有依据的世界状态变化可用 sharedFacts 记录。'
+].join('\n');
+const retryDesignRule='【失败后的同阶重试，固定契约】本阶失败记录是已经发生的事实，不是成功升阶历史；仍只设计当前目标 Rank。对照失败原因、真实选择和现场后果，另选当前确实可行的具体场景、事项、互动任务和解决路径，不复用已经不可达成的目标，不把失败原计划当作事实。不得复活已死人物、恢复已毁物品、倒退剧情或要求用户推翻已明确拒绝的关系；保留原阶蓝图与关系确认规则，不能预写关系同意。条件尚不支持关系确认时，先设计尊重边界的可行互动，不重复逼问。';
 export const growthRule='人物变化与归档只记录本次实际验证的局部成长，不把一次安慰或成功夸大成“彻底治愈、再也不会、全部释怀”。已确认的成长继续成立，后阶通过新责任、新行动或新的关系边界推进，不重置已解决的心结。';
 /**
  * 归档提示词。
  * @param {{force?: boolean}} options
- *   `force` = 用户在面板上主动选的「按实际剧情收束」：剧情没按原计划走，原定目标已经不可能达成，
- *   但这一段确实演完了。此时不判定目标达成／冲突结束，只按正文实际发生的事写归档。
- *   ⚠ 证据规则不变：仍然要逐字引用正文，不许编造。
+ *   `force` = 用户主动核对是否失败，只能失败归档或继续等待，不能绕过成功条件升阶。
+ *   普通归档核对同样识别有证据的失败；证据规则始终不变。
  */
 export function archiveSystemPrompt({ force = false } = {}) {
     const rules = force ? [
         '仅为已经发生的 Coop 事件核对并补齐归档，不继续创作剧情，不代写用户行动。',
-        '本次是用户主动选择的「按实际剧情收束」：原定目标可能因为剧情走向改变而无法达成，**不要求目标达成、不要求原定冲突结束**。按正文里实际发生的事写归档：实际的结果、用户真实的选择、人物实际发生的变化。',
-        growthRule, '所有依据必须逐字引用提供的原文。摘要约100～200字，区分事实、猜测和未解决事项；原定目标没达成的部分写进 openHooks，不要为了对齐计划而改写实际结果。'
+        '本次是用户主动选择的「核对失败并重试同阶」：检查真实剧情是否已使本次目标不可达成，或用户是否明确放弃。按钮本身不代表失败证据；没有依据就继续等待。只核对失败，不通过放宽目标、成长或路线条件来成功升阶。',
+        '按实际发生的失败原因、结果与后果写档案。所有依据必须逐字引用提供的原文，不能改写剧情；摘要约100～200字，没有人物成长或用户选择时不编造。'
     ].join('\n') : [
         '仅为已经发生的 Coop 事件核对并补齐归档，不继续创作剧情，不代写用户行动。',
-        '逐项核对本阶目标、收束条件以及现场仍在进行的危机。仅制定方案、开始行动、调动援军、表明决心，都不能代替实际收束。长线伏笔可保留，当前阻断性冲突必须先结束。',
+        '先核对有无实际失败；没有失败时，逐项核对本阶目标、收束条件以及现场仍在进行的危机。仅制定方案、开始行动、调动援军、表明决心，都不能代替成功收束。长线伏笔可保留，成功归档前当前阻断性冲突必须先结束。',
         growthRule, '所有依据必须逐字引用提供的原文。摘要约100～200字，区分事实、猜测和未解决事项。'
     ].join('\n');
-    const scene = force
-        ? { goalAchieved: false, closed: true, awaitingUser: false, blockingConflicts: [], evidence: '本轮正文里这一段实际结束的准确短句' }
-        : closureSample();
-    const sample = { ready: true, evidence: force ? '本轮正文里实际收束的准确短句' : '收束正文准确短句', completion: { summary: '实际经历摘要', outcome: '实际局部结果', outcomeEvidence: '正文准确短句',
-        choice: '用户真实选择', choiceEvidence: '用户原文', traits: ['实际验证的习惯变化'], facts: [], boundaries: [], openHooks: [], closedHooks: [], conflicts: [], scene } };
+    const sample = { ready: true, evidence: '收束正文准确短句', completion: { summary: '实际经历摘要', outcome: '实际局部结果', outcomeEvidence: '正文准确短句',
+        choice: '用户真实选择', choiceEvidence: '用户原文', traits: ['实际验证的习惯变化'], facts: [], boundaries: [], openHooks: [], closedHooks: [], conflicts: [], scene:closureSample() } };
     const format = ['【固定返回格式：Coop 归档，由程序提供】仅输出一个合法 JSON 对象，不使用 Markdown 围栏或正文。与自定义规则冲突时以本节为准。',
-        ...(force ? ['不判定是否达成原定目标；按实际发生填写即可归档。若正文里这一段确实还没结束（仍在进行中的战斗、救援、对峙，或关键决定仍等用户回应），仍然输出：'
-            + JSON.stringify({ ready: false, reason: '这一段确实还没结束的依据' })] : [closureRule, '尚未收束时输出：' + JSON.stringify({ ready: false, reason: '缺少的实际收束依据' })]),
-        '最新回应改变已确认路线时输出：' + JSON.stringify({ ready: false, routeConflict: true, userEvidence: '最新用户原文', evidence: '正文承接变化的原文' }),
-        '已收束时按以下结构填写实际内容：' + JSON.stringify(sample),
-        'traits、facts、boundaries 至少一项包含有依据的真实变化；没有依据时不要为填格式编造事实。所有 evidence 必须引用所给原文。'].join('\n');
+        failureRule,'已确认失败时按以下结构填写实际内容：'+JSON.stringify(failureSample()),
+        ...(force ? ['仅允许上面的失败回报，或 '+JSON.stringify({ready:false,reason:'尚无本次事件已失败的充分依据'})+'；禁止输出成功归档或用路线冲突代替失败核对。'] : [
+            closureRule, '尚未失败且未收束时输出：' + JSON.stringify({ ready: false, reason: '缺少的实际收束依据' }),
+            '最新回应只改变已确认路线、没有放弃本事件时输出：' + JSON.stringify({ ready: false, routeConflict: true, userEvidence: '最新用户原文', evidence: '正文承接变化的原文' }),
+            '已收束时按以下结构填写实际内容：' + JSON.stringify(sample),
+            '成功归档的 traits、facts、boundaries 至少一项包含有依据的真实变化；没有依据时不要为填格式编造事实。所有 evidence 必须引用所给原文。',
+            '核对 userResponses 中本事件历次真实回应及首次、最新回应：真正的选择变化以最后一次明确决定为准，之后的普通闲聊不撤销它。choiceEvidence 可引用这些回应中的准确原文；关系成功归档仍引用路线确认时的真实回应。'])].join('\n');
     return rules + '\n\n' + format;
 }
 const diversityRules=[
@@ -75,9 +85,13 @@ export function designMessages(profile,context='',templates={}, {rounds=3}={}) {
         const plan=profile.events?.[h.eventId]?.plan;
         return plan?[{rank:h.rank,...Object.fromEntries(['title','conflict','hook','question','resolution'].map(key=>[key,text(plan[key],240)]))}]:[];
     });
+    const failedPlans=(profile.failedHistory || []).filter(h=>h.rank===profile.rank+1).map(h=>({eventId:h.eventId,rank:h.rank,
+        reason:h.reason,summary:h.summary,outcome:h.outcome,...(h.choice?{choice:h.choice}:{}),
+        originalPlan:Object.fromEntries(['title','conflict','goal','hook','question','resolution'].map(key=>[key,text(profile.events?.[h.eventId]?.plan?.[key],240)]))}));
     const user=['目标角色：'+profile.name+' ['+profile.id+']','同一人的别名／简称：'+((profile.aliases || []).join('、') || '未设置'),'目标 Rank：'+(profile.rank+1),
         '本阶定位：'+(templates.blueprint || blueprints[profile.rank]),'补充设定（可选）：\n'+(profile.description || '未填写，请从下面的现场资料和有效历史中提取已有设定。'),continuity(profile),
         ...(recentPlans.length?['【最近两阶原设计，仅用于识别重复结构；实际发生的事以归档为准】\n'+JSON.stringify(recentPlans)]:[]),
+        ...(failedPlans.length?['【本阶失败尝试：原因与后果已发生，原计划仅用于避开失效路径】\n'+JSON.stringify(failedPlans)]:[]),
         '【当前现场／相关世界书】\n'+context].join('\n\n');
     const constraints='【程序契约】角色已锁定 '+policy.rankCount+' 阶，门槛 '+policy.thresholds.join('、')+'，关系确认阶级 '+policy.relationshipRank+'。只设计 Rank '+(profile.rank+1)+
         '；轮数遵守指定值，不修改进度、路线或历史，不代写用户选择。仅输出 JSON：targetRank,rounds,title,scene,conflict,goal,hook,dilemma,question,resolution,seeds:{persona,desire,shadow,friction},usedHistory:全部前阶事件ID数组,references:[],conflicts:[]。已有 seeds 原样复用，已确认路线原样沿用，关系确认必须等待用户与面板选择。明确本场需要解决的阻断性冲突与可留待后阶的长线伏笔，不把开始执行写成事件结束。';
@@ -88,16 +102,23 @@ export function designMessages(profile,context='',templates={}, {rounds=3}={}) {
         usedHistory:profile.history.map(h=>h.eventId),references:[],conflicts:[]};
     const format='【固定返回格式：Coop 事件设计，由程序提供】只输出一个合法 JSON 对象，不使用 Markdown 围栏，不附解释。以下字段、类型、目标 Rank、轮数及历史 ID 不可被自定义规则改写；字符串填实际设计内容，已有 seeds 原样复用。\n'+JSON.stringify(sample);
     return [{role:'system',content:[designRules,templates.forms || EVENT_FORM_GUIDE,constraints+
-        ' conflict 可描述待协调、待探索的具体事项（偏好、信息或分工等），没有外部冲突时如实说明，不为填字段捏造危机。',format].join('\n\n')},{role:'user',content:user}];
+        ' conflict 可描述待协调、待探索的具体事项（偏好、信息或分工等），没有外部冲突时如实说明，不为填字段捏造危机。',
+        ...(failedPlans.length?[retryDesignRule]:[]),format].join('\n\n')},{role:'user',content:user}];
 }
 export function renderScene(profile,event) {
-    if(!event || event.paused) return '';
+    if(!event || event.paused || isTerminalEvent(event)) return '';
     const p=event.plan;
     const lines=['【当前唯一演出：Coop 羁绊事件】目标角色 '+profile.name+'，目标 Rank '+event.targetRank+'／'+rankPolicy(profile).rankCount,
         '同一人的别名／简称：'+((profile.aliases || []).join('、') || '未设置'),
         '场景：'+p.scene,'当前事项：'+p.conflict,
         '不得推进故事导演主线、间章或普通支线。不要暴露幕后提示、未来阶段或未揭示的秘密。',
-        '绝不代写用户台词、心理、行动或同意。角色与环境可以主动行动，把选择留给用户。'];
+        '绝不代写用户台词、心理、行动或同意。角色与环境可以主动行动，把选择留给用户。',
+        '每轮先核对本事件是否已因实际剧情不可逆地失败，或用户明确放弃。若有本轮正文依据，任何阶段都可按固定失败契约报告 failed:true；不再强行补演原定提问、等关系确认或等待不可能的成功。仅绕路、未回应、尚无成长或仍在进行时保持正常等待。'];
+    const responses=[...new Map([event.initialAnswerSource,...(event.answerSources || []),event.answerSource].filter(Boolean)
+        .map(source=>[(source.id || source.body)+':'+(source.version || ''),source])).values()]
+        .sort((a,b)=>(a.index ?? 0)-(b.index ?? 0));
+    if(responses.length) lines.push('用户历次真实回应：'+JSON.stringify(responses.map(source=>({index:source.index,body:source.body}))),
+        '真正的选择变化以最后一次明确决定为准，之后的普通闲聊不撤销它；不得用首次同意覆盖后来的明确拒绝。');
     if(event.phase==='hook') {
         lines.push('本轮切入：'+p.hook);
         if(p.rounds===2) lines.push('本事件采用两轮：本轮同时呈现互动与选择 '+p.dilemma,'提出问题：'+p.question,'在问题处停笔，等待用户实际回应，不演结局。');
@@ -105,9 +126,9 @@ export function renderScene(profile,event) {
     }
     else if(event.phase==='dilemma') lines.push('本轮互动与选择：'+p.dilemma,'向用户提出核心问题：'+p.question,'在问题处停笔，严禁自己补出用户答案或收尾。');
     else if(event.phase==='waiting_user') lines.push('核心问题已提出：'+p.question,'等待用户真正回应，不替他回答，不重复演开场。');
-    else if(event.phase==='waiting_route') lines.push('正在等待用户在 Coop 面板明确确认恋人／挚友路线。可以接住情绪，不预写告白结果或亲密行为，不结算。');
+    else if(event.phase==='waiting_route') lines.push('尚未失败时，等待用户在 Coop 面板明确确认恋人／挚友路线。可以接住情绪，不预写告白结果或亲密行为，不成功结算。仅未确认不是失败；明确拒绝两条路线并放弃本事件时，尊重拒绝并按事实报告失败。');
     else if(event.phase==='resolution') lines.push('用户首次回应：'+(event.initialAnswerSource || event.answerSource)?.body,
-        '用户最新回应：'+event.answerSource?.body,'结合首次选择与最新补充收束；普通闲聊不覆盖先前明确的选择。',
+        '用户最新回应：'+event.answerSource?.body,'结合本事件历次真实回应收束；真正的选择变化以最后一次明确决定为准，之后的普通闲聊不撤销它，也不能用首次同意覆盖后来明确的拒绝。',
         '已明确的路线：'+(event.route || profile.route),'本轮收束条件：'+p.resolution,
         ...(event.routeSource?['路线确认对应的真实回应：'+event.routeSource.body,
             '如果用户最新回应与所选路线冲突，尊重最新回应，回报 routeConflict:true 及 userEvidence 原文，等待面板重新确认，不报完成。']:[]),
@@ -120,7 +141,7 @@ export function affinityContract(profiles,snapshot,byExtra=false) {
     if(!profiles.length) return '';
     const actors=profiles.map(p=>({name:p.name,aliases:p.aliases || [],mvuKey:snapshot.roles[p.id].mvuKey,
         affinity:p.affinity,locked:!!p.lock,mode:p.mode,nextThreshold:p.rank<p.rankCount?p.thresholds[p.rank]:null,
-        lockRequired:p.mode==='coop' && (Object.values(p.events).some(e=>e.phase!=='completed') || p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank]),
+        lockRequired:p.mode==='coop' && (Object.values(p.events).some(e=>!isTerminalEvent(e)) || p.rank<p.rankCount && p.affinity>=p.thresholds[p.rank]),
         unlockAfterArchive:!!p.unlockAfterArchive}));
     const first=actors[0],path='/故事导演/Coop/角色/'+first.mvuKey.replace(/~/g,'~0').replace(/\//g,'~1');
     return ['【Coop 角色数值更新】好感度与好感锁定以 MVU 为唯一来源，只更新下列 mvuKey 对应的两个字段：',JSON.stringify(actors),
@@ -142,14 +163,14 @@ export function directorReportContract(event,snapshot) {
             summary:'约100～200字的实际事件摘要',outcome:'实际局部结果',outcomeEvidence:'本轮正文准确短句',
             choice:'用户真实选择',choiceEvidence:'用户实际回应准确短句',traits:['实际验证的习惯变化'],facts:[],boundaries:[],openHooks:[],closedHooks:[],sharedFacts:[],conflicts:[],scene:closureSample()}}:{})}};
     return ['【仅交给故事导演的事件回报】由写正文的模型在回复末尾、<UpdateVariable> 外提交一次，不交给 MVU 或额外变量模型。导演会读取并隐藏标签，保存到当前消息和 Coop 档案。',
-        '只有本轮当前幕的任务已完整写进正文才回报，每轮最多一幕；waiting_user／waiting_route 不报完成，不代写用户行为。',
+        '正常进度只有本轮当前幕的任务已完整写进正文才回报，每轮最多一幕；waiting_user／waiting_route 不报成功完成，不代写用户行为。有依据的失败回报不受幕完成或等待路线限制。',
         'event.evidence 必须逐字引用本轮角色正文，不能引用用户消息、变量块或本示例。所有事实须已实际发生。',
-        'resolution 每轮判断是否已收束：未完成时只写 ready:false，不写 completion；已完成才写 ready:true 和完整 completion，无需额外核对请求。',
-        closureRule,
+        'resolution 每轮先判断实际失败；尚未失败时再判断是否已收束：未完成时只写 ready:false，不写 completion；已完成才写 ready:true 和完整 completion，无需额外核对请求。',
+        failureRule,'失败时保持本轮 eventId、characterId、eventVersion、phase，在 event 内使用以下字段：'+JSON.stringify(failureSample()),closureRule,
         'ready:true 时 completion.scene 必须逐项提供：goalAchieved:true、closed:true、awaitingUser:false、blockingConflicts:[]，以及证明现场已收束的 evidence 原文。任何一项不满足就保持未完成，不用“已下令／准备行动”冒充结果。',
         'completion.traits、facts、boundaries 至少一项包含有依据的真实变化；没有依据时不要为填格式编造事实，保持 ready:false。',
-        'completion 写清真实选择、局部结果、人物变化、伏笔和摘要。choiceEvidence 可引用首次或最新真实回应；普通闲聊不覆盖首次选择，关系确认阶级引用路线确认对应的真实回应。',growthRule,
-        '若最新回应明确改变已确认路线，回报 routeConflict:true、userEvidence:最新用户原文、evidence:本轮正文接住该变化的原文，省略 completion，等待面板重新确认。',
+        'completion 写清真实选择、局部结果、人物变化、伏笔和摘要。choiceEvidence 可引用本事件首次、过程中或最新真实回应；真正的选择变化以最后一次明确决定为准，之后的普通闲聊不撤销它，关系确认阶级引用路线确认对应的真实回应。',growthRule,
+        '尚未失败且最新回应明确改选另一条关系路线时，回报 routeConflict:true、userEvidence:最新用户原文、evidence:本轮正文接住该变化的原文，省略 completion，等待面板重新确认。',
         '共享世界事实有实际变化时，sharedFacts 使用 [{entityId:"稳定英文ID",name:"实体名",fact:"新事实",previousFact:"旧事实原文",evidence:"本轮正文原文",knownBy:["user","当前角色ID"]}]；没有用空数组。',
         '<CoopReport>'+JSON.stringify(sample)+'</CoopReport>'].join('\n');
 }
@@ -187,12 +208,12 @@ export function reportContract(profiles,event,snapshot,byExtra=false) {
             '以下 JSONPatch 数值是当前值范例，请替换为本轮计算后的最终值；不变的字段可省略。不要提交 affinity/delta 计分回报，不修改 Rank、阶级方案、路线或档案。']:[]),
         '所有 evidence 必须准确引用对应消息原文；只引用已发生事实，不能把猜测写成事实或代写用户行为。',
         'event.evidence 必须逐字引用本轮角色正文中实际发生的短句，不能引用用户消息、变量块或本契约范例；用户回应仅放在明确要求的 userEvidence／choiceEvidence 字段。',
-        'event 回报仅在当前 phase 的任务完整写进正文后提供；waiting_user／waiting_route 不报完成。每次回复最多完成当前一幕。resolution 尚未收束时的 ready:false 只表示继续演出，不推进事件。',
-        'resolution 阶段每轮在同一份回报中判断本阶是否已收束：尚未达到本阶局部目标时写 event.ready:false，不填 completion；已收束时写 ready:true 并填写 completion。完整回报会直接归档，无需额外核对请求。',
+        '正常 event 进度回报仅在当前 phase 的任务完整写进正文后提供；waiting_user／waiting_route 不报成功完成。每次回复最多完成当前一幕。有依据的失败回报不受幕完成或等待路线限制；未失败的 resolution 尚未收束时，ready:false 只表示继续演出，不推进事件。',
+        'resolution 阶段每轮先判断实际失败；尚未失败时，在同一份回报中判断本阶是否已收束：尚未达到本阶局部目标时写 event.ready:false，不填 completion；已收束时写 ready:true 并填写 completion。完整回报会直接归档，无需额外核对请求。',
         'resolution 的 completion 必须包含实际选择、局部结果、人物变化、未解决与已回收伏笔，以及完整简短摘要。不可只写“任务完成”。',growthRule,
-        closureRule,
+        ...(event?[failureRule,'失败时保持本轮 eventId、characterId、eventVersion、phase，在 event 内使用以下字段：'+JSON.stringify(failureSample())]:[]),closureRule,
         'ready:true 还需 completion.scene:{goalAchieved:true,closed:true,awaitingUser:false,blockingConflicts:[],evidence:"本轮正文中证明现场已收束的原文"}。缺少现场收束依据时继续演出，其他角色的升阶事件保持排队。',
-        'completion.choiceEvidence 可引用用户首次或最新回应中的真实选择；普通闲聊不覆盖首次选择。角色的 relationshipRank 为路线确认阶级，该阶必须引用路线确认时的回应。rankCount 和 thresholds 已由用户锁定，模型不可更改。',
+        'completion.choiceEvidence 可引用本事件用户首次、过程中或最新回应中的真实选择；真正的选择变化以最后一次明确决定为准，之后的普通闲聊不撤销它。角色的 relationshipRank 为路线确认阶级，该阶必须引用路线确认时的回应。rankCount 和 thresholds 已由用户锁定，模型不可更改。',
         '若共享 NPC／信物状态实际变化，可在 completion.sharedFacts 填 [{entityId:"稳定英文ID",name:"实体名",fact:"新事实",previousFact:"已有旧事实原文",evidence:"正文准确短句",knownBy:["user","当前角色ID"]}]；没有变化用空数组。',
         ...(mvu?(event?['只有当前事件的进度和归档仍写到 故事导演.Coop.回报，使用本轮 nonce，不包含 affinity。本轮刚报告 completion 时仍保持锁定，等后续注入确认已归档再解锁。']:[]):[
             '把本轮变化报告写到 故事导演.Coop.回报。不要直接改写角色最终好感、Rank、锁、路线或档案；程序校验后会将最终结果同步回变量。',

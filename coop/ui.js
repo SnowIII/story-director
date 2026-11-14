@@ -1,9 +1,9 @@
-import {text,hash,activeEvent,unfinishedEvent,rankPolicy,RANK_COUNTS,eventGate} from './model.js';
+import {text,hash,activeEvent,unfinishedEvent,isTerminalEvent,pendingRetry,rankPolicy,RANK_COUNTS,eventGate} from './model.js';
 import {safeJson,uuid} from './messages.js';
 import {bindingCapability,mvuCharacterKeys} from './mvu.js';
 const esc=value=>String(value ?? '').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const labels={hook:'反常切入',dilemma:'困境与提问',
-    waiting_user:'等待用户回应',waiting_route:'等待确认关系路线',resolution:'破局与收束',completed:'已完成'};
+    waiting_user:'等待用户回应',waiting_route:'等待确认关系路线',resolution:'破局与收束',completed:'已完成',failed:'已失败 · 未升阶'};
 export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
     document.querySelectorAll('#story-director-coop-entry').forEach(entry=>entry.remove());
     const embedded=!!container;
@@ -54,7 +54,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
     function card(p) {
         const helpId='sdc-profile-'+hash(p.id);
         const mvuPath='故事导演.Coop.角色['+JSON.stringify(mvuCharacterKeys(runtime.state()).get(p.id))+'].好感度';
-        const unfinished=Object.values(p.events).find(e=>e.phase!=='completed');
+        const unfinished=Object.values(p.events).find(e=>!isTerminalEvent(e)),retry=pendingRetry(p);
         const owner=unfinishedEvent(runtime.state()),queued=!!owner && owner.characterId!==p.id;
         const queueAttributes=queued?' disabled title="等待当前 Rank 事件完成"':'';
         const next=p.rank<p.rankCount?p.thresholds[p.rank]:'—';
@@ -67,8 +67,9 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
             (p.lock?'<p class="sdc-lock">'+(p.unlockAfterArchive?'本阶已归档，下一轮 MVU 更新将解除好感锁定。':
                 '完成 Rank '+p.lock.targetRank+' 羁绊事件后解锁；增减均暂停，不补发积分。')+'</p>':'')+
             (queued && ready?'<p class="sdc-field-help">事件排队中，等待 '+esc(runtime.state().profiles[owner.characterId].name)+' 的 Rank '+owner.targetRank+' 事件结束。</p>':'')+
+            (retry?'<p class="sdc-field-help">上一事件已失败归档，Rank 未增加。可重新设计 Rank '+retry.rank+' 的可行事件；新设计会保留失败原因和实际后果。</p>':'')+
             '<div class="sdc-actions">'+
-            (ready && !unfinished?'<button data-action="start" data-id="'+esc(p.id)+'"'+queueAttributes+'>开始下一阶事件</button>':'')+
+            (ready && !unfinished?'<button data-action="start" data-id="'+esc(p.id)+'"'+queueAttributes+'>'+(retry?'重新设计 Rank '+retry.rank+' 事件':'开始下一阶事件')+'</button>':'')+
             (p.mode==='coop' && unfinished?'<button data-action="'+(unfinished.paused?'resume':'pause')+'" data-id="'+esc(p.id)+'" data-event="'+esc(unfinished.id)+'"'+(unfinished.paused?queueAttributes:'')+'>'+(unfinished.paused?'继续事件':'暂停事件')+'</button>':'')+
             (p.mode==='coop' && unfinished?.paused?'<button data-action="replan" data-id="'+esc(p.id)+'" data-event="'+esc(unfinished.id)+'"'+queueAttributes+'>重设未演部分</button>':'')+
             '<button data-action="history" data-id="'+esc(p.id)+'">历阶摘要／档案</button>'+
@@ -108,20 +109,23 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         const event=activeEvent(state);
         if(runtime.job) return '<p>'+esc(runtime.job.label || '正在设计所选角色的当前阶事件')+'……</p><button data-action="abort">中断生成</button>';
         if(!event) {
-            const pending=Object.values(state.profiles).filter(p=>p.mode==='coop' && p.lock);
+            const pending=Object.values(state.profiles).filter(p=>p.mode==='coop' && (p.lock || pendingRetry(p)));
             return '<p>当前没有正在演出的 Coop 事件。</p>'+
                 (runtime.store.document.settings.autoStart===false?'<p class="sdc-field-help">自动触发已关闭。达到门槛后，点击角色行的“开始下一阶事件”手动触发。</p>':'')+
-                '<p class="sdc-field-help">Rank 事件依次进行；暂停中的事件仍占队列。前一阶归档后，自动接续还会等待当前现场实际结束。</p>'+pending.map(card).join('');
+                '<p class="sdc-field-help">Rank 事件依次进行；暂停中的事件仍占队列。成功升阶后，下一阶自动接续会等待现场结束；失败事件保留档案并重试同阶。</p>'+pending.map(card).join('');
         }
         const p=state.profiles[event.characterId], plan=event.plan;
         return '<h3>'+esc(p.name)+' · Rank '+event.targetRank+' · '+esc(plan.title)+'</h3>'+
+            (event.retryOf?'<p class="sdc-field-help">这是失败归档后的同阶新事件；此前的失败结果继续有效。</p>':'')+
             (event.createdAt?'<p class="sdc-field-help">创建时楼层：#'+event.createdAt.index+'；删除该楼层会清理本事件及后续依赖阶级。</p>':'')+
             '<p>当前阶段：'+esc(labels[event.phase])+'</p><p>'+esc(plan.scene)+'</p>'+
             '<p class="sdc-lock">'+(runtime.usesMvuAffinity?'MVU 好感 '+p.affinity+'，'+(p.lock?'已锁定':'未锁定')+'；按每轮变量更新规则维护。':
                 '好感 '+p.affinity+' 已锁定。事件结束并归档成功后解锁。')+'</p>'+
             (event.phase==='waiting_route' || event.phase==='resolution' && event.targetRank===rankPolicy(p).relationshipRank?'<p>请根据你的真实回应确认关系路线。确认后继续聊天，演绎收束；改变心意时可以重新选择。</p>'+
                 '<button data-action="route" data-route="friendship">确认为挚友／伙伴</button> <button data-action="route" data-route="romance">确认为恋人</button>':'')+
-            (event.phase==='resolution'?'<p>当前目标与现场危机实际收束后才会归档。仅制定方案或开始行动会继续当前事件，其他 Rank 保持排队；也可手动核对。</p><button data-action="archive">核对并补齐归档</button>'+' <button data-action="force-archive" title="剧情没按原计划走、原定目标已经不可能达成时用：按正文实际发生的事写下这一阶的归档，正常加一阶并解锁">按实际剧情收束</button>':'')+
+            (event.phase==='resolution'?'<p>目标与现场危机实际收束后才能成功升阶。仅制定方案或开始行动时继续当前事件；也可手动核对。</p><button data-action="archive">核对并补齐归档</button>':'')+
+            '<p class="sdc-field-help">若目标已经无法达成或你已明确放弃，可核对失败并保存实际结果。失败不升阶，随后重新设计同阶事件；普通等待或暂时受阻不会判为失败。</p>'+
+            '<button data-action="force-archive" title="依据实际正文核对失败；失败归档不增加 Rank，并为同阶重新设计可行事件">核对失败并重试同阶</button>'+
             '<div class="sdc-actions"><button data-action="pause" data-id="'+esc(p.id)+'" data-event="'+esc(event.id)+'">暂停演出</button>'+
             '<button data-action="regenerate" data-id="'+esc(p.id)+'" data-event="'+esc(event.id)+'" title="保留已经发生的剧情和选择，只重设尚未演出的部分">重新生成事件</button></div>'+
             '<details><summary>幕后计划（包含剧透）</summary><pre>'+esc(JSON.stringify(plan,null,2))+'</pre></details>';
@@ -143,6 +147,12 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
                 '<p>未解决：'+esc(h.openHooks.join('；') || '无')+'</p><p>已回收：'+esc(h.closedHooks.join('；') || '无')+'</p>'+
                 '<details><summary>修正本阶摘要</summary><form data-summary="'+esc(h.eventId)+'" data-character="'+esc(p.id)+'">'+
                 '<textarea name="summary" aria-label="本阶经历摘要" placeholder="概括本阶实际发生的矛盾、用户选择、结果、人物变化和未解决伏笔，建议 100～200 字。" rows="4" minlength="20" maxlength="1200">'+esc(h.summary)+'</textarea><p class="sdc-field-help">后续事件会读取这份摘要。只修正有依据的概括，不改写已发生的选择，并核对后续经历是否仍一致。</p><button type="submit">确认修正并保存</button></form></details></article>').join(''):'<p>尚未完成 Rank 事件。完成后会在这里逐阶保存摘要。</p>')+
+            ((p.failedHistory || []).length?'<h3>失败事件 · 未升阶</h3>'+p.failedHistory.map(h=>'<article class="sdc-card"><strong>目标 Rank '+h.rank+' · 已失败，未升阶</strong>'+
+                '<p>'+esc(h.summary)+'</p><p>失败原因：'+esc(h.reason)+'</p><p>实际结果：'+esc(h.outcome)+'</p>'+
+                (h.choice?'<p>实际选择：'+esc(h.choice)+'</p>':'')+
+                '<p>未解决：'+esc((h.openHooks || []).join('；') || '无')+'</p>'+
+                (h.createdAt?'<p class="sdc-field-help">创建时楼层：#'+h.createdAt.index+'</p>':'')+
+                '</article>').join(''):'')+
             (runtime.usesMvuAffinity?'<p class="sdc-field-help">当前好感 '+p.affinity+'／100，'+(p.lock?'已锁定':'未锁定')+'，直接读取 MVU。历史消息校验仅用于事件档案，不再撤销 MVU 好感。</p>':
             '<details><summary>好感变化记录（最近 30 次）</summary>'+p.scoreLog.slice(-30).reverse().map(log=>
                 '<p>'+esc((log.actual>=0?'+':'')+log.actual)+' · '+esc(log.reasonCode==='AFFINITY_LOCKED'?'未完成事件，好感锁定':log.reason)+
@@ -154,8 +164,8 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
     function diagnostics() {
         const state=runtime.state(),store=runtime.store,profiles=Object.values(state.profiles);
         const event=activeEvent(state),locked=profiles.filter(p=>p.lock);
-        const paused=profiles.flatMap(p=>Object.values(p.events)).filter(e=>e.paused && e.phase!=='completed');
-        const ready=profiles.filter(p=>eventGate(p,runtime.usesMvuAffinity) && !Object.values(p.events).some(e=>e.phase!=='completed'));
+        const paused=profiles.flatMap(p=>Object.values(p.events)).filter(e=>e.paused && !isTerminalEvent(e));
+        const ready=profiles.filter(p=>eventGate(p,runtime.usesMvuAffinity) && !Object.values(p.events).some(e=>!isTerminalEvent(e)));
         const skipped=(state.skipped || []).filter(item=>!runtime.usesMvuAffinity || store.document.journal.find(op=>op.id===item.id)?.kind!=='affinity');
         const stale=skipped.filter(item=>['STALE_SOURCE','STALE_DEPENDENCY'].includes(item.code)).length;
         const invalid=skipped.length-stale;
@@ -183,9 +193,9 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
     }
     function settings() {
         return '<label>是否自动触发事件<select id="sdc-auto-start" aria-describedby="sdc-auto-start-help"><option value="true"'+(runtime.store.document.settings.autoStart!==false?' selected':'')+'>是：自动触发已就绪事件</option><option value="false"'+(runtime.store.document.settings.autoStart===false?' selected':'')+'>否：由我手动触发</option></select></label>'+
-            '<p id="sdc-auto-start-help" class="sdc-field-help">仅对当前聊天生效。选“否”后，好感照常更新，到门槛仍会锁定；请在“管理角色”或“当前事件”中点击“开始下一阶事件”。已开始的事件会继续演出和归档。</p>'+
+            '<p id="sdc-auto-start-help" class="sdc-field-help">仅对当前聊天生效。选“否”后，好感照常更新，到门槛仍会锁定；请在“管理角色”或“当前事件”中点击“开始下一阶事件”。已开始的事件继续演出、归档和失败后的同阶重试。</p>'+
             '<label>新事件默认轮数<select id="sdc-rounds"><option value="3"'+(runtime.store.document.settings.eventRounds===3?' selected':'')+'>三轮：切入、困境、收束</option><option value="2"'+(runtime.store.document.settings.eventRounds===2?' selected':'')+'>两轮：切入与困境合并</option></select></label>'+
-            '<p>选“是”且角色可参与、现场已结束、全局允许自动生成时，按队列开始已就绪事件。未完成或暂停中的 Rank 会阻止其他 Rank；归档当轮不立即接续。</p>'+
+            '<p>选“是”且角色可参与、现场已结束、全局允许自动生成时，按队列开始已就绪事件。未完成或暂停中的 Rank 会阻止其他 Rank；成功归档当轮不立即接续下一阶。同阶失败重试也遵守全局自动生成开关，未生成时可手动重试。</p>'+
             '<p>MVU 同步：'+esc(bindingCapability(runtime.host.mvu?.()).reason)+'</p>'+
             '<p>'+esc(runtime.syncMvu.status)+' <button type="button" data-action="sync-mvu">'+(runtime.usesMvuAffinity?'刷新 MVU 状态':'立即同步 MVU')+'</button></p>'+
             (runtime.syncMvu.error?'<p role="status">MVU 同步暂未完成：'+esc(runtime.syncMvu.error.message)+'</p>':'')+
@@ -207,7 +217,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
                 (runtime.store.pending?'<p class="sdc-warning">归档待保存。'+(runtime.store.error?esc(runtime.store.error.message)+' <button data-action="retry">重试保存</button>':'正在等待服务器确认……')+'</p>':'')+
                 (runtime.currentNotice?'<p role="status">'+esc(runtime.currentNotice.message)+' <button data-action="dismiss">关闭提示</button></p>':'')+
                 ({roles:roles,event:eventPage,archive:archive,settings:settings}[tab])(state))+'</div>';
-        if(runtime.store.readonly || runtime.store.pending) panel.querySelectorAll('form button,form input,form textarea,form select,[data-action="start"],[data-action="resume"],[data-action="regenerate"],[data-action="route"],[data-action="archive"],[data-action="delete"],[data-action="import"],#sdc-import,#sdc-auto-start,#sdc-rounds').forEach(node=>{node.disabled=true;});
+        if(runtime.store.readonly || runtime.store.pending) panel.querySelectorAll('form button,form input,form textarea,form select,[data-action="start"],[data-action="resume"],[data-action="regenerate"],[data-action="route"],[data-action="archive"],[data-action="force-archive"],[data-action="delete"],[data-action="import"],#sdc-import,#sdc-auto-start,#sdc-rounds').forEach(node=>{node.disabled=true;});
     }
     panel.addEventListener('click',event=> {
         const button=event.target.closest('button');if(!button) return;
@@ -234,7 +244,7 @@ export function mountCoopUI(runtime,{container=null,onOpen=null}={}) {
         if(action==='archive') run(()=>runtime.recoverArchive());
         if(action==='force-archive') run(()=>runtime.recoverArchive({force:true}));
         if(action==='abort') runtime.abort();
-        if(action==='retry') run(async()=>{await runtime.store.retrySave();await runtime.ensureCurrentCharacters();render();});
+        if(action==='retry') run(async()=>{await runtime.store.retrySave();await runtime.ensureCurrentCharacters();await runtime.retryFailed();render();});
         if(action==='takeover') run(()=>runtime.takeover());
         if(action==='dismiss'){button.closest('[role="status"]')?.remove();runtime.dismissNotice();}
         if(action==='import') panel.querySelector('#sdc-import')?.click();

@@ -1,4 +1,4 @@
-import {clone,fail,text,hash,activeEvent,unfinishedEvent,profileOf,historySignature,rankPolicy,RANK_COUNTS,eventGate} from './model.js';
+import {clone,fail,text,hash,activeEvent,unfinishedEvent,profileOf,historySignature,rankPolicy,RANK_COUNTS,eventGate,isTerminalEvent,pendingRetry} from './model.js';
 import {CoopStore} from './store.js';
 import {configureRoster,removeRoster,candidates} from './roster.js';
 import {appendOperation,project,readDocument} from './timeline.js';
@@ -17,6 +17,7 @@ export class CoopRuntime {
         this.listeners=new Set();this.scene=false;this.lease=null;
         this.disposed=false;this.queue=Promise.resolve();this.lastAutoFailure=0;this.pendingMvuReports=new Map();
         this.affinityOutcomes=new Map();this.pendingCharacters=[];
+        this.retryAttempts=new Set();
         this.usesMvuAffinity=host.affinityAuthority==='mvu';this.mvuLive=null;
         host.directorReports=()=>this.snapshot?.reportChannel==='director';
         if(this.usesMvuAffinity) host.projectState=state=>this.store.scope===host.scope()?
@@ -93,7 +94,7 @@ export class CoopRuntime {
     }
     async loadNow() {
         this.abort();
-        this.snapshot=null;this.snapshots.clear();this.pendingMvuReports.clear();this.affinityOutcomes.clear();this.pendingCharacters=[];
+        this.snapshot=null;this.snapshots.clear();this.pendingMvuReports.clear();this.affinityOutcomes.clear();this.pendingCharacters=[];this.retryAttempts.clear();
         this.channel?.close();this.channel=null;
         await this.releaseLease();
         try {this.store.load();} catch(error) {this.store.state=null;this.notice(error);return;}
@@ -198,16 +199,17 @@ export class CoopRuntime {
                 document.settings.eventRounds=settings.eventRounds;
             }
         });
-        if(settings.autoStart===false && this.store.scope===scope && this.store.generation===generation && this.job?.scope===scope && this.job.automatic) this.abort();
+        if(settings.autoStart===false && this.store.scope===scope && this.store.generation===generation && this.job?.scope===scope && this.job.automatic && !this.job.retryOf) this.abort();
         return result;
     }
     async generate(characterId,{replanEventId=null,automatic=false,userPrompt=''}={}) {
-        if(automatic && this.store.document?.settings.autoStart===false) fail('AUTO_START_DISABLED','自动触发事件已关闭');
         if(this.job || this.event()) fail('SCENE_BUSY','当前 Rank 事件尚未结束或正在生成，请先继续并完成原事件');
         const owner=unfinishedEvent(this.state());
         if(owner && (owner.id!==replanEventId || owner.characterId!==characterId)) fail('SCENE_BUSY','当前 Rank 事件尚未结束，请继续原事件；其他角色的事件正在排队');
         if(this.store.pending) fail('SAVE_PENDING','请先完成尚未确认的保存');
         const p=profileOf(this.state(),characterId);
+        const retry=replanEventId?null:pendingRetry(p);
+        if(automatic && !retry && this.store.document?.settings.autoStart===false) fail('AUTO_START_DISABLED','自动触发事件已关闭');
         if(!eventGate(p,this.usesMvuAffinity)) fail('NOT_READY','等待好感达到下一阶门槛');
         if(this.store.readonly) fail('READ_ONLY');
         continuity(p);
@@ -220,12 +222,14 @@ export class CoopRuntime {
         const anchor=[...this.store.sources().values()].filter(source=>!source.isSystem).at(-1);
         const createdAt=anchor?{id:anchor.id,index:anchor.index}:null;
         const contextKey=JSON.stringify(contextRefs);
-        const job={id:uuid(),characterId,controller,scope,createdAt,automatic,...(existing?{label:'正在重新生成事件未演部分'}:{})};this.job=job;this.changed();
+        const job={id:uuid(),characterId,controller,scope,createdAt,automatic,...(retry?{retryOf:retry.eventId,label:'正在重新设计 Rank '+retry.rank+' 事件'}:{}),...(existing?{label:'正在重新生成事件未演部分'}:{})};this.job=job;this.changed();
         try {
             let context=await this.host.contextText(p);
             const rounds=existing?.progress.length?existing.plan.rounds:this.store.document.settings.eventRounds;
             context+='\n【本事件指定轮数】'+rounds+'；2轮把切入与互动选择合并，3轮分别演绎。';
             context+='\n【共享世界事实；角色只可使用其已知信息】\n'+JSON.stringify(this.state().sharedFacts);
+            if(retry) context+='\n【失败后的同阶新事件】\n'+JSON.stringify({failedEventId:retry.eventId,targetRank:retry.rank,reason:retry.reason,outcome:retry.outcome})+
+                '\n上次事件已经失败归档，Rank 未提升。设计新的同阶事件，承接实际后果，改变已失效的目标和具体互动；不能重演失败事件或要求用户撤回拒绝。';
             if(existing) context+='\n【只重设未演部分，不改已发生事实】\n'+JSON.stringify({phase:existing.phase,
                 plan:existing.plan,progress:existing.progress,initialAnswer:existing.initialAnswerSource?.body,
                 answer:existing.answerSource?.body,route:existing.route,routeResponse:existing.routeSource?.body});
@@ -237,6 +241,7 @@ export class CoopRuntime {
             const messages=designMessages(p,context,templates,{rounds});
             const raw=await this.host.ask(messages,controller.signal,()=>this.changed());
             if(controller.signal.aborted || this.job!==job || this.store.scope!==scope) fail('STALE_TASK');
+            if(automatic && retry && !this.host.autoAllowed?.()) fail('STALE_TASK');
             ensureMessageIds(this.host.messages());
             const fresh=profileOf(this.state(),characterId);
             if(fresh.mode!=='coop' || fresh.policyRevision!==policy || eventGate(fresh,this.usesMvuAffinity)?.id!==gate || hash(continuity(fresh))!==history ||
@@ -247,7 +252,7 @@ export class CoopRuntime {
             const refs=last?references(last):[];
             await this.store.operation(existing?'replan':'plan',characterId,
                 {eventId:existing?.id || 'event-'+uuid(),gateId:gate,plan:parsed,historySignature:historySignature(fresh),
-                    ...(!existing && createdAt?{createdAt}:{}),...(automatic?{automatic:true}:{})},refs);
+                    ...(!existing && createdAt?{createdAt}:{}),...(retry?{retryOf:retry.eventId}:{}),...(automatic && !retry?{automatic:true}:{})},refs);
         } catch(error) {
             if(automatic && controller.signal.aborted) error=Object.assign(new Error('自动设计已取消'),{code:'CANCELLED'});
             if(error instanceof SyntaxError) error=Object.assign(new Error('事件设计返回格式不完整，请重试'),{code:'INVALID_PLAN'});
@@ -292,25 +297,20 @@ export class CoopRuntime {
             document.summaryEdits[eventId]={summary,version:h.summaryVersion+1,sourceVersion:h.source.version,reviewedAt:Date.now()};
         });
     }
-    /**
-     * 「用户回应之后的那段收束正文」。
-     * @param {object} event
-     * @param {{force?: boolean}} [options]
-     *   `force`（按实际剧情收束）时不再要求楼层快照里的 `event.version` 与当前一致 ——
-     *   暂停／继续／重新生成都会抬 version，抬过之后严格比对就找不到任何正文，
-     *   于是「手动核对」永远报「尚无收束正文」。强制收束本来就是按实际剧情写，不依赖当时那份计划。
-     */
+    /** 成功核对使用当前收束正文；失败核对可读取任意阶段同一事件的最新回应。 */
     archiveSource(event=this.event(),{force=false}={}) {
-        if(!event?.answerSource) return null;
-        return [...this.store.sources().values()].filter(s=>!s.isUser && !s.isSystem && s.userId===event.answerSource.id &&
-            s.index>event.answerSource.index && this.host.messages()[s.index]?.extra?.sdCoopSnapshot?.event?.id===event.id &&
-            this.host.messages()[s.index]?.extra?.sdCoopSnapshot?.event?.phase==='resolution' &&
-            (force || this.host.messages()[s.index]?.extra?.sdCoopSnapshot?.event?.version===event.version)).at(-1);
+        if(!event) return null;
+        const sources=[...this.store.sources().values()];
+        const user=force?sources.findLast(s=>s.isUser && !s.isSystem):event.answerSource;
+        if(!user) return null;
+        return sources.filter(s=>!s.isUser && !s.isSystem && s.userId===user.id && s.index>user.index &&
+            this.host.messages()[s.index]?.extra?.sdCoopSnapshot?.event?.id===event.id &&
+            (force || this.host.messages()[s.index]?.extra?.sdCoopSnapshot?.event?.phase==='resolution' &&
+                this.host.messages()[s.index]?.extra?.sdCoopSnapshot?.event?.version===event.version)).at(-1);
     }
     /**
      * @param {{automatic?: boolean, force?: boolean}} [options]
-     *   `force` = 「按实际剧情收束」：剧情没按原计划走、原定目标已经不可能达成，但这一段确实演完了。
-     *   不再要求目标达成／现场冲突结束，只要求证据仍能引到正文、成长仍有依据。
+     *   force 保留旧调用参数，但现在只核对失败；不会跳过成功条件替未达标事件升阶。
      */
     async recoverArchive({automatic=false,force=false}={}) {
         await this.host.refreshPrompts?.();
@@ -318,53 +318,66 @@ export class CoopRuntime {
         if(this.store.pending) fail('SAVE_PENDING','请先完成尚未确认的保存');
         if(this.store.readonly) fail('READ_ONLY','当前窗口只读，不能补齐归档');
         if(this.disposed || this.store.scope!==this.host.scope()) fail('STALE_TASK');
-        if(!event || event.phase!=='resolution' || this.job) fail('NOT_READY','只在已有真实收束正文但归档回报不完整时使用');
+        if(!event || !force && event.phase!=='resolution' || this.job) fail('NOT_READY','请先产生当前事件的正文，再核对归档');
         const p=profileOf(this.state(),event.characterId),source=this.archiveSource(event,{force});
-        if(!source) fail('INVALID_SOURCE','尚无用户回应后的收束正文，请继续当前事件');
+        if(!source) fail('INVALID_SOURCE',force?'尚无当前事件对应的最新正文，请先继续一次对话':'尚无用户回应后的收束正文，请继续当前事件');
         const version=event.version,scope=this.store.scope,generation=this.store.generation,controller=new AbortController();
-        const job={id:uuid(),characterId:p.id,controller,scope,label:automatic?'自动核对事件收束与归档':force?'按实际剧情收束':'补齐事件归档',createdAt:event.createdAt,sourceId:source.id};this.job=job;this.changed();
+        const job={id:uuid(),characterId:p.id,controller,scope,label:force?'核对事件是否失败':automatic?'自动核对事件收束与归档':'补齐事件归档',createdAt:event.createdAt,sourceId:source.id};this.job=job;this.changed();
+        let failed=false;
         try {
-            const messages=[{role:'system',content:archiveSystemPrompt({force})},{role:'user',content:JSON.stringify({targetRank:event.targetRank,goal:event.plan.goal,
+            const responses=[...(event.answerSources || []),event.initialAnswerSource,event.answerSource,
+                {id:source.userId,version:source.userVersion,body:source.userBody}].filter(Boolean);
+            const userResponses=[...new Map(responses.map(s=>[s.id+':'+s.version,{id:s.id,body:s.body}])).values()];
+            const messages=[{role:'system',content:archiveSystemPrompt({force})},{role:'user',content:JSON.stringify({targetRank:event.targetRank,phase:event.phase,goal:event.plan.goal,
                 resolutionCondition:event.plan.resolution,currentConflict:event.plan.conflict,
-                route:event.route,question:event.plan.question,initialUserResponse:event.initialAnswerSource?.body,userResponse:event.answerSource.body,
+                route:event.route,question:event.plan.question,initialUserResponse:event.initialAnswerSource?.body,userResponse:source.userBody || event.answerSource?.body,userResponses,
                 routeResponse:event.routeSource?.body,currentReply:source.body,
-                ...(force?{closureMode:'force',note:'用户选择按实际剧情收束：原定目标可能已无法达成，按正文实际发生的收束填写'}:{}),
+                ...(force?{closureMode:'failure',note:'核对原定事件是否已无法完成；确实失败则如实归档且不升阶，仍可完成则继续，不得把普通未完成判成失败'}:{}),
                 earlierActs:event.progress.map(v=>({phase:v.phase,evidence:v.evidence})),history:continuity(p)})}];
             const raw=await this.host.ask(messages,controller.signal);
             const currentSource=this.store.sources().get(source.id);
             if(controller.signal.aborted || this.job!==job || this.store.scope!==scope || this.host.scope()!==scope ||
                 this.store.generation!==generation || this.store.readonly || this.disposed || this.event()?.id!==event.id ||
-                (!force && this.event()?.version!==version) || !matchesSourceVersion(currentSource,source.version) ||
-                !matchesUserVersion(currentSource,source.userVersion)) fail('STALE_TASK');
+                this.event()?.version!==version || this.archiveSource(this.event(),{force})?.id!==source.id ||
+                !matchesSourceVersion(currentSource,source.version) || !matchesUserVersion(currentSource,source.userVersion)) fail('STALE_TASK');
             const result=modelJson(raw);
-            if(automatic && result.ready===false && result.routeConflict!==true) return false;
-            if(result.ready!==true && result.routeConflict!==true) fail('NOT_COMPLETE',text(result.reason,400) || '当前正文尚未达到收束条件');
-            await this.store.operation('beat',p.id,{eventId:event.id,characterId:p.id,eventVersion:this.event()?.version ?? version,requireSceneClosure:!force,
-                phase:'resolution',source,evidence:result.evidence,completion:result.completion,
+            if(automatic && result.failed!==true && result.ready===false && result.routeConflict!==true) return false;
+            if(force && result.failed!==true || result.failed!==true && result.ready!==true && result.routeConflict!==true) {
+                fail('NOT_COMPLETE',text(result.reason,400) || (force?'尚未确认本事件已无法完成，请继续当前事件':'当前正文尚未达到收束条件'));
+            }
+            const kind=result.failed===true?'failed':result.routeConflict===true?'route':'completed';
+            await this.store.operation('beat',p.id,{eventId:event.id,characterId:p.id,eventVersion:version,requireSceneClosure:true,
+                phase:event.phase,source,evidence:result.evidence,completion:result.completion,failed:result.failed,failure:result.failure,
                 routeConflict:result.routeConflict,userEvidence:result.userEvidence},references(source),
-                'archive:'+event.id+':'+source.id+':'+source.version);
+                'archive:'+event.id+':'+version+':'+kind+':'+source.id+':'+source.version);
+            failed=result.failed===true;
         } catch(error) {if(!['CANCELLED','STALE_TASK','STALE_SCOPE'].includes(error.code)) this.notice(error);throw error;}
         finally {if(this.job===job){this.job=null;this.changed();}}
+        if(failed) await this.retryFailed({manual:!automatic,characterId:p.id});
+        return true;
     }
     maybeAutoArchive() {
         if(this.archiveCheckTask) return this.archiveCheckTask;
         if(!this.store.document || this.store.readonly || this.store.pending || this.disposed || this.job ||
             this.store.scope!==this.host.scope() || !this.host.autoAllowed?.()) return Promise.resolve();
         const event=this.event();
-        if(event?.phase!=='resolution') return Promise.resolve();
-        const source=this.archiveSource(event),message=this.host.messages().at(-1);
+        if(!event) return Promise.resolve();
+        const source=this.archiveSource(event,{force:event.phase!=='resolution'}),message=this.host.messages().at(-1);
         if(!source || source.index!==this.host.messages().length-1 || !source.body.trim()) return Promise.resolve();
         const extra=message.extra,snapshot=extra?.sdCoopSnapshot;
         // 旧轮次等 MVU 回填；新轮次由正文直接回报，不必等待额外变量模型。
         if(snapshot?.reportChannel!=='director' && (this.usesMvuAffinity || snapshot?.byExtra) && !matchesSourceVersion(source,extra.sdCoopMvuVersion)) return Promise.resolve();
         const saved=extra.sdCoopReports;
+        const reportedFailure=matchesSourceVersion(source,saved?.version) && Array.isArray(saved.reports) && saved.reports.some(r=>r.nonce===snapshot.nonce &&
+            r.event?.eventId===event.id && r.event.eventVersion===event.version && r.event.failed===true);
+        if(event.phase!=='resolution' && !reportedFailure) return Promise.resolve();
         if(matchesSourceVersion(source,saved?.version) && Array.isArray(saved.reports) && saved.reports.some(r=>r.nonce===snapshot.nonce &&
             r.event?.eventId===event.id && r.event.eventVersion===event.version && r.event.phase==='resolution' &&
-            r.event.ready===false && r.event.routeConflict!==true)) return Promise.resolve();
+            r.event.ready===false && r.event.routeConflict!==true && r.event.failed!==true)) return Promise.resolve();
         const attempt={eventId:event.id,eventVersion:event.version,sourceVersion:source.version,userVersion:source.userVersion};
         if(JSON.stringify(extra.sdCoopArchiveCheck)===JSON.stringify(attempt)) return Promise.resolve();
         extra.sdCoopArchiveCheck=attempt;
-        const task=this.recoverArchive({automatic:true}).catch(()=>{}).finally(()=>{
+        const task=this.recoverArchive({automatic:true,force:reportedFailure}).catch(()=>{}).finally(()=>{
             if(this.archiveCheckTask===task) this.archiveCheckTask=null;
         });
         this.archiveCheckTask=task;
@@ -492,12 +505,14 @@ export class CoopRuntime {
                 if(sameSource && rejected.reports.includes(rejectionKey)) continue;
                 try {
                     const r=report.event, p=this.state().profiles[r.characterId], expected=snapshot.event;
-                    if(p?.events[r.eventId]?.phase==='completed') continue;
+                    if(isTerminalEvent(p?.events[r.eventId])) continue;
                     if(!p || p.mode!=='coop' || snapshot.roles[p.id]?.policyRevision!==p.policyRevision) fail('NOT_MANAGED');
                     if(r.eventId!==expected.id || r.characterId!==expected.characterId || r.eventVersion!==expected.version || r.phase!==expected.phase) fail('STALE_EVENT');
-                    if(r.phase==='resolution' && r.ready===false && r.routeConflict!==true) continue;
+                    // 早期阶段的新回应不一定改变事件版本；旧轮次迟到的失败不能覆盖之后的反悔或新正文。
+                    if(r.failed===true && this.archiveSource(this.event(),{force:true})?.id!==source.id) fail('STALE_SOURCE');
+                    if(r.ready===false && r.routeConflict!==true && r.failed!==true) continue;
                     await this.store.operation('beat',p.id,{...r,source,requireSceneClosure:r.phase==='resolution' && r.routeConflict!==true},references(source),
-                        'beat:'+r.eventId+':'+r.phase+':'+source.id+':'+source.version);
+                        'beat:'+r.eventId+':'+r.eventVersion+':'+r.phase+':'+(r.failed===true?'failed':r.routeConflict===true?'route':'progress')+':'+source.id+':'+source.version);
                 } catch(error) {
                     // 已拒绝的旧回报不会因 MVU 保留该变量而反复重放；修正报告或正文后仍可重试。
                     // 保存失败保留待保存操作，不能把它缓存成永久拒绝。
@@ -528,6 +543,7 @@ export class CoopRuntime {
             try {await this.receiveMvuReport(variables);this.mvuLive=variables;this.store.reconcile();}
             finally {this.mvuLive=null;}
         } else await this.receiveMvuReport(variables);
+        await this.retryFailed();
         void this.maybeAutoArchive();
     }
     async receiveMvuReport(variables) {
@@ -570,7 +586,30 @@ export class CoopRuntime {
         await this.maybeAuto();
         void this.maybeAutoArchive();
     }
+    /** 失败重试属于当前阶的后续处理；只在归档保存成功后生成一次新设计。 */
+    async retryFailed({manual=false,characterId=null}={}) {
+        if(!this.store.document || this.store.readonly || this.store.pending || this.disposed || this.job ||
+            this.store.scope!==this.host.scope() || this.event() || unfinishedEvent(this.state())) return false;
+        if(!manual && (!this.host.autoAllowed?.() || Date.now()-this.lastAutoFailure<60000)) return false;
+        const profiles=Object.values(this.state().profiles).filter(p=>(!characterId || p.id===characterId) &&
+            eventGate(p,this.usesMvuAffinity) && pendingRetry(p)).sort((a,b)=>pendingRetry(a).source.index-pendingRetry(b).source.index);
+        const profile=profiles[0];
+        if(!profile) return false;
+        const failure=pendingRetry(profile),user=[...this.store.sources().values()].findLast(s=>s.isUser && !s.isSystem);
+        const key=failure.eventId+':'+user?.id+':'+user?.version;
+        if(!manual && this.retryAttempts.has(key)) return false;
+        this.retryAttempts.add(key);
+        while(this.retryAttempts.size>100) this.retryAttempts.delete(this.retryAttempts.values().next().value);
+        try {await this.generate(profile.id,{automatic:!manual});return true;}
+        catch(error) {
+            if(!['CANCELLED','STALE_TASK','AUTO_START_DISABLED'].includes(error.code)) this.lastAutoFailure=Date.now();
+            if(manual) throw error;
+            return false;
+        }
+    }
     async maybeAuto() {
+        if(await this.retryFailed()) return;
+        if(this.state() && Object.values(this.state().profiles).some(p=>p.mode==='coop' && pendingRetry(p))) return;
         if(!this.store.document || this.store.document.settings.autoStart===false || this.store.readonly || this.store.pending || this.archiveCheckTask || this.occupies() || unfinishedEvent(this.state()) || !this.host.autoAllowed?.() ||
             Date.now()-this.lastAutoFailure<60000) return;
         const latestUser=[...this.store.sources().values()].filter(source=>source.isUser && !source.isSystem).at(-1);
@@ -584,7 +623,7 @@ export class CoopRuntime {
         }
         const roster=Object.values(this.state().profiles);
         const profiles=roster.filter(p=>eventGate(p,this.usesMvuAffinity) && this.host.available(p,roster) &&
-            !Object.values(p.events).some(e=>e.phase!=='completed')).sort((a,b)=>(a.scoreLog.at(-1)?.source.index ?? 0)-(b.scoreLog.at(-1)?.source.index ?? 0));
+            !Object.values(p.events).some(e=>!isTerminalEvent(e))).sort((a,b)=>(a.scoreLog.at(-1)?.source.index ?? 0)-(b.scoreLog.at(-1)?.source.index ?? 0));
         if(profiles[0]) try {await this.generate(profiles[0].id,{automatic:true});} catch(error) {
             if(!['CANCELLED','STALE_TASK','AUTO_START_DISABLED'].includes(error.code)) this.lastAutoFailure=Date.now();
         }
