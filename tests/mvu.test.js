@@ -187,10 +187,11 @@ test('missing MVU and uninitialized tables are left intact and can sync when rea
 });
 test('director token writes preserve the confirmed Coop mirror even with an older namespace snapshot',async()=>{
     const h=setup(),source=fs.readFileSync(new URL('../index.js',import.meta.url),'utf8');
-    const start=source.indexOf('async function writeMvu(d) {'),end=source.indexOf('\n}\n',start)+2;
+    const start=source.indexOf('async function writeMvu(d) {');
+    const end=source.indexOf('\n}\n',source.indexOf('async function writeMvuImpl(d) {',start))+2;
     const context=vm.createContext({mvu:()=>h.api,isPlainObject:value=>!!value && typeof value==='object' && !Array.isArray(value),
         NS:'故事导演',coop:{syncMvu:h.sync},console});
-    vm.runInContext(source.slice(start,end),context);
+    vm.runInContext('let namespaceOperations=0;\n'+source.slice(start,end),context);
     await context.writeMvu({stat_data:{故事导演:{主线:{当前拍:3}}}});
     assert.equal(h.affinity('message'),7);assert.equal(h.affinity('chat'),7);
     assert.equal(h.tables.chat.stat_data.生命,12);

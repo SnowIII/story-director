@@ -1,4 +1,4 @@
-import {object,clone,fail,rankPolicy,gateFor} from './model.js';
+import {object,clone,fail,rankPolicy,gateFor,isTerminalEvent,pendingRetry} from './model.js';
 const mvuAdapters=new WeakMap();
 /** MVU 的变量表由酒馆助手持有；部分安装方式不会把 Mvu 接口挂到主窗口。 */
 export function mvuApiFor(hostWindow=globalThis.window) {
@@ -105,9 +105,9 @@ export function readMvuAffinity(host,state,{live=null,previous=null}={}) {
             p.mvuError='MVU 好感度须为 0～100 的整数，好感锁定须为布尔值。';continue;
         }
         p.affinity=value;p.mvuReady=true;
-        const unfinished=Object.values(p.events).find(event=>event.phase!=='completed');
+        const unfinished=Object.values(p.events).find(event=>!isTerminalEvent(event));
         p.lock=locked?{...gateFor(p,'mvu'),...(unfinished?{id:unfinished.gateId}:{}),lockedValue:value}:null;
-        p.unlockAfterArchive=locked && !unfinished && p.rank>0 && (p.rank===p.rankCount || value<p.thresholds[p.rank]);
+        p.unlockAfterArchive=locked && !unfinished && !pendingRetry(p) && p.rank>0 && (p.rank===p.rankCount || value<p.thresholds[p.rank]);
     }
     return state;
 }

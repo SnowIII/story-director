@@ -78,6 +78,9 @@
     scrollbar-width: thin;
     flex: 0 0 auto;
 }
+#so-story-director-btn[hidden],
+#story-director-panel .sd-tab[hidden] { display: none !important; }
+
 #story-director-panel .sd-tab {
     flex: 0 0 auto;
     min-width: 52px;
@@ -531,3 +534,5 @@ dialog.sd-dialog .sd-dialog-pin {
 @media(hover:hover){#story-director-coop-panel .sdc-disclosure>summary:hover{border-color:#a778a8;background:#a778a83d}}
 #story-director-coop-panel pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:350px;overflow:auto}
 @media(max-width:600px){#story-director-coop-panel{inset:12px 12px auto;max-height:calc(100dvh - 24px)}#story-director-coop-panel .sdc-body{max-height:calc(100dvh - 145px);padding:12px}#story-director-coop-panel nav button{white-space:nowrap}}
+
+#story-director-panel .sd-coop-only-control { display: flex; align-items: center; gap: 8px; padding: 10px; flex-wrap: wrap; }

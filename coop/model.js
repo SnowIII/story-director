@@ -8,7 +8,8 @@ export const MODES = ['off', 'affinity', 'coop'];
 export const THRESHOLDS = RANK_POLICIES[4].thresholds;
 export const RANK_COUNT = THRESHOLDS.length;
 export const RELATIONSHIP_RANK = 3;
-export const PHASES = ['hook','dilemma','waiting_user','waiting_route','resolution','completed'];
+export const PHASES = ['hook','dilemma','waiting_user','waiting_route','resolution','completed','failed'];
+export const isTerminalEvent = event => !!event && ['completed','failed'].includes(event.phase);
 export const clone = value => JSON.parse(JSON.stringify(value));
 export const object = value => !!value && typeof value === 'object' && !Array.isArray(value);
 export const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
@@ -47,7 +48,7 @@ export function newProfile(config) {
         cardRef:text(config.cardRef,200), mode:config.mode || 'off', policyRevision:config.policyRevision || 1,
         affinity:integer(config.initialAffinity ?? 0,0,100), rank:0, route:'unset', lock:null,
         rankCount:rankPolicy(config).rankCount,thresholds:thresholds(config.thresholds,rankPolicy(config).rankCount), seeds:null, traits:[], facts:[], boundaries:[],
-        openHooks:[], history:[], events:{}, scoreLog:[], revision:0 };
+        openHooks:[], history:[], failedHistory:[], events:{}, scoreLog:[], revision:0 };
 }
 export function initialState(roster = {}) {
     const profiles = Object.create(null);
@@ -103,10 +104,19 @@ export function activeEvent(state) {
     for (const p of Object.values(state.profiles)) if (own(p.events,state.activeEventId)) return p.events[state.activeEventId];
     return null;
 }
-export const historySignature=p=>hash(JSON.stringify(p.history.map(h=>[h.eventId,h.summary,h.summaryVersion])));
+export function historySignature(p) {
+    const completed=p.history.map(h=>[h.eventId,h.summary,h.summaryVersion]);
+    const failed=(p.failedHistory || []).map(h=>[h.eventId,h.summary,h.summaryVersion]);
+    // Preserve signatures from journals created before failed attempts existed.
+    return hash(JSON.stringify(failed.length?{completed,failed}:completed));
+}
+export function pendingRetry(profile) {
+    return (profile.failedHistory || []).filter(h=>h.rank===profile.rank+1 &&
+        !Object.values(profile.events).some(event=>event.retryOf===h.eventId)).at(-1) || null;
+}
 /** A paused Rank still owns the queue until it is actually completed. */
 export function unfinishedEvent(state) {
-    return Object.values(state.profiles).flatMap(p=>Object.values(p.events)).filter(e=>e.phase!=='completed')
+    return Object.values(state.profiles).flatMap(p=>Object.values(p.events)).filter(e=>!isTerminalEvent(e))
         .sort((a,b)=>(a.createdAt?.index ?? a.progress[0]?.source.index ?? Infinity)-(b.createdAt?.index ?? b.progress[0]?.source.index ?? Infinity))[0] || null;
 }
 export function validatePlan(raw, profile) {
@@ -142,18 +152,22 @@ export function adoptPlan(state, input,{replay=false}={}) {
     const plan=validatePlan(input.plan,p);
     const eventId=id(input.eventId);
     if (own(p.events,eventId)) fail('ALREADY_COMMITTED');
-    if (Object.values(p.events).some(e=>e.phase!=='completed' && (!replay || e.gateId===p.lock.id))) fail('EVENT_EXISTS','该阶已有未完成事件，请继续原事件');
+    if (Object.values(p.events).some(e=>!isTerminalEvent(e) && (!replay || e.gateId===p.lock.id))) fail('EVENT_EXISTS','该阶已有未完成事件，请继续原事件');
+    const retry=pendingRetry(p);
+    if(input.retryOf!==undefined && input.retryOf!==(retry?.eventId || null)) fail('STALE_RETRY','失败事件记录已变化，请重新设计当前阶事件');
+    if(!replay && input.historySignature && input.historySignature!==historySignature(p)) fail('HISTORY_CHANGED');
     p.seeds=p.seeds || clone(plan.seeds);
     p.events[eventId]={id:eventId,characterId:p.id,gateId:p.lock.id,targetRank:p.rank+1,plan,
+        ...(retry?{retryOf:retry.eventId}:{}),
         ...(input.createdAt?{createdAt:clone(input.createdAt)}:{}),
-        phase:'hook',paused:false,version:1,playedUsers:[],questionSource:null,initialAnswerSource:null,answerSource:null,
+        phase:'hook',paused:false,version:1,playedUsers:[],questionSource:null,initialAnswerSource:null,answerSource:null,answerSources:[],
         route:null,historyIds:p.history.map(h=>h.eventId),historySignature:input.historySignature || historySignature(p),progress:[]};
     state.activeEventId=eventId; p.revision++;
     return p.events[eventId];
 }
 export function eventOf(state, characterId, eventId) {
     const p=profileOf(state,characterId), e=p.events[eventId];
-    if (!e || (!p.lock || e.gateId!==p.lock.id) && !state.mvuAuthority || e.phase==='completed') fail('STALE_EVENT');
+    if (!e || (!p.lock || e.gateId!==p.lock.id) && !state.mvuAuthority || isTerminalEvent(e)) fail('STALE_EVENT');
     return {p,e};
 }
 export function pauseEvent(state,characterId,eventId) {
@@ -183,6 +197,8 @@ export function acceptAnswer(state,input,{replay=false}={}) {
         input.source.index<=e.questionSource?.index || !replay && !text(input.source.body)) fail('WAITING_USER');
     e.initialAnswerSource=e.initialAnswerSource || clone(input.source);
     e.answerSource=clone(input.source);
+    e.answerSources=e.answerSources || [];
+    if(!e.answerSources.some(source=>source.id===input.source.id && source.version===input.source.version)) e.answerSources.push(clone(input.source));
     e.phase=e.targetRank===rankPolicy(p).relationshipRank && !e.route ? 'waiting_route':'resolution'; e.version++; p.revision++;
 }
 export function chooseRoute(state,input) {
@@ -194,7 +210,8 @@ export function acceptBeat(state,input,{replay=false}={}) {
     const {p,e}=eventOf(state,input.characterId,input.eventId), s=input.source;
     if(p.mode!=='coop' || e.paused || state.activeEventId!==e.id) fail('NOT_ACTIVE');
     if(e.version!==input.eventVersion || input.phase!==e.phase) fail('STALE_EVENT');
-    if(!s || s.isUser || !s.userId || !replay && !hasEvidence(s.body,text(input.evidence))) fail('INVALID_EVIDENCE');
+    if(!s || s.isUser || s.isSystem || !s.userId || !replay && !hasEvidence(s.body,text(input.evidence))) fail('INVALID_EVIDENCE');
+    if(input.failed===true) return failEvent(state,input,{replay});
     if(e.playedUsers.includes(s.userId)) fail('WAITING_USER','同一用户互动只能完成一个演出阶段');
     if(input.routeConflict===true) {
         if(e.phase!=='resolution' || e.targetRank!==rankPolicy(p).relationshipRank || !e.route ||
@@ -212,6 +229,48 @@ export function acceptBeat(state,input,{replay=false}={}) {
     e.version++; p.revision++;
     return e;
 }
+function answerEvidenceSources(event,source=null) {
+    const replies=[...(event.answerSources || []),event.initialAnswerSource,event.answerSource];
+    if(source?.userId && text(source.userBody)) replies.push({id:source.userId,version:source.userVersion,
+        index:source.userIndex,isUser:true,body:source.userBody});
+    return replies.filter(Boolean);
+}
+function validatedSharedFacts(state,report,source,rank,characterId,replay) {
+    return (Array.isArray(report.sharedFacts)?report.sharedFacts:[]).slice(0,12).map(item=>{
+        if(!object(item) || !text(item.entityId) || !text(item.fact) || !replay && !hasEvidence(source.body,text(item.evidence))) fail('INVALID_EVIDENCE');
+        const key=id(item.entityId),old=state.sharedFacts[key];
+        if(old && old.fact!==text(item.fact,600) && item.previousFact!==old.fact) fail('CONTINUITY_CONFLICT','共享实体状态发生冲突：'+key);
+        return {entityId:key,name:text(item.name,120),fact:text(item.fact,600),knownBy:lines(item.knownBy,30),
+            source:clone(source),rank,characterId};
+    });
+}
+/** A failed attempt ends its scene without awarding Rank or releasing its gate. */
+export function failEvent(state,input,{replay=false}={}) {
+    const {p,e}=eventOf(state,input.characterId,input.eventId),report=input.failure,s=input.source;
+    if(!object(report)) fail('FAILURE_MISSING','失败归档缺少实际原因与结果');
+    if(e.targetRank!==p.rank+1 || e.targetRank>p.rankCount) fail('INVALID_RANK');
+    const reason=text(report.reason,600),outcome=text(report.outcome,600),choice=text(report.choice,600);
+    if(!reason || !outcome || !replay && !hasEvidence(s.body,text(report.outcomeEvidence))) fail('INVALID_EVIDENCE');
+    const choiceSource=answerEvidenceSources(e,s).find(source=>hasEvidence(source.body,text(report.choiceEvidence)));
+    if(!replay && (choice || text(report.choiceEvidence)) && (!choice || !choiceSource)) fail('INVALID_EVIDENCE');
+    let summary=text(report.summary,1200);
+    if(!summary) summary='原定目标：'+e.plan.goal+'；失败原因：'+reason+'；实际结果：'+outcome+(choice?'；用户实际选择：'+choice:'');
+    if(summary.length<20) fail('SUMMARY_MISSING');
+    if(Array.isArray(report.conflicts) && report.conflicts.length) fail('CONTINUITY_CONFLICT');
+    const shared=validatedSharedFacts(state,report,s,e.targetRank,p.id,replay),openHooks=lines(report.openHooks);
+    p.failedHistory=p.failedHistory || [];
+    if(p.failedHistory.some(h=>h.eventId===e.id)) fail('ALREADY_COMMITTED');
+    const history={rank:e.targetRank,eventId:e.id,reason,summary,summaryVersion:1,outcome,choice,openHooks,
+        goal:e.plan.goal,source:clone(s),sharedFacts:shared,
+        ...(choiceSource?{choiceSource:clone(choiceSource)}:{}),
+        ...(e.retryOf?{retryOf:e.retryOf}:{}),...(e.createdAt?{createdAt:clone(e.createdAt)}:{})};
+    p.failedHistory.push(history);
+    p.openHooks=lines([...p.openHooks,...openHooks],50);
+    e.phase='failed';e.paused=false;e.version++;e.progress.push({phase:'failed',evidence:text(input.evidence,500),source:clone(s)});
+    shared.forEach(item=>{state.sharedFacts[item.entityId]=item;});
+    state.activeEventId=null;state.historyRevision++;p.revision++;
+    return history;
+}
 export function completeEvent(state,input,{replay=false}={}) {
     const {p,e}=eventOf(state,input.characterId,input.eventId), report=input.completion, s=input.source;
     if(e.phase!=='resolution' || !e.answerSource || s.userIndex<=e.questionSource.index) fail('WAITING_USER');
@@ -219,7 +278,9 @@ export function completeEvent(state,input,{replay=false}={}) {
     if(e.targetRank!==p.rank+1 || e.targetRank>p.rankCount) fail('INVALID_RANK');
     if(e.targetRank===rankPolicy(p).relationshipRank && !e.route) fail('WAITING_ROUTE');
     if(!object(report)) fail('SUMMARY_MISSING');
-    if(input.requireSceneClosure && !replay) {
+    // New live archives must not turn a failed objective into a promotion.
+    // Confirmed legacy force archives still replay exactly as saved.
+    if(input.requireSceneClosure!==undefined && !replay) {
         const scene=report.scene;
         if(!object(scene) || scene.goalAchieved!==true || scene.closed!==true || scene.awaitingUser!==false ||
             !Array.isArray(scene.blockingConflicts) || scene.blockingConflicts.length || !hasEvidence(s.body,text(scene.evidence))) {
@@ -227,9 +288,10 @@ export function completeEvent(state,input,{replay=false}={}) {
         }
     }
     const outcome=text(report.outcome,600), choice=text(report.choice,600);
-    const choiceSources=e.targetRank===rankPolicy(p).relationshipRank?[e.routeSource]:[e.initialAnswerSource,e.answerSource];
+    const choiceSources=e.targetRank===rankPolicy(p).relationshipRank?[e.routeSource]:answerEvidenceSources(e);
+    const choiceSource=choiceSources.find(source=>hasEvidence(source?.body,text(report.choiceEvidence)));
     if(!outcome || !choice || !replay && (!hasEvidence(s.body,text(report.outcomeEvidence)) ||
-        !choiceSources.some(source=>hasEvidence(source?.body,text(report.choiceEvidence))))) fail('INVALID_EVIDENCE');
+        !choiceSource)) fail('INVALID_EVIDENCE');
     let summary=text(report.summary,1200);
     const traits=lines(report.traits), facts=lines(report.facts), boundaries=lines(report.boundaries);
     const openHooks=lines(report.openHooks), closedHooks=lines(report.closedHooks);
@@ -238,18 +300,12 @@ export function completeEvent(state,input,{replay=false}={}) {
         (openHooks.length?'；尚待处理：'+openHooks.join('；'):'');
     if(summary.length<20) fail('SUMMARY_MISSING');
     if(Array.isArray(report.conflicts) && report.conflicts.length) fail('CONTINUITY_CONFLICT');
-    const shared=[];
-    for(const item of (Array.isArray(report.sharedFacts)?report.sharedFacts:[]).slice(0,12)) {
-        if(!object(item) || !text(item.entityId) || !text(item.fact) || !replay && !hasEvidence(s.body,text(item.evidence))) fail('INVALID_EVIDENCE');
-        const key=id(item.entityId), old=state.sharedFacts[key];
-        if(old && old.fact!==text(item.fact,600) && item.previousFact!==old.fact) fail('CONTINUITY_CONFLICT','共享实体状态发生冲突：'+key);
-        shared.push({entityId:key,name:text(item.name,120),fact:text(item.fact,600),knownBy:lines(item.knownBy,30),
-            source:clone(s),rank:e.targetRank,characterId:p.id});
-    }
+    const shared=validatedSharedFacts(state,report,s,e.targetRank,p.id,replay);
     const history={rank:e.targetRank,eventId:e.id,summary,summaryVersion:1,outcome,choice,traits,facts,boundaries,openHooks,closedHooks,
         ...(e.createdAt?{createdAt:clone(e.createdAt)}:{}),
         // 「按实际剧情收束」：用户主动跳过「原定目标达成」这道门时在档案里留痕（档案页显示一句说明）。
-        ...(input.requireSceneClosure===false?{closedBy:'force'}:{}),
+        ...(replay && input.requireSceneClosure===false?{closedBy:'force'}:{}),
+        ...(choiceSource?{choiceSource:clone(choiceSource)}:{}),
         route:e.route || p.route,source:clone(s),initialAnswerSource:clone(e.initialAnswerSource || e.answerSource),
         answerSource:clone(e.answerSource),sharedFacts:shared};
     if(p.history.some(h=>h.rank===e.targetRank || h.eventId===e.id)) fail('ALREADY_COMMITTED');
@@ -269,11 +325,14 @@ export function assertState(state) {
         const policy=rankPolicy(p);
         integer(p.affinity,0,100); integer(p.rank,0,policy.rankCount); thresholds(p.thresholds,policy.rankCount);
         if(p.history.length!==p.rank || p.history.some((h,i)=>h.rank!==i+1 || !h.summary)) fail('HISTORY_MISSING');
+        const failed=p.failedHistory || [];
+        if(new Set(failed.map(h=>h.eventId)).size!==failed.length || failed.some(h=>!h.summary || !h.reason ||
+            h.rank<1 || h.rank>p.rank+1 || p.events[h.eventId]?.phase!=='failed')) fail('HISTORY_MISSING');
         if(p.lock && (p.affinity!==p.lock.lockedValue || p.lock.targetRank!==p.rank+1)) fail('INVALID_GATE');
         for(const e of Object.values(p.events)) {
             integer(e.targetRank,1,policy.rankCount);
             if(!PHASES.includes(e.phase)) fail('INVALID_PHASE');
-            if(!e.paused && e.phase!=='completed') {
+            if(!e.paused && !isTerminalEvent(e)) {
                 active++;
                 if(e.id!==state.activeEventId) fail('INVALID_ACTIVE_EVENT');
             }
