@@ -18,6 +18,10 @@ const failureRule=[
     '失败无需目标达成、现场冲突全部结束、人物成长或关系路线确认。它只归档本次失败，Rank 不增加，好感锁定保留；程序随后另行设计同一目标 Rank 的新事件，本轮正文不擅自重开、不抹去失败事实。未解决的后果记入 openHooks；有依据的世界状态变化可用 sharedFacts 记录。'
 ].join('\n');
 const retryDesignRule='【失败后的同阶重试，固定契约】本阶失败记录是已经发生的事实，不是成功升阶历史；仍只设计当前目标 Rank。对照失败原因、真实选择和现场后果，另选当前确实可行的具体场景、事项、互动任务和解决路径，不复用已经不可达成的目标，不把失败原计划当作事实。不得复活已死人物、恢复已毁物品、倒退剧情或要求用户推翻已明确拒绝的关系；保留原阶蓝图与关系确认规则，不能预写关系同意。条件尚不支持关系确认时，先设计尊重边界的可行互动，不重复逼问。';
+const sceneContinuityRule=[
+    '【现场连续性，固定契约】当前地点、时间、人物和物品状态以最新真实对话为准。角色卡或世界书中的初始场景、旧计划的 scene 都不能覆盖已经发生的变化；不因旧计划限定地点就把人物传送回去、重演开场或要求用户撤回已发生的移动。',
+    '场景变化本身不表示失败。若本阶目标仍可达成，承接当前现场调整尚未演出的行动与收束方式；已经演出的事实、已提出的问题、真实回应、关系路线和本阶目标保持有效。只有目标确实已不可达成或用户明确放弃时才按失败契约处理，不靠降低目标或编造结果成功升阶。'
+].join('\n');
 export const growthRule='人物变化与归档只记录本次实际验证的局部成长，不把一次安慰或成功夸大成“彻底治愈、再也不会、全部释怀”。已确认的成长继续成立，后阶通过新责任、新行动或新的关系边界推进，不重置已解决的心结。';
 /**
  * 归档提示词。
@@ -103,6 +107,8 @@ export function designMessages(profile,context='',templates={}, {rounds=3}={}) {
     const format='【固定返回格式：Coop 事件设计，由程序提供】只输出一个合法 JSON 对象，不使用 Markdown 围栏，不附解释。以下字段、类型、目标 Rank、轮数及历史 ID 不可被自定义规则改写；字符串填实际设计内容，已有 seeds 原样复用。\n'+JSON.stringify(sample);
     return [{role:'system',content:[designRules,templates.forms || EVENT_FORM_GUIDE,constraints+
         ' conflict 可描述待协调、待探索的具体事项（偏好、信息或分工等），没有外部冲突时如实说明，不为填字段捏造危机。',
+        sceneContinuityRule,
+        'scene 描述接下来未演部分所用的可行场景。重新生成时可据最新真实现场更新 scene；原开场地点仍属于已发生的历史，不能改写进度记录，也不把新地点冒充过去已经发生的场景。',
         ...(failedPlans.length?[retryDesignRule]:[]),format].join('\n\n')},{role:'user',content:user}];
 }
 export function renderScene(profile,event) {
@@ -110,7 +116,8 @@ export function renderScene(profile,event) {
     const p=event.plan;
     const lines=['【当前唯一演出：Coop 羁绊事件】目标角色 '+profile.name+'，目标 Rank '+event.targetRank+'／'+rankPolicy(profile).rankCount,
         '同一人的别名／简称：'+((profile.aliases || []).join('、') || '未设置'),
-        '场景：'+p.scene,'当前事项：'+p.conflict,
+        '计划中的场景（实际现场以最新真实对话为准）：'+p.scene,'当前事项：'+p.conflict,
+        sceneContinuityRule,
         '不得推进故事导演主线、间章或普通支线。不要暴露幕后提示、未来阶段或未揭示的秘密。',
         '绝不代写用户台词、心理、行动或同意。角色与环境可以主动行动，把选择留给用户。',
         '每轮先核对本事件是否已因实际剧情不可逆地失败，或用户明确放弃。若有本轮正文依据，任何阶段都可按固定失败契约报告 failed:true；不再强行补演原定提问、等关系确认或等待不可能的成功。仅绕路、未回应、尚无成长或仍在进行时保持正常等待。'];

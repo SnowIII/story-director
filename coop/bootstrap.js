@@ -33,9 +33,18 @@ export function createCoopSystem(hooks={}) {
         if(type==='first_message') return;
         await ready();await runtime.afterMessage(index);
     });
-    for(const name of [types.MESSAGE_EDITED,types.MESSAGE_SWIPED,types.MESSAGE_SWIPE_DELETED,types.MESSAGE_DELETED].filter(Boolean)) {
+    for(const name of [types.MESSAGE_EDITED,types.MESSAGE_SWIPED,types.MESSAGE_SWIPE_DELETED].filter(Boolean)) {
         on(name,async()=>{await ready();runtime.store.reconcile();});
     }
+    on(types.MESSAGE_DELETED || 'message_deleted',async()=>{
+        const scope=host.scope();
+        // Capture this notification's deletions before a reload can replace the
+        // message array while ready() waits for the current chat to finish loading.
+        const pruning=runtime.store.scope===scope?runtime.store.pruneEvents():null;
+        await ready();
+        if(scope!==host.scope() || scope!==runtime.store.scope) return;
+        runtime.store.reconcile();await (pruning || runtime.store.pruneEvents());
+    });
     on(types.GENERATION_ENDED || 'generation_ended',async()=>{
         runtime.store.excluded.clear();
         if(runtime.store.document) runtime.store.reconcile();

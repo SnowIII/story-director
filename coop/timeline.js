@@ -40,7 +40,11 @@ export function deletedEventIds(document,sources) {
         index>=cut.index && op.data.plan.targetRank>=cut.rank)).map(({op})=>op.data.eventId));
 }
 export function pruneDeletedEvents(document,sources) {
-    const removed=deletedEventIds(document,sources);
+    return pruneEventIds(document,deletedEventIds(document,sources));
+}
+/** Only remove events captured by an explicit deletion notification. */
+export function pruneEventIds(document,eventIds) {
+    const removed=new Set(document.journal.filter(op=>op.kind==='plan' && eventIds.has(op.data?.eventId)).map(op=>op.data.eventId));
     if(!removed.size) return [];
     document.journal=document.journal.filter(op=>!removed.has(op.data?.eventId) &&
         !(op.affinityHistory || []).some(eventId=>removed.has(eventId)));
