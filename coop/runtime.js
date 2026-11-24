@@ -44,7 +44,8 @@ export class CoopRuntime {
     changed() {
         if(this.job && [this.job.createdAt?.id,this.job.sourceId].filter(Boolean)
             .some(id=>!this.host.messages().some(message=>message.sd_coop_id===id))) this.abort();
-        if(this.lease?.scope===this.store.scope && this.store.scope===this.host.scope() && !this.store.readonly && !this.disposed) void this.store.pruneEvents();
+        // A redraw or reload can briefly expose an incomplete chat. Only the
+        // host's explicit deletion notification may permanently prune archives.
         const scene=this.occupies();
         if(scene!==this.scene) {this.scene=scene;this.host.sceneChanged?.(scene);}
         this.host.syncPrompts?.();
@@ -252,6 +253,7 @@ export class CoopRuntime {
             const refs=last?references(last):[];
             await this.store.operation(existing?'replan':'plan',characterId,
                 {eventId:existing?.id || 'event-'+uuid(),gateId:gate,plan:parsed,historySignature:historySignature(fresh),
+                    ...(existing?{scenePolicy:'current-v1'}:{}),
                     ...(!existing && createdAt?{createdAt}:{}),...(retry?{retryOf:retry.eventId}:{}),...(automatic && !retry?{automatic:true}:{})},refs);
         } catch(error) {
             if(automatic && controller.signal.aborted) error=Object.assign(new Error('自动设计已取消'),{code:'CANCELLED'});

@@ -187,7 +187,12 @@ export function replanEvent(state,input,{replay=false}={}) {
     if(!e.paused || p.mode!=='coop') fail('NOT_PAUSED');
     if(!replay && unfinishedEvent(state)?.id!==e.id) fail('SCENE_BUSY','请先完成队列中较早的 Rank 事件');
     const plan=validatePlan(input.plan,p);
-    if(e.progress.length) for(const key of ['title','scene','conflict','goal','hook','rounds']) plan[key]=e.plan[key];
+    if(e.progress.length) {
+        for(const key of ['title','conflict','goal','hook','rounds']) plan[key]=e.plan[key];
+        // Old journal entries discarded their proposed scene. Keep that replay
+        // behavior; new replans may move the remaining acts without rewriting history.
+        if(input.scenePolicy!=='current-v1') plan.scene=e.plan.scene;
+    }
     if(e.questionSource) for(const key of ['dilemma','question']) plan[key]=e.plan[key];
     e.plan=plan;e.historySignature=input.historySignature || historySignature(p);e.version++;p.revision++;
 }

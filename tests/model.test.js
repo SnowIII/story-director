@@ -241,8 +241,9 @@ for(const phase of ['hook','dilemma','waiting_user','waiting_route','resolution'
     assert.equal(e.phase,phase);pauseEvent(s,'a',e.id);
     const before=clone(e),replacement={...plan(s.profiles.a),rounds:2};
     for(const key of ['title','scene','conflict','goal','hook','dilemma','question','resolution']) replacement[key]='重设：'+replacement[key];
-    replanEvent(s,{characterId:'a',eventId:e.id,plan:replacement});
-    for(const key of ['title','scene','conflict','goal','hook','rounds']) assert.equal(e.plan[key],phase==='hook'?replacement[key]:before.plan[key]);
+    replanEvent(s,{characterId:'a',eventId:e.id,plan:replacement,scenePolicy:'current-v1'});
+    assert.equal(e.plan.scene,replacement.scene);
+    for(const key of ['title','conflict','goal','hook','rounds']) assert.equal(e.plan[key],phase==='hook'?replacement[key]:before.plan[key]);
     for(const key of ['dilemma','question']) assert.equal(e.plan[key],e.questionSource?before.plan[key]:replacement[key]);
     assert.equal(e.plan.resolution,replacement.resolution);
     for(const key of ['phase','progress','playedUsers','questionSource','initialAnswerSource','answerSource','route','routeSource']) assert.deepEqual(e[key],before[key]);
